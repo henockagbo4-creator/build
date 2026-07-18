@@ -29,6 +29,7 @@ const R2_SECRET_ACCESS_KEY = "cfat_SCjE5LwZvyUixBCgwq0DAFbH8J50Qm29GLwlcLb98c4eb
 const BUCKET = "apk-builder";
 
 const r2 = new S3Client({
+  region: "us-east-1",
   region: "auto",
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: {
