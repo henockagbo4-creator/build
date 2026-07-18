@@ -1,0 +1,87 @@
+name: Build APK Debug
+
+# Déclenché manuellement par ton backend via l'API GitHub
+# (workflow_dispatch = "appel à distance" avec des paramètres)
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "URL signée (presigned) du zip à télécharger depuis R2"
+        required: true
+        type: string
+      app_name:
+        description: "Nom de l'application"
+        required: true
+        type: string
+      package_id:
+        description: "Package ID Android (ex: com.exemple.monapp)"
+        required: true
+        type: string
+      upload_url:
+        description: "URL signée (presigned PUT) où envoyer l'APK final sur R2"
+        required: true
+        type: string
+      build_id:
+        description: "Identifiant unique du build (pour le nom de fichier / suivi)"
+        required: true
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20 # sécurité anti-build infini
+    steps:
+      - name: Checkout du repo (contient les scripts)
+        uses: actions/checkout@v4
+
+      - name: Installer Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Installer Java (requis par Gradle/Android)
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Installer Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Télécharger le zip utilisateur depuis R2
+        run: |
+          curl -L "${{ inputs.zip_url }}" -o project.zip
+          mkdir -p workdir
+          unzip -q project.zip -d workdir
+
+      - name: Préparer le projet Capacitor
+        run: |
+          bash scripts/prepare-capacitor.sh \
+            "workdir" \
+            "${{ inputs.app_name }}" \
+            "${{ inputs.package_id }}"
+
+      - name: Build APK debug
+        working-directory: capacitor-project/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleDebug --no-daemon
+
+      - name: Localiser l'APK générée
+        id: locate
+        run: |
+          APK_PATH=$(find capacitor-project/android -name "*-debug.apk" | head -n 1)
+          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
+
+      - name: Uploader l'APK sur R2 (stockage temporaire)
+        run: |
+          curl -X PUT \
+            -H "Content-Type: application/vnd.android.package-archive" \
+            --upload-file "${{ steps.locate.outputs.apk_path }}" \
+            "${{ inputs.upload_url }}"
+
+      - name: Nettoyage (rien ne doit rester sur le runner de toute façon)
+        if: always()
+        run: |
+          rm -rf workdir project.zip capacitor-project
+          echo "Runner détruit automatiquement par GitHub après ce job — pas de trace persistante."
