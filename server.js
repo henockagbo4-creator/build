@@ -22,7 +22,7 @@ const R2_ACCESS_KEY_ID = "1ce3e2b243260468d73fc4309b15dc75";
 const R2_SECRET_ACCESS_KEY = "cfat_VKbXDuJHBLQpusGBWA7IaF5Udw1fhX62ATaBBXL75fb9b603";
 const BUCKET = "apk-builder";
 
-const R2_ENDPOINT = `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`;
+const R2_ENDPOINT = `https://${R2_ACCOUNT_ID}.r2.dev`;
 
 // ============ CONFIG GITHUB ============
 const GITHUB_OWNER = "henockagbo4-creator";
@@ -54,7 +54,7 @@ async function r2PutObject(key, body, contentType) {
   const payloadHash = createHash('sha256').update(body).digest('hex');
   
   const headers = {
-    'host': `${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    'host': `${R2_ACCOUNT_ID}.r2.dev`,
     'x-amz-content-sha256': payloadHash,
     'x-amz-date': amzDate,
     'content-type': contentType,
@@ -85,7 +85,7 @@ async function r2PutObject(key, body, contentType) {
   
   const authHeader = `AWS4-HMAC-SHA256 Credential=${R2_ACCESS_KEY_ID}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
   
-  const response = await fetch(`${R2_ENDPOINT}/${BUCKET}/${key}`, {
+  const response = await fetch(`${R2_ENDPOINT}/${BUCKET}/${KEY})`, {
     method: 'PUT',
     headers: {
       ...headers,
