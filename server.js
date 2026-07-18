@@ -1,11 +1,5 @@
 /**
  * Backend Node.js/Express — build APK via GitHub Actions + Cloudflare R2.
- *
- * Flow : upload zip -> R2 -> déclenche GitHub Actions -> APK revient sur R2
- *        -> utilisateur télécharge -> suppression automatique.
- *
- * Toutes les valeurs sensibles viennent de process.env (fichier .env local,
- * jamais commité). Voir .env.example pour la liste des variables requises.
  */
 
 import "dotenv/config";
@@ -23,32 +17,68 @@ import { randomUUID } from "crypto";
 
 const app = express();
 app.use(cors());
+app.use(express.json());
+
 const upload = multer({ storage: multer.memoryStorage() });
 
-// --- Config R2 (compatible API S3), lue depuis .env ---
-const r2 = new S3Client({
-  region: "auto",
-  endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-  credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: process.env.R2_SECRET_ACCESS_KEY,
-  },
-});
-
+// ============ CONFIG R2 (Cloudflare) ============
+const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
+const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
+const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const BUCKET = process.env.R2_BUCKET_NAME;
 
-// --- Config GitHub Actions, lue depuis .env ---
+const r2 = new S3Client({
+  region: "auto",
+  endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  credentials: {
+    accessKeyId: R2_ACCESS_KEY_ID,
+    secretAccessKey: R2_SECRET_ACCESS_KEY,
+  },
+  // CRITICAL pour R2 :
+  forcePathStyle: true,
+  // Pour éviter les erreurs de checksum avec R2 :
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
+});
+
+// ============ CONFIG GITHUB ============
 const GITHUB_OWNER = process.env.GITHUB_OWNER;
 const GITHUB_REPO = process.env.GITHUB_REPO;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL;
 
-// Suivi en mémoire des builds en cours (simple pour démarrer ; à remplacer
-// par une vraie base de données si tu ajoutes les comptes utilisateurs).
-// state: "building" | "success" | "error"
+// ============ SUIVI DES BUILDS ============
 const builds = new Map();
 
-app.use(express.json());
+// ============ ROUTES ============
 
+// Health check
+app.get("/api/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
+// Test R2 (temporaire, pour déboguer)
+app.get("/api/test-r2", async (req, res) => {
+  try {
+    const testKey = `test-${Date.now()}.txt`;
+    await r2.send(
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: testKey,
+        Body: "Hello from VoltBuilder",
+        ContentType: "text/plain",
+      })
+    );
+    // Cleanup
+    await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: testKey }));
+    res.json({ ok: true, message: "R2 read/write OK" });
+  } catch (err) {
+    console.error("R2 test failed:", err);
+    res.status(500).json({ ok: false, error: err.message, code: err.name });
+  }
+});
+
+// Lancer un build
 app.post("/api/build", upload.single("zip"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: "Aucun fichier reçu." });
@@ -58,7 +88,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
   const zipKey = `${buildId}/source.zip`;
   const apkKey = `${buildId}/app-debug.apk`;
 
-  builds.set(buildId, { state: "building" });
+  builds.set(buildId, { state: "building", createdAt: Date.now() });
 
   try {
     // 1. Upload du zip sur R2
@@ -71,21 +101,26 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       })
     );
 
-    // 2. URL signée temporaire pour que GitHub Actions télécharge le zip
+    // 2. URL signée pour télécharger le zip (GitHub Actions)
     const zipDownloadUrl = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: BUCKET, Key: zipKey }),
       { expiresIn: 3600 }
     );
 
-    // 3. URL signée temporaire pour que GitHub Actions upload l'APK
+    // 3. URL signée pour uploader l'APK (GitHub Actions)
+    // IMPORTANT: PutObjectCommand pour upload pré-signé
     const apkUploadUrl = await getSignedUrl(
       r2,
-      new PutObjectCommand({ Bucket: BUCKET, Key: apkKey }),
+      new PutObjectCommand({
+        Bucket: BUCKET,
+        Key: apkKey,
+        ContentType: "application/vnd.android.package-archive",
+      }),
       { expiresIn: 3600 }
     );
 
-    // 4. Déclenche le workflow GitHub Actions
+    // 4. Déclenche GitHub Actions
     const dispatchRes = await fetch(
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/build-apk.yml/dispatches`,
       {
@@ -93,6 +128,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
         headers: {
           Authorization: `Bearer ${GITHUB_TOKEN}`,
           Accept: "application/vnd.github+json",
+          "X-GitHub-Api-Version": "2022-11-28",
         },
         body: JSON.stringify({
           ref: "main",
@@ -102,49 +138,64 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
             package_id: req.body.packageId || "com.exemple.monapp",
             upload_url: apkUploadUrl,
             build_id: buildId,
-            callback_url: `${process.env.PUBLIC_BACKEND_URL}/api/build/${buildId}/callback`,
+            callback_url: `${PUBLIC_BACKEND_URL}/api/build/${buildId}/callback`,
           },
         }),
       }
     );
 
     if (!dispatchRes.ok) {
-      throw new Error(`GitHub a refusé le déclenchement (${dispatchRes.status})`);
+      const ghError = await dispatchRes.text();
+      throw new Error(`GitHub refused: ${dispatchRes.status} — ${ghError}`);
     }
 
     res.json({ buildId, message: "Build lancé." });
 
-    // 5. Nettoyage de sécurité après 1h, que le build ait réussi ou non
+    // 5. Nettoyage auto après 2h
     setTimeout(async () => {
-      await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: zipKey })).catch(() => {});
-      await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: apkKey })).catch(() => {});
+      try {
+        await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: zipKey }));
+      } catch (e) {
+        // ignore
+      }
+      try {
+        await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: apkKey }));
+      } catch (e) {
+        // ignore
+      }
       builds.delete(buildId);
-    }, 60 * 60 * 1000);
+    }, 2 * 60 * 60 * 1000);
+
   } catch (err) {
+    console.error("Build error:", err);
     builds.set(buildId, { state: "error", message: err.message });
     res.status(500).json({ message: err.message });
   }
 });
 
-// Le workflow GitHub Actions appelle cet endpoint à la fin du build
-// pour indiquer le résultat (succès ou échec). À ajouter comme dernière
-// étape dans build-apk.yml avec un curl POST vers cette route.
+// Callback du workflow GitHub
 app.post("/api/build/:id/callback", (req, res) => {
   const { state, message } = req.body;
-  builds.set(req.params.id, { state, message });
+  const build = builds.get(req.params.id);
+  if (build) {
+    builds.set(req.params.id, { ...build, state, message });
+  }
   res.sendStatus(200);
 });
 
-// Le frontend interroge cet endpoint pour savoir où en est le build
+// Statut du build
 app.get("/api/build/:id/status", (req, res) => {
   const build = builds.get(req.params.id);
   if (!build) {
-    return res.status(404).json({ state: "error", message: "Build introuvable ou expiré." });
+    return res.status(404).json({
+      state: "error",
+      message: "Build introuvable ou expiré.",
+    });
   }
   res.json(build);
 });
 
-// Génère un lien de téléchargement temporaire pour l'APK, puis la supprime
+// Télécharger l'APK
 app.get("/api/build/:id/download", async (req, res) => {
   const apkKey = `${req.params.id}/app-debug.apk`;
 
@@ -154,10 +205,17 @@ app.get("/api/build/:id/download", async (req, res) => {
       new GetObjectCommand({ Bucket: BUCKET, Key: apkKey }),
       { expiresIn: 300 }
     );
+
+    // Redirection vers l'URL signée R2
     res.redirect(url);
 
+    // Suppression différée de l'APK (5 min après dl)
     setTimeout(async () => {
-      await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: apkKey })).catch(() => {});
+      try {
+        await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: apkKey }));
+      } catch (e) {
+        // ignore
+      }
       builds.delete(req.params.id);
     }, 5 * 60 * 1000);
   } catch (err) {
@@ -165,5 +223,10 @@ app.get("/api/build/:id/download", async (req, res) => {
   }
 });
 
+// ============ DÉMARRAGE ============
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, "0.0.0.0", () => console.log(`Backend prêt sur :${PORT}`));
+app.listen(PORT, "0.0.0.0", () => {
+  console.log(`✅ Backend prêt sur le port ${PORT}`);
+  console.log(`📦 Bucket R2: ${BUCKET || "NON CONFIGURÉ"}`);
+  console.log(`🔧 GitHub: ${GITHUB_OWNER}/${GITHUB_REPO || "NON CONFIGURÉ"}`);
+});
