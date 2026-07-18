@@ -34,7 +34,11 @@ jobs:
     steps:
       - name: Download source zip
         run: |
-          curl -L "${{ inputs.zip_url }}" -o source.zip
+          curl -X GET "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/source.zip" \
+            -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
+            -o source.zip
+          ls -la source.zip
+          mkdir -p src
           unzip source.zip -d src/
 
       - name: Setup Node
