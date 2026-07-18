@@ -24,8 +24,8 @@ const upload = multer({ storage: multer.memoryStorage() });
 
 // ============ CONFIG R2 (Cloudflare) — CLÉS EN DUR ============
 const R2_ACCOUNT_ID = "6d38332d43a0646b19db772a01d85515";
-const R2_ACCESS_KEY_ID = "NOUVELLE_ACCESS_KEY_ICI";           // ← remplace après révocation
-const R2_SECRET_ACCESS_KEY = "NOUVELLE_SECRET_KEY_ICI";       // ← remplace après révocation
+const R2_ACCESS_KEY_ID = "1ce3e2b243260468d73fc4309b15dc75";           // ← remplace après révocation
+const R2_SECRET_ACCESS_KEY = "cfat_VKbXDuJHBLQpusGBWA7IaF5Udw1fhX62ATaBBXL75fb9b603";       // ← remplace après révocation
 const BUCKET = "apk-builder";
 
 // FIX : plus de region dupliquée
