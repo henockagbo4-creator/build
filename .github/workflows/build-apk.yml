@@ -77,12 +77,14 @@ jobs:
             -storepass "${{ github.event.inputs.keystore_password }}" \
             -keypass "${{ github.event.inputs.keystore_password }}" \
             -dname "CN=PhilTech, O=PhilTech, C=CI"
+          echo "Keystore generated at: $(pwd)/my-release-key.keystore"
           ls -la my-release-key.keystore
 
       - name: Download user keystore
         if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != ''
         run: |
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
+          echo "Keystore downloaded"
           ls -la my-release-key.keystore
 
       - name: Build APK
@@ -90,13 +92,20 @@ jobs:
           cd src
           cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
           cd app
+          
+          # Copier le contenu du zip dans www/
           cp -r ../www/* www/ 2>/dev/null || cp -r ../* www/ 2>/dev/null || true
+          
           cordova platform add android
           
-          KEYSTORE_PATH="../../../my-release-key.keystore"
+          # Le keystore est à la racine du workspace
+          # Depuis src/app/ : ../../ = racine du workspace
+          KEYSTORE_PATH="../../my-release-key.keystore"
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
             echo "Building RELEASE with signing"
+            echo "Using keystore: $KEYSTORE_PATH"
+            ls -la "$KEYSTORE_PATH"
             cordova build android --release -- \
               --keystore="$KEYSTORE_PATH" \
               --storePassword="${{ github.event.inputs.keystore_password }}" \
@@ -106,6 +115,9 @@ jobs:
             echo "Building DEBUG"
             cordova build android --debug
           fi
+          
+          echo "=== Listing APK outputs ==="
+          find platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
 
       - name: Upload keystore to Supabase
         if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate'
@@ -117,28 +129,36 @@ jobs:
 
       - name: Upload APK to Supabase
         run: |
+          echo "=== Searching for APK ==="
+          find src/app/platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
+          
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             if [ -f "${APK_DIR}/release/app-release.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release.apk"
+              echo "Found signed release APK"
             elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
+              echo "Found unsigned release APK"
             else
-              echo "No release APK found"
+              echo "ERROR: No release APK found"
               ls -la ${APK_DIR}/release/ 2>/dev/null || true
               exit 1
             fi
           else
             if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
               APK_PATH="${APK_DIR}/debug/app-debug.apk"
+              echo "Found debug APK"
             else
-              echo "No debug APK found"
+              echo "ERROR: No debug APK found"
               ls -la ${APK_DIR}/debug/ 2>/dev/null || true
               exit 1
             fi
           fi
           
+          echo "Uploading: $APK_PATH"
+          ls -la "$APK_PATH"
           curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/app.apk" \
             -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
@@ -167,6 +187,8 @@ jobs:
               STATE="error"
             fi
           fi
+          
+          echo "Build state: $STATE"
           
           for i in 1 2 3 4 5; do
             curl -X POST "${{ github.event.inputs.callback_url }}" \
