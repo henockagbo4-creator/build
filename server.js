@@ -114,7 +114,7 @@ async function r2GetObject(key) {
   const payloadHash = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'; // empty string hash
   
   const headers = {
-    'host': `${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    'host': `${R2_ACCOUNT_ID}.r2.dev`,
     'x-amz-content-sha256': payloadHash,
     'x-amz-date': amzDate,
   };
