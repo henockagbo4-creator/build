@@ -8,6 +8,9 @@ import cors from "cors";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
+import { execSync } from "child_process";
+import fs from "fs";
+import path from "path";
 
 const app = express();
 app.use(cors());
@@ -59,27 +62,98 @@ app.get("/api/test-storage", async (req, res) => {
   }
 });
 
-app.post("/api/build", upload.single("zip"), async (req, res) => {
-  if (!req.file) {
+app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), async (req, res) => {
+  if (!req.files || !req.files.zip) {
     return res.status(400).json({ message: "Aucun fichier recu." });
   }
 
   const buildId = randomUUID();
   const zipKey = buildId + "/source.zip";
+  const apkKey = buildId + "/app-debug.apk";
 
-  builds.set(buildId, { state: "building", createdAt: Date.now() });
+  const buildType = req.body.buildType || "debug";
+  const keystoreMode = req.body.keystoreMode || "upload";
+  
+  let keystoreUrl = null;
+  let keystoreName = null;
+  let keystorePassword = null;
+  let keystoreAlias = null;
+
+  builds.set(buildId, { 
+    state: "building", 
+    createdAt: Date.now(),
+    buildType,
+    keystoreGenerated: false
+  });
 
   try {
     // 1. Upload du zip sur Supabase
     const { error: upError } = await supabase.storage
       .from(BUCKET)
-      .upload(zipKey, req.file.buffer, {
+      .upload(zipKey, req.files.zip[0].buffer, {
         contentType: "application/zip",
       });
     
     if (upError) throw upError;
 
-    // 2. URL signee pour telecharger le zip (1h)
+    // 2. Générer keystore si mode release + generate
+    if (buildType === "release" && keystoreMode === "generate") {
+      const generatedKeystoreName = `keystore-${buildId}.keystore`;
+      const keystorePath = `/tmp/${generatedKeystoreName}`;
+      const password = "PhilTech" + Math.random().toString(36).substring(2, 8);
+      const alias = "release";
+      
+      try {
+        execSync(
+          `keytool -genkey -v -keystore ${keystorePath} -alias ${alias} -keyalg RSA -keysize 2048 -validity 10000 -storepass "${password}" -keypass "${password}" -dname "CN=PhilTech, O=PhilTech, C=CI"`
+        );
+        
+        const keystoreBuffer = fs.readFileSync(keystorePath);
+        
+        const { error: ksError } = await supabase.storage
+          .from(BUCKET)
+          .upload(`${buildId}/${generatedKeystoreName}`, keystoreBuffer, {
+            contentType: "application/octet-stream",
+          });
+        
+        if (ksError) throw ksError;
+        
+        fs.unlinkSync(keystorePath);
+        
+        keystoreUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${buildId}/${generatedKeystoreName}`;
+        keystoreName = generatedKeystoreName;
+        keystorePassword = password;
+        keystoreAlias = alias;
+        
+        builds.set(buildId, { 
+          ...builds.get(buildId), 
+          keystoreGenerated: true,
+          keystoreUrl,
+          keystoreName,
+          keystorePassword,
+          keystoreAlias
+        });
+      } catch (err) {
+        console.error("Keystore generation failed:", err);
+      }
+    }
+
+    // 3. Upload keystore utilisateur si fourni
+    let userKeystoreUrl = null;
+    if (buildType === "release" && keystoreMode === "upload" && req.files.keystore) {
+      const userKeystoreName = `user-keystore-${buildId}.keystore`;
+      const { error: ksError } = await supabase.storage
+        .from(BUCKET)
+        .upload(`${buildId}/${userKeystoreName}`, req.files.keystore[0].buffer, {
+          contentType: "application/octet-stream",
+        });
+      
+      if (!ksError) {
+        userKeystoreUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${buildId}/${userKeystoreName}`;
+      }
+    }
+
+    // 4. URL signee pour telecharger le zip (1h)
     const { data: zipUrlData, error: zipUrlError } = await supabase.storage
       .from(BUCKET)
       .createSignedUrl(zipKey, 3600);
@@ -87,7 +161,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     if (zipUrlError) throw zipUrlError;
     const zipDownloadUrl = zipUrlData.signedUrl;
 
-    // 3. Declenche GitHub Actions
+    // 5. Declenche GitHub Actions
     const dispatchRes = await fetch(
       "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/actions/workflows/build-apk.yml/dispatches",
       {
@@ -103,6 +177,9 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
             app_name: req.body.appName || "MonApp",
             package_id: req.body.packageId || "com.exemple.monapp",
             build_id: buildId,
+            build_type: buildType,
+            keystore_mode: keystoreMode,
+            keystore_url: userKeystoreUrl || keystoreUrl || "",
             supabase_url: SUPABASE_URL,
             supabase_key: SUPABASE_KEY,
             bucket: BUCKET,
@@ -121,11 +198,12 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     // Nettoyage auto apres 2h
     setTimeout(async () => {
-      await supabase.storage.from(BUCKET).remove([zipKey]).catch(() => {});
+      await supabase.storage.from(BUCKET).remove([zipKey, apkKey]).catch(() => {});
       builds.delete(buildId);
     }, 2 * 60 * 60 * 1000);
 
   } catch (err) {
+    console.error("Build error:", err);
     builds.set(buildId, { state: "error", message: err.message });
     res.status(500).json({ message: err.message });
   }
@@ -136,7 +214,7 @@ app.post("/api/build/:id/callback", (req, res) => {
   const message = req.body.message;
   const build = builds.get(req.params.id);
   if (build) {
-    builds.set(req.params.id, { state: state, message: message });
+    builds.set(req.params.id, { ...build, state, message });
   }
   res.sendStatus(200);
 });
@@ -146,7 +224,18 @@ app.get("/api/build/:id/status", (req, res) => {
   if (!build) {
     return res.status(404).json({ state: "error", message: "Build introuvable." });
   }
-  res.json(build);
+  
+  const response = { ...build };
+  
+  // Si keystore généré, inclure les infos
+  if (build.keystoreGenerated) {
+    response.keystoreUrl = build.keystoreUrl;
+    response.keystoreName = build.keystoreName;
+    response.keystorePassword = build.keystorePassword;
+    response.keystoreAlias = build.keystoreAlias;
+  }
+  
+  res.json(response);
 });
 
 app.get("/api/build/:id/download", async (req, res) => {
