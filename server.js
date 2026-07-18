@@ -8,7 +8,6 @@ import cors from "cors";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
-import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 
@@ -76,17 +75,15 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
   
   // Mot de passe keystore : celui de l'utilisateur ou défaut
   const userKeystorePassword = req.body.keystorePassword?.trim() || "PhilTech2026";
-  
-  let keystoreUrl = null;
-  let keystoreName = null;
-  let keystorePassword = userKeystorePassword;
-  let keystoreAlias = "release";
+  const keystoreAlias = "release";
 
   builds.set(buildId, { 
     state: "building", 
     createdAt: Date.now(),
     buildType,
-    keystoreGenerated: false
+    keystoreGenerated: false,
+    keystorePassword: userKeystorePassword,
+    keystoreAlias: keystoreAlias
   });
 
   try {
@@ -106,48 +103,7 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
     
     if (upError) throw upError;
 
-    // 2. Générer keystore si mode release + generate
-    if (buildType === "release" && keystoreMode === "generate") {
-      const generatedKeystoreName = `keystore-${buildId}.keystore`;
-      const keystorePath = `/tmp/${generatedKeystoreName}`;
-      const alias = "release";
-      
-      try {
-        execSync(
-          `keytool -genkey -v -keystore ${keystorePath} -alias ${alias} -keyalg RSA -keysize 2048 -validity 10000 -storepass "${userKeystorePassword}" -keypass "${userKeystorePassword}" -dname "CN=PhilTech, O=PhilTech, C=CI"`
-        );
-        
-        const keystoreBuffer = fs.readFileSync(keystorePath);
-        
-        const { error: ksError } = await supabase.storage
-          .from(BUCKET)
-          .upload(`${buildId}/${generatedKeystoreName}`, keystoreBuffer, {
-            contentType: "application/octet-stream",
-          });
-        
-        if (ksError) throw ksError;
-        
-        fs.unlinkSync(keystorePath);
-        
-        keystoreUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${buildId}/${generatedKeystoreName}`;
-        keystoreName = generatedKeystoreName;
-        keystoreAlias = alias;
-        
-        builds.set(buildId, { 
-          ...builds.get(buildId), 
-          keystoreGenerated: true,
-          keystoreUrl,
-          keystoreName,
-          keystorePassword,
-          keystoreAlias
-        });
-      } catch (err) {
-        console.error("Keystore generation failed:", err);
-        throw new Error("Échec de la génération du keystore: " + err.message);
-      }
-    }
-
-    // 3. Upload keystore utilisateur si fourni
+    // 2. Upload keystore utilisateur si fourni (mode upload)
     let userKeystoreUrl = null;
     if (buildType === "release" && keystoreMode === "upload" && req.files.keystore) {
       const userKeystoreName = `user-keystore-${buildId}.keystore`;
@@ -162,7 +118,7 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
       }
     }
 
-    // 4. URL signee pour telecharger le zip (1h)
+    // 3. URL signee pour telecharger le zip (1h)
     const { data: zipUrlData, error: zipUrlError } = await supabase.storage
       .from(BUCKET)
       .createSignedUrl(zipKey, 3600);
@@ -170,7 +126,7 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
     if (zipUrlError) throw zipUrlError;
     const zipDownloadUrl = zipUrlData.signedUrl;
 
-    // 5. Déclenche GitHub Actions
+    // 4. Déclenche GitHub Actions
     const dispatchRes = await fetch(
       "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/actions/workflows/build-apk.yml/dispatches",
       {
@@ -188,8 +144,8 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
             build_id: buildId,
             build_type: buildType,
             keystore_mode: keystoreMode,
-            keystore_url: userKeystoreUrl || keystoreUrl || "",
-            keystore_password: keystorePassword,
+            keystore_url: userKeystoreUrl || "",
+            keystore_password: userKeystorePassword,
             keystore_alias: keystoreAlias,
             supabase_url: SUPABASE_URL,
             supabase_key: SUPABASE_KEY,
@@ -210,9 +166,8 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
     // Nettoyage auto apres 2h
     setTimeout(async () => {
       const keysToRemove = [zipKey, apkKey];
-      const buildData = builds.get(buildId);
-      if (buildData?.keystoreGenerated && buildData.keystoreName) {
-        keysToRemove.push(`${buildId}/${buildData.keystoreName}`);
+      if (keystoreMode === 'generate') {
+        keysToRemove.push(`${buildId}/keystore-${buildId}.keystore`);
       }
       await supabase.storage.from(BUCKET).remove(keysToRemove).catch(() => {});
       builds.delete(buildId);
@@ -243,10 +198,11 @@ app.get("/api/build/:id/status", (req, res) => {
   
   const response = { ...build };
   
-  // Si keystore généré, inclure les infos
-  if (build.keystoreGenerated) {
-    response.keystoreUrl = build.keystoreUrl;
-    response.keystoreName = build.keystoreName;
+  // Si keystore généré, inclure les infos pour le frontend
+  if (build.buildType === 'release' && build.keystoreMode === 'generate') {
+    response.keystoreGenerated = true;
+    response.keystoreUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${req.params.id}/keystore-${req.params.id}.keystore`;
+    response.keystoreName = `keystore-${req.params.id}.keystore`;
     response.keystorePassword = build.keystorePassword;
     response.keystoreAlias = build.keystoreAlias;
   }
