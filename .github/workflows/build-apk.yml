@@ -1,4 +1,4 @@
- name: Build APK
+name: Build APK
 
 on:
   workflow_dispatch:
@@ -49,7 +49,7 @@ jobs:
     steps:
       - name: Download source zip
         run: |
-          curl -L -o source.zip "${{ inputs.zip_url }}"
+          curl -L -o source.zip "${{ github.event.inputs.zip_url }}"
           mkdir -p src
           unzip source.zip -d src/
 
@@ -67,65 +67,51 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Download or generate keystore
+      - name: Generate keystore
+        if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate'
         run: |
-          if [ "${{ inputs.build_type }}" == "release" ]; then
-            if [ "${{ inputs.keystore_mode }}" == "generate" ]; then
-              echo "Generating new keystore..."
-              keytool -genkey -v \
-                -keystore my-release-key.keystore \
-                -alias "${{ inputs.keystore_alias }}" \
-                -keyalg RSA -keysize 2048 -validity 10000 \
-                -storepass "${{ inputs.keystore_password }}" \
-                -keypass "${{ inputs.keystore_password }}" \
-                -dname "CN=PhilTech, O=PhilTech, C=CI"
-              echo "Keystore generated at: $(pwd)/my-release-key.keystore"
-              ls -la my-release-key.keystore
-            elif [ "${{ inputs.keystore_url }}" != "" ]; then
-              echo "Downloading user keystore..."
-              curl -L -o my-release-key.keystore "${{ inputs.keystore_url }}"
-              echo "Keystore downloaded"
-              ls -la my-release-key.keystore
-            fi
-          fi
+          keytool -genkey -v \
+            -keystore my-release-key.keystore \
+            -alias "${{ github.event.inputs.keystore_alias }}" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass "${{ github.event.inputs.keystore_password }}" \
+            -keypass "${{ github.event.inputs.keystore_password }}" \
+            -dname "CN=PhilTech, O=PhilTech, C=CI"
+          ls -la my-release-key.keystore
+
+      - name: Download user keystore
+        if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != ''
+        run: |
+          curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
+          ls -la my-release-key.keystore
 
       - name: Build APK
         run: |
           cd src
-          cordova create app ${{ inputs.package_id }} "${{ inputs.app_name }}"
+          cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
           cd app
-          
-          # Copier le contenu du zip dans www/
           cp -r ../www/* www/ 2>/dev/null || cp -r ../* www/ 2>/dev/null || true
-          
           cordova platform add android
           
-          # Le keystore est à la racine du workspace, donc ../../../ depuis src/app/
           KEYSTORE_PATH="../../../my-release-key.keystore"
           
-          if [ "${{ inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
             echo "Building RELEASE with signing"
-            echo "Using keystore: $KEYSTORE_PATH"
             cordova build android --release -- \
               --keystore="$KEYSTORE_PATH" \
-              --storePassword="${{ inputs.keystore_password }}" \
-              --alias="${{ inputs.keystore_alias }}" \
-              --password="${{ inputs.keystore_password }}"
+              --storePassword="${{ github.event.inputs.keystore_password }}" \
+              --alias="${{ github.event.inputs.keystore_alias }}" \
+              --password="${{ github.event.inputs.keystore_password }}"
           else
             echo "Building DEBUG"
             cordova build android --debug
           fi
-          
-          echo "=== Listing APK outputs ==="
-          ls -la platforms/android/app/build/outputs/apk/ || true
-          ls -la platforms/android/app/build/outputs/apk/release/ 2>/dev/null || true
-          ls -la platforms/android/app/build/outputs/apk/debug/ 2>/dev/null || true
 
-      - name: Upload keystore to Supabase (if generated)
-        if: inputs.keystore_mode == 'generate' && inputs.build_type == 'release'
+      - name: Upload keystore to Supabase
+        if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate'
         run: |
-          curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/keystore-${{ inputs.build_id }}.keystore" \
-            -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
+          curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/keystore-${{ github.event.inputs.build_id }}.keystore" \
+            -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
             -H "Content-Type: application/octet-stream" \
             --data-binary @my-release-key.keystore
 
@@ -133,47 +119,42 @@ jobs:
         run: |
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
           
-          if [ "${{ inputs.build_type }}" == "release" ]; then
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             if [ -f "${APK_DIR}/release/app-release.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release.apk"
-              echo "Found signed release APK"
             elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
-              echo "Found unsigned release APK"
             else
-              echo "ERROR: No release APK found"
+              echo "No release APK found"
               ls -la ${APK_DIR}/release/ 2>/dev/null || true
               exit 1
             fi
           else
             if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
               APK_PATH="${APK_DIR}/debug/app-debug.apk"
-              echo "Found debug APK"
             else
-              echo "ERROR: No debug APK found"
+              echo "No debug APK found"
               ls -la ${APK_DIR}/debug/ 2>/dev/null || true
               exit 1
             fi
           fi
           
-          echo "Uploading: $APK_PATH"
-          ls -la "$APK_PATH"
-          curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app.apk" \
-            -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
+          curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/app.apk" \
+            -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
             --data-binary @"$APK_PATH"
 
       - name: Upload APK as GitHub Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ inputs.build_id }}
+          name: apk-${{ github.event.inputs.build_id }}
           path: src/app/platforms/android/app/build/outputs/apk/*/*.apk
           retention-days: 1
 
-      - name: Check build and notify backend
+      - name: Notify backend
         run: |
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
-          if [ "${{ inputs.build_type }}" == "release" ]; then
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             if [ -f "${APK_DIR}/release/app-release.apk" ] || [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
               STATE="success"
             else
@@ -187,10 +168,8 @@ jobs:
             fi
           fi
           
-          echo "Build state: $STATE"
-          
           for i in 1 2 3 4 5; do
-            curl -X POST "${{ inputs.callback_url }}" \
+            curl -X POST "${{ github.event.inputs.callback_url }}" \
               -H "Content-Type: application/json" \
               -d "{\"state\":\"$STATE\",\"message\":\"Build $STATE\"}" && break
             echo "Retry $i..."
