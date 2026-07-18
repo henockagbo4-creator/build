@@ -27,6 +27,7 @@ const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const BUCKET = process.env.R2_BUCKET_NAME;
 
+// FIX : Config R2 compatible signature
 const r2 = new S3Client({
   region: "auto",
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -34,9 +35,6 @@ const r2 = new S3Client({
     accessKeyId: R2_ACCESS_KEY_ID,
     secretAccessKey: R2_SECRET_ACCESS_KEY,
   },
-  forcePathStyle: true,
-  requestChecksumCalculation: "WHEN_REQUIRED",
-  responseChecksumValidation: "WHEN_REQUIRED",
 });
 
 // ============ CONFIG GITHUB ============
@@ -55,7 +53,7 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Test R2 (temporaire, pour deboguer)
+// Test R2
 app.get("/api/test-r2", async (req, res) => {
   try {
     const testKey = `test-${Date.now()}.txt`;
@@ -98,14 +96,14 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       })
     );
 
-    // 2. URL signee pour telecharger le zip (GitHub Actions)
+    // 2. URL signee pour telecharger le zip
     const zipDownloadUrl = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: BUCKET, Key: zipKey }),
       { expiresIn: 3600 }
     );
 
-    // 3. URL signee pour uploader l'APK (GitHub Actions)
+    // 3. URL signee pour uploader l'APK
     const apkUploadUrl = await getSignedUrl(
       r2,
       new PutObjectCommand({
@@ -147,7 +145,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     res.json({ buildId, message: "Build lance." });
 
-    // 5. Nettoyage auto apres 2h
+    // Nettoyage auto apres 2h
     setTimeout(async () => {
       try {
         await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: zipKey }));
