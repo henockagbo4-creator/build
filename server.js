@@ -66,11 +66,11 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
   const buildId = randomUUID();
   const zipKey = buildId + "/source.zip";
-  const apkKey = buildId + "/app-debug.apk";
 
   builds.set(buildId, { state: "building", createdAt: Date.now() });
 
   try {
+    // 1. Upload du zip sur Supabase
     const { error: upError } = await supabase.storage
       .from(BUCKET)
       .upload(zipKey, req.file.buffer, {
@@ -79,6 +79,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     
     if (upError) throw upError;
 
+    // 2. URL signee pour telecharger le zip (1h)
     const { data: zipUrlData, error: zipUrlError } = await supabase.storage
       .from(BUCKET)
       .createSignedUrl(zipKey, 3600);
@@ -86,13 +87,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     if (zipUrlError) throw zipUrlError;
     const zipDownloadUrl = zipUrlData.signedUrl;
 
-    const { data: apkUrlData, error: apkUrlError } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrl(apkKey, 3600);
-    
-    if (apkUrlError) throw apkUrlError;
-    const apkUploadUrl = apkUrlData.signedUrl;
-
+    // 3. Declenche GitHub Actions
     const dispatchRes = await fetch(
       "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/actions/workflows/build-apk.yml/dispatches",
       {
@@ -107,8 +102,10 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
             zip_url: zipDownloadUrl,
             app_name: req.body.appName || "MonApp",
             package_id: req.body.packageId || "com.exemple.monapp",
-            upload_url: apkUploadUrl,
             build_id: buildId,
+            supabase_url: SUPABASE_URL,
+            supabase_key: SUPABASE_KEY,
+            bucket: BUCKET,
             callback_url: PUBLIC_BACKEND_URL + "/api/build/" + buildId + "/callback",
           },
         }),
@@ -122,8 +119,9 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     res.json({ buildId: buildId, message: "Build lance." });
 
+    // Nettoyage auto apres 2h
     setTimeout(async () => {
-      await supabase.storage.from(BUCKET).remove([zipKey, apkKey]).catch(() => {});
+      await supabase.storage.from(BUCKET).remove([zipKey]).catch(() => {});
       builds.delete(buildId);
     }, 2 * 60 * 60 * 1000);
 
