@@ -57,14 +57,25 @@ jobs:
           cp -r ../www/* www/ 2>/dev/null || cp -r ../* www/ 2>/dev/null || true
           cordova platform add android
           cordova build android --debug
+          echo "=== APK built ==="
+          ls -la platforms/android/app/build/outputs/apk/debug/
 
       - name: Upload APK to Supabase
         run: |
-          cd src/app/platforms/android/app/build/outputs/apk/debug
+          echo "=== Uploading to Supabase ==="
+          ls -la src/app/platforms/android/app/build/outputs/apk/debug/
           curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app-debug.apk" \
             -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
-            --data-binary @app-debug.apk
+            --data-binary @src/app/platforms/android/app/build/outputs/apk/debug/app-debug.apk \
+            -w "\nHTTP Status: %{http_code}\n"
+
+      - name: Upload APK as GitHub Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-${{ inputs.build_id }}
+          path: src/app/platforms/android/app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 1
 
       - name: Notify backend
         run: |
