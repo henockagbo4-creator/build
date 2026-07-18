@@ -62,6 +62,7 @@ jobs:
     steps:
       - name: Download source zip
         run: |
+          set -e
           curl -L -o source.zip "${{ github.event.inputs.zip_url }}"
           mkdir -p src
           unzip source.zip -d src/
@@ -72,7 +73,9 @@ jobs:
           node-version: '20'
 
       - name: Install Cordova
-        run: npm install -g cordova
+        run: |
+          set -e
+          npm install -g cordova
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -83,6 +86,7 @@ jobs:
       - name: Generate keystore
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
+          set -e
           keytool -genkey -v \
             -keystore my-release-key.keystore \
             -alias "${{ github.event.inputs.keystore_alias }}" \
@@ -90,16 +94,21 @@ jobs:
             -storepass "${{ github.event.inputs.keystore_password }}" \
             -keypass "${{ github.event.inputs.keystore_password }}" \
             -dname "CN=PhilTech, O=PhilTech, C=CI"
+          echo "Keystore generated:"
           ls -la my-release-key.keystore
 
       - name: Download user keystore
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
         run: |
+          set -e
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
+          echo "Keystore downloaded:"
           ls -la my-release-key.keystore
 
       - name: Build APK
         run: |
+          set -e
+          
           cd src
           cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
           cd app
@@ -107,6 +116,15 @@ jobs:
           cordova platform add android
           
           KEYSTORE_PATH="../../my-release-key.keystore"
+          
+          echo "=== DEBUG ==="
+          echo "Build type: ${{ github.event.inputs.build_type }}"
+          echo "Keystore mode: ${{ github.event.inputs.keystore_mode }}"
+          echo "Keystore path: $KEYSTORE_PATH"
+          echo "Current directory: $(pwd)"
+          ls -la ../../ || true
+          ls -la $KEYSTORE_PATH 2>/dev/null || echo "Keystore NOT FOUND at $KEYSTORE_PATH"
+          echo "============="
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
             echo "Building RELEASE with signing"
@@ -119,10 +137,14 @@ jobs:
             echo "Building DEBUG"
             cordova build android --debug
           fi
+          
+          echo "=== Listing APK outputs ==="
+          find platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
 
       - name: Upload keystore to Supabase
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
+          set -e
           curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/keystore-${{ github.event.inputs.build_id }}.keystore" \
             -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
             -H "Content-Type: application/octet-stream" \
@@ -130,28 +152,38 @@ jobs:
 
       - name: Upload APK to Supabase
         run: |
+          set -e
+          
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
+          
+          echo "=== Searching for APK ==="
+          find src/app/platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             if [ -f "${APK_DIR}/release/app-release.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release.apk"
+              echo "Found signed release APK"
             elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
+              echo "Found unsigned release APK"
             else
-              echo "No release APK found"
+              echo "ERROR: No release APK found"
               ls -la ${APK_DIR}/release/ 2>/dev/null || true
               exit 1
             fi
           else
             if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
               APK_PATH="${APK_DIR}/debug/app-debug.apk"
+              echo "Found debug APK"
             else
-              echo "No debug APK found"
+              echo "ERROR: No debug APK found"
               ls -la ${APK_DIR}/debug/ 2>/dev/null || true
               exit 1
             fi
           fi
           
+          echo "Uploading: $APK_PATH"
+          ls -la "$APK_PATH"
           curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/app.apk" \
             -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
@@ -166,6 +198,8 @@ jobs:
 
       - name: Notify backend
         run: |
+          set -e
+          
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             if [ -f "${APK_DIR}/release/app-release.apk" ] || [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
@@ -180,6 +214,8 @@ jobs:
               STATE="error"
             fi
           fi
+          
+          echo "Build state: $STATE"
           
           for i in 1 2 3 4 5; do
             curl -X POST "${{ github.event.inputs.callback_url }}" \
