@@ -1,12 +1,7 @@
 /**
  * Backend Node.js/Express — build APK via GitHub Actions + Cloudflare R2.
  */
-console.log("=== DEBUG R2 ===");
-console.log("Account ID:", R2_ACCOUNT_ID ? "OK (longueur: " + R2_ACCOUNT_ID.length + ")" : "MANQUANT");
-console.log("Access Key:", R2_ACCESS_KEY_ID ? "OK (debut: " + R2_ACCESS_KEY_ID.substring(0, 4) + "...)" : "MANQUANT");
-console.log("Secret Key:", R2_SECRET_ACCESS_KEY ? "OK (longueur: " + R2_SECRET_ACCESS_KEY.length + ")" : "MANQUANT");
-console.log("Bucket:", BUCKET || "MANQUANT");
-console.log("Endpoint:", `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`);
+
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
@@ -32,7 +27,6 @@ const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
 const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
 const BUCKET = process.env.R2_BUCKET_NAME;
 
-// FIX : Config R2 compatible signature
 const r2 = new S3Client({
   region: "auto",
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -91,7 +85,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
   builds.set(buildId, { state: "building", createdAt: Date.now() });
 
   try {
-    // 1. Upload du zip sur R2
     await r2.send(
       new PutObjectCommand({
         Bucket: BUCKET,
@@ -101,14 +94,12 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       })
     );
 
-    // 2. URL signee pour telecharger le zip
     const zipDownloadUrl = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: BUCKET, Key: zipKey }),
       { expiresIn: 3600 }
     );
 
-    // 3. URL signee pour uploader l'APK
     const apkUploadUrl = await getSignedUrl(
       r2,
       new PutObjectCommand({
@@ -119,7 +110,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       { expiresIn: 3600 }
     );
 
-    // 4. Declenche GitHub Actions
     const dispatchRes = await fetch(
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/build-apk.yml/dispatches`,
       {
@@ -150,7 +140,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     res.json({ buildId, message: "Build lance." });
 
-    // Nettoyage auto apres 2h
     setTimeout(async () => {
       try {
         await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: zipKey }));
@@ -218,6 +207,4 @@ app.get("/api/build/:id/download", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend pret sur le port ${PORT}`);
-  console.log(`Bucket R2: ${BUCKET || "NON CONFIGURE"}`);
-  console.log(`GitHub: ${GITHUB_OWNER}/${GITHUB_REPO || "NON CONFIGURE"}`);
 });
