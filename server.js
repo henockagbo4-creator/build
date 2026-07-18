@@ -1,5 +1,6 @@
 /**
  * Backend Node.js/Express — build APK via GitHub Actions
+ * L'APK est récupérée via GitHub Artifacts, pas Supabase
  */
 
 import "dotenv/config";
@@ -65,7 +66,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       throw new Error("Package ID invalide. Format attendu: com.exemple.monapp");
     }
 
-    // Upload du zip sur Supabase (URL signée 1h)
+    // Upload du zip sur Supabase (temporaire, 1h)
     const zipKey = `${buildId}/source.zip`;
     const { error: upError } = await supabase.storage
       .from(BUCKET)
@@ -119,9 +120,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
             keystore_url: userKeystoreUrl || "",
             keystore_password: userKeystorePassword,
             keystore_alias: keystoreAlias,
-            supabase_url: SUPABASE_URL,
-            supabase_key: SUPABASE_KEY,
-            bucket: BUCKET,
             callback_url: `${PUBLIC_BACKEND_URL}/api/build/${buildId}/callback`,
           },
         }),
@@ -137,16 +135,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     res.json({ buildId, message: "Build lance." });
 
-    // Nettoyage auto apres 2h
-    setTimeout(async () => {
-      const keysToRemove = [zipKey, `${buildId}/app.apk`];
-      if (keystoreMode === 'generate') {
-        keysToRemove.push(`${buildId}/keystore-${buildId}.keystore`);
-      }
-      await supabase.storage.from(BUCKET).remove(keysToRemove).catch(() => {});
-      builds.delete(buildId);
-    }, 2 * 60 * 60 * 1000);
-
   } catch (err) {
     console.error("Build error:", err);
     builds.set(buildId, { state: "error", message: err.message });
@@ -155,10 +143,16 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 });
 
 app.post("/api/build/:id/callback", (req, res) => {
-  const { state, message, download_url } = req.body;
+  const { state, message, artifact_url, build_id } = req.body;
   const build = builds.get(req.params.id);
   if (build) {
-    builds.set(req.params.id, { ...build, state, message, downloadUrl: download_url });
+    builds.set(req.params.id, { 
+      ...build, 
+      state, 
+      message, 
+      artifactUrl: artifact_url,
+      githubRunId: build_id 
+    });
   }
   res.sendStatus(200);
 });
@@ -181,24 +175,20 @@ app.get("/api/build/:id/status", (req, res) => {
   res.json(response);
 });
 
+// Nouveau endpoint : télécharger l'APK depuis GitHub Artifacts
 app.get("/api/build/:id/download", async (req, res) => {
-  const apkKey = `${req.params.id}/app.apk`;
-  
-  try {
-    const { data, error } = await supabase.storage
-      .from(BUCKET)
-      .createSignedUrl(apkKey, 300);
-    
-    if (error) throw error;
-    res.redirect(data.signedUrl);
-
-    setTimeout(async () => {
-      await supabase.storage.from(BUCKET).remove([apkKey]).catch(() => {});
-      builds.delete(req.params.id);
-    }, 5 * 60 * 1000);
-  } catch (err) {
-    res.status(404).json({ message: "APK introuvable." });
+  const build = builds.get(req.params.id);
+  if (!build || !build.artifactUrl) {
+    return res.status(404).json({ message: "APK non disponible." });
   }
+  
+  // Rediriger vers l'artifact GitHub (l'utilisateur devra s'authentifier)
+  // Ou mieux : on stream l'artifact depuis l'API GitHub
+  
+  res.json({ 
+    artifactUrl: build.artifactUrl,
+    message: "Télécharge l'APK depuis l'onglet Actions de GitHub ou utilise le lien ci-dessus."
+  });
 });
 
 const PORT = process.env.PORT || 3000;
