@@ -24,6 +24,12 @@ on:
       keystore_url:
         required: false
         type: string
+      keystore_password:
+        required: false
+        type: string
+      keystore_alias:
+        required: false
+        type: string
       supabase_url:
         required: true
         type: string
@@ -76,7 +82,11 @@ jobs:
           
           if [ "${{ inputs.build_type }}" == "release" ] && [ -f "../../my-release-key.keystore" ]; then
             echo "Building RELEASE with signing"
-            cordova build android --release -- --keystore=../../my-release-key.keystore --storePassword=PhilTech2026 --alias=release --password=PhilTech2026
+            cordova build android --release -- \
+              --keystore=../../my-release-key.keystore \
+              --storePassword="${{ inputs.keystore_password }}" \
+              --alias="${{ inputs.keystore_alias }}" \
+              --password="${{ inputs.keystore_password }}"
           else
             echo "Building DEBUG"
             cordova build android --debug
@@ -87,27 +97,59 @@ jobs:
 
       - name: Upload APK to Supabase
         run: |
-          APK_PATH="src/app/platforms/android/app/build/outputs/apk/${{ inputs.build_type == 'release' && 'release' || 'debug' }}/app-${{ inputs.build_type == 'release' && 'release' || 'debug' }}.apk"
-          ls -la $APK_PATH
-          curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app-debug.apk" \
+          APK_DIR="src/app/platforms/android/app/build/outputs/apk"
+          if [ "${{ inputs.build_type }}" == "release" ]; then
+            if [ -f "${APK_DIR}/release/app-release.apk" ]; then
+              APK_PATH="${APK_DIR}/release/app-release.apk"
+            else
+              APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
+            fi
+          else
+            APK_PATH="${APK_DIR}/debug/app-debug.apk"
+          fi
+          
+          ls -la "$APK_PATH"
+          curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app.apk" \
             -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
-            --data-binary @$APK_PATH \
+            --data-binary @"$APK_PATH" \
             -w "\nHTTP Status: %{http_code}\n"
 
       - name: Upload APK as GitHub Artifact
         uses: actions/upload-artifact@v4
         with:
           name: apk-${{ inputs.build_id }}
-          path: src/app/platforms/android/app/build/outputs/apk/${{ inputs.build_type == 'release' && 'release' || 'debug' }}/*.apk
+          path: src/app/platforms/android/app/build/outputs/apk/*/*.apk
           retention-days: 1
 
-      - name: Notify backend with retry
+      - name: Check build and notify backend
         run: |
+          APK_DIR="src/app/platforms/android/app/build/outputs/apk"
+          if [ "${{ inputs.build_type }}" == "release" ]; then
+            if [ -f "${APK_DIR}/release/app-release.apk" ]; then
+              APK_PATH="${APK_DIR}/release/app-release.apk"
+              STATE="success"
+            elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
+              APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
+              STATE="success"
+            else
+              STATE="error"
+            fi
+          else
+            if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
+              APK_PATH="${APK_DIR}/debug/app-debug.apk"
+              STATE="success"
+            else
+              STATE="error"
+            fi
+          fi
+          
+          echo "Build state: $STATE"
+          
           for i in 1 2 3 4 5; do
             curl -X POST "${{ inputs.callback_url }}" \
               -H "Content-Type: application/json" \
-              -d '{"state":"success"}' && break
+              -d "{\"state\":\"$STATE\",\"message\":\"Build $STATE\"}" && break
             echo "Retry $i..."
             sleep 15
           done
