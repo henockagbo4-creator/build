@@ -34,7 +34,7 @@ jobs:
     steps:
       - name: Download source zip
         run: |
-          curl -X GET "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/source.zip" \
+          curl -X GET "${{ inputs.supabase_url }}/storage/v1/object/download/${{ inputs.bucket }}/${{ inputs.build_id }}/source.zip" \
             -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
             -o source.zip
           ls -la source.zip
