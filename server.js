@@ -1,5 +1,6 @@
 /**
  * Backend Node.js/Express — build APK via GitHub Actions + Cloudflare R2.
+ * CLÉS EN DUR — DÉPÔT PRIVÉ UNIQUEMENT
  */
 
 import "dotenv/config";
@@ -21,11 +22,11 @@ app.use(express.json());
 
 const upload = multer({ storage: multer.memoryStorage() });
 
-// ============ CONFIG R2 (Cloudflare) ============
-const R2_ACCOUNT_ID = process.env.R2_ACCOUNT_ID;
-const R2_ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID;
-const R2_SECRET_ACCESS_KEY = process.env.R2_SECRET_ACCESS_KEY;
-const BUCKET = process.env.R2_BUCKET_NAME;
+// ============ CONFIG R2 (Cloudflare) — CLÉS EN DUR ============
+const R2_ACCOUNT_ID = "6d38332d43a0646b19db772a01d85515";  // ← ton Account ID
+const R2_ACCESS_KEY_ID = "1ce3e2b243260468d73fc4309b15dc75";              // ← remplace
+const R2_SECRET_ACCESS_KEY = "cfat_SCjE5LwZvyUixBCgwq0DAFbH8J50Qm29GLwlcLb98c4eb679";      // ← remplace
+const BUCKET = "apk-builder";
 
 const r2 = new S3Client({
   region: "auto",
@@ -36,23 +37,21 @@ const r2 = new S3Client({
   },
 });
 
-// ============ CONFIG GITHUB ============
-const GITHUB_OWNER = process.env.GITHUB_OWNER;
-const GITHUB_REPO = process.env.GITHUB_REPO;
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const PUBLIC_BACKEND_URL = process.env.PUBLIC_BACKEND_URL;
+// ============ CONFIG GITHUB — CLÉS EN DUR ============
+const GITHUB_OWNER = "henockagbo4-creator";                   // ← vérifie
+const GITHUB_REPO = "build";                                   // ← vérifie
+const GITHUB_TOKEN = "ghp_TON_TOKEN_ICI";                     // ← remplace
+const PUBLIC_BACKEND_URL = "https://build-production-89f7.up.railway.app";
 
 // ============ SUIVI DES BUILDS ============
 const builds = new Map();
 
 // ============ ROUTES ============
 
-// Health check
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Test R2
 app.get("/api/test-r2", async (req, res) => {
   try {
     const testKey = `test-${Date.now()}.txt`;
@@ -72,7 +71,6 @@ app.get("/api/test-r2", async (req, res) => {
   }
 });
 
-// Lancer un build
 app.post("/api/build", upload.single("zip"), async (req, res) => {
   if (!req.file) {
     return res.status(400).json({ message: "Aucun fichier recu." });
@@ -157,7 +155,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
   }
 });
 
-// Callback du workflow GitHub
 app.post("/api/build/:id/callback", (req, res) => {
   const { state, message } = req.body;
   const build = builds.get(req.params.id);
@@ -167,7 +164,6 @@ app.post("/api/build/:id/callback", (req, res) => {
   res.sendStatus(200);
 });
 
-// Statut du build
 app.get("/api/build/:id/status", (req, res) => {
   const build = builds.get(req.params.id);
   if (!build) {
@@ -179,7 +175,6 @@ app.get("/api/build/:id/status", (req, res) => {
   res.json(build);
 });
 
-// Telecharger l'APK
 app.get("/api/build/:id/download", async (req, res) => {
   const apkKey = `${req.params.id}/app-debug.apk`;
 
@@ -203,7 +198,6 @@ app.get("/api/build/:id/download", async (req, res) => {
   }
 });
 
-// ============ DEMARRAGE ============
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Backend pret sur le port ${PORT}`);
