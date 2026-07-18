@@ -1,4 +1,4 @@
-name: Build APK
+ name: Build APK
 
 on:
   workflow_dispatch:
@@ -79,11 +79,13 @@ jobs:
                 -storepass "${{ inputs.keystore_password }}" \
                 -keypass "${{ inputs.keystore_password }}" \
                 -dname "CN=PhilTech, O=PhilTech, C=CI"
-              echo "Keystore generated"
+              echo "Keystore generated at: $(pwd)/my-release-key.keystore"
+              ls -la my-release-key.keystore
             elif [ "${{ inputs.keystore_url }}" != "" ]; then
               echo "Downloading user keystore..."
               curl -L -o my-release-key.keystore "${{ inputs.keystore_url }}"
               echo "Keystore downloaded"
+              ls -la my-release-key.keystore
             fi
           fi
 
@@ -92,13 +94,20 @@ jobs:
           cd src
           cordova create app ${{ inputs.package_id }} "${{ inputs.app_name }}"
           cd app
+          
+          # Copier le contenu du zip dans www/
           cp -r ../www/* www/ 2>/dev/null || cp -r ../* www/ 2>/dev/null || true
+          
           cordova platform add android
           
-          if [ "${{ inputs.build_type }}" == "release" ] && [ -f "../../my-release-key.keystore" ]; then
+          # Le keystore est à la racine du workspace, donc ../../../ depuis src/app/
+          KEYSTORE_PATH="../../../my-release-key.keystore"
+          
+          if [ "${{ inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
             echo "Building RELEASE with signing"
+            echo "Using keystore: $KEYSTORE_PATH"
             cordova build android --release -- \
-              --keystore=../../my-release-key.keystore \
+              --keystore="$KEYSTORE_PATH" \
               --storePassword="${{ inputs.keystore_password }}" \
               --alias="${{ inputs.keystore_alias }}" \
               --password="${{ inputs.keystore_password }}"
@@ -106,6 +115,11 @@ jobs:
             echo "Building DEBUG"
             cordova build android --debug
           fi
+          
+          echo "=== Listing APK outputs ==="
+          ls -la platforms/android/app/build/outputs/apk/ || true
+          ls -la platforms/android/app/build/outputs/apk/release/ 2>/dev/null || true
+          ls -la platforms/android/app/build/outputs/apk/debug/ 2>/dev/null || true
 
       - name: Upload keystore to Supabase (if generated)
         if: inputs.keystore_mode == 'generate' && inputs.build_type == 'release'
@@ -118,16 +132,31 @@ jobs:
       - name: Upload APK to Supabase
         run: |
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
+          
           if [ "${{ inputs.build_type }}" == "release" ]; then
             if [ -f "${APK_DIR}/release/app-release.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release.apk"
-            else
+              echo "Found signed release APK"
+            elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
               APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
+              echo "Found unsigned release APK"
+            else
+              echo "ERROR: No release APK found"
+              ls -la ${APK_DIR}/release/ 2>/dev/null || true
+              exit 1
             fi
           else
-            APK_PATH="${APK_DIR}/debug/app-debug.apk"
+            if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
+              APK_PATH="${APK_DIR}/debug/app-debug.apk"
+              echo "Found debug APK"
+            else
+              echo "ERROR: No debug APK found"
+              ls -la ${APK_DIR}/debug/ 2>/dev/null || true
+              exit 1
+            fi
           fi
           
+          echo "Uploading: $APK_PATH"
           ls -la "$APK_PATH"
           curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app.apk" \
             -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
