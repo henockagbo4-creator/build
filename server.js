@@ -1,4 +1,4 @@
--/**
+/**
  * Backend Node.js/Express — build APK via GitHub Actions + Supabase Storage
  */
 
@@ -38,7 +38,7 @@ app.get("/api/health", (req, res) => {
 
 app.get("/api/test-storage", async (req, res) => {
   try {
-    const testKey = `test-${Date.now()}.txt`;
+    const testKey = "test-" + Date.now() + ".txt";
     const { error: upError } = await supabase.storage
       .from(BUCKET)
       .upload(testKey, Buffer.from("Hello from VoltBuilder"), {
@@ -65,13 +65,12 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
   }
 
   const buildId = randomUUID();
-  const zipKey = `${buildId}/source.zip`;
-  const apkKey = `${buildId}/app-debug.apk`;
+  const zipKey = buildId + "/source.zip";
+  const apkKey = buildId + "/app-debug.apk";
 
   builds.set(buildId, { state: "building", createdAt: Date.now() });
 
   try {
-    // 1. Upload du zip sur Supabase
     const { error: upError } = await supabase.storage
       .from(BUCKET)
       .upload(zipKey, req.file.buffer, {
@@ -80,7 +79,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     
     if (upError) throw upError;
 
-    // 2. URL signee pour telecharger le zip (1h)
     const { data: zipUrlData, error: zipUrlError } = await supabase.storage
       .from(BUCKET)
       .createSignedUrl(zipKey, 3600);
@@ -88,7 +86,6 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     if (zipUrlError) throw zipUrlError;
     const zipDownloadUrl = zipUrlData.signedUrl;
 
-    // 3. URL signee pour uploader l'APK (1h)
     const { data: apkUrlData, error: apkUrlError } = await supabase.storage
       .from(BUCKET)
       .createSignedUrl(apkKey, 3600);
@@ -96,13 +93,12 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
     if (apkUrlError) throw apkUrlError;
     const apkUploadUrl = apkUrlData.signedUrl;
 
-    // 4. Declenche GitHub Actions
     const dispatchRes = await fetch(
-      `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/build-apk.yml/dispatches`,
+      "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/actions/workflows/build-apk.yml/dispatches",
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${GITHUB_TOKEN}`,
+          Authorization: "Bearer " + GITHUB_TOKEN,
           Accept: "application/vnd.github+json",
         },
         body: JSON.stringify({
@@ -113,7 +109,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
             package_id: req.body.packageId || "com.exemple.monapp",
             upload_url: apkUploadUrl,
             build_id: buildId,
-            callback_url: `${PUBLIC_BACKEND_URL}/api/build/${buildId}/callback`,
+            callback_url: PUBLIC_BACKEND_URL + "/api/build/" + buildId + "/callback",
           },
         }),
       }
@@ -121,12 +117,11 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 
     if (!dispatchRes.ok) {
       const ghError = await dispatchRes.text();
-      throw new Error(`GitHub refused: ${dispatchRes.status}`);
+      throw new Error("GitHub refused: " + dispatchRes.status);
     }
 
-    res.json({ buildId, message: "Build lance." });
+    res.json({ buildId: buildId, message: "Build lance." });
 
-    // Nettoyage auto apres 2h
     setTimeout(async () => {
       await supabase.storage.from(BUCKET).remove([zipKey, apkKey]).catch(() => {});
       builds.delete(buildId);
@@ -139,20 +134,25 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
 });
 
 app.post("/api/build/:id/callback", (req, res) => {
-  const { state, message } = req.body;
+  const state = req.body.state;
+  const message = req.body.message;
   const build = builds.get(req.params.id);
-  if (build) builds.set(req.params.id, { ...build, state, message });
+  if (build) {
+    builds.set(req.params.id, { state: state, message: message });
+  }
   res.sendStatus(200);
 });
 
 app.get("/api/build/:id/status", (req, res) => {
   const build = builds.get(req.params.id);
-  if (!build) return res.status(404).json({ state: "error", message: "Build introuvable." });
+  if (!build) {
+    return res.status(404).json({ state: "error", message: "Build introuvable." });
+  }
   res.json(build);
 });
 
 app.get("/api/build/:id/download", async (req, res) => {
-  const apkKey = `${req.params.id}/app-debug.apk`;
+  const apkKey = req.params.id + "/app-debug.apk";
   
   try {
     const { data, error } = await supabase.storage
@@ -172,4 +172,6 @@ app.get("/api/build/:id/download", async (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Backend pret sur :${PORT}`));
+app.listen(PORT, () => {
+  console.log("Backend pret sur :" + PORT);
+});
