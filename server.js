@@ -69,15 +69,18 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
 
   const buildId = randomUUID();
   const zipKey = buildId + "/source.zip";
-  const apkKey = buildId + "/app-debug.apk";
+  const apkKey = buildId + "/app.apk";
 
   const buildType = req.body.buildType || "debug";
   const keystoreMode = req.body.keystoreMode || "upload";
   
+  // Mot de passe keystore : celui de l'utilisateur ou défaut
+  const userKeystorePassword = req.body.keystorePassword?.trim() || "PhilTech2026";
+  
   let keystoreUrl = null;
   let keystoreName = null;
-  let keystorePassword = null;
-  let keystoreAlias = null;
+  let keystorePassword = userKeystorePassword;
+  let keystoreAlias = "release";
 
   builds.set(buildId, { 
     state: "building", 
@@ -87,6 +90,13 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
   });
 
   try {
+    // Validation du package ID
+    const packageIdRegex = /^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*)+$/;
+    const packageId = req.body.packageId || "com.exemple.monapp";
+    if (!packageIdRegex.test(packageId)) {
+      throw new Error("Package ID invalide. Format attendu: com.exemple.monapp");
+    }
+
     // 1. Upload du zip sur Supabase
     const { error: upError } = await supabase.storage
       .from(BUCKET)
@@ -100,12 +110,11 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
     if (buildType === "release" && keystoreMode === "generate") {
       const generatedKeystoreName = `keystore-${buildId}.keystore`;
       const keystorePath = `/tmp/${generatedKeystoreName}`;
-      const password = "PhilTech" + Math.random().toString(36).substring(2, 8);
       const alias = "release";
       
       try {
         execSync(
-          `keytool -genkey -v -keystore ${keystorePath} -alias ${alias} -keyalg RSA -keysize 2048 -validity 10000 -storepass "${password}" -keypass "${password}" -dname "CN=PhilTech, O=PhilTech, C=CI"`
+          `keytool -genkey -v -keystore ${keystorePath} -alias ${alias} -keyalg RSA -keysize 2048 -validity 10000 -storepass "${userKeystorePassword}" -keypass "${userKeystorePassword}" -dname "CN=PhilTech, O=PhilTech, C=CI"`
         );
         
         const keystoreBuffer = fs.readFileSync(keystorePath);
@@ -122,7 +131,6 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
         
         keystoreUrl = `${SUPABASE_URL}/storage/v1/object/public/${BUCKET}/${buildId}/${generatedKeystoreName}`;
         keystoreName = generatedKeystoreName;
-        keystorePassword = password;
         keystoreAlias = alias;
         
         builds.set(buildId, { 
@@ -135,6 +143,7 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
         });
       } catch (err) {
         console.error("Keystore generation failed:", err);
+        throw new Error("Échec de la génération du keystore: " + err.message);
       }
     }
 
@@ -161,7 +170,7 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
     if (zipUrlError) throw zipUrlError;
     const zipDownloadUrl = zipUrlData.signedUrl;
 
-    // 5. Declenche GitHub Actions
+    // 5. Déclenche GitHub Actions
     const dispatchRes = await fetch(
       "https://api.github.com/repos/" + GITHUB_OWNER + "/" + GITHUB_REPO + "/actions/workflows/build-apk.yml/dispatches",
       {
@@ -175,11 +184,13 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
           inputs: {
             zip_url: zipDownloadUrl,
             app_name: req.body.appName || "MonApp",
-            package_id: req.body.packageId || "com.exemple.monapp",
+            package_id: packageId,
             build_id: buildId,
             build_type: buildType,
             keystore_mode: keystoreMode,
             keystore_url: userKeystoreUrl || keystoreUrl || "",
+            keystore_password: keystorePassword,
+            keystore_alias: keystoreAlias,
             supabase_url: SUPABASE_URL,
             supabase_key: SUPABASE_KEY,
             bucket: BUCKET,
@@ -191,14 +202,19 @@ app.post("/api/build", upload.fields([{ name: "zip" }, { name: "keystore" }]), a
 
     if (!dispatchRes.ok) {
       const ghError = await dispatchRes.text();
-      throw new Error("GitHub refused: " + dispatchRes.status);
+      throw new Error("GitHub refused: " + dispatchRes.status + " - " + ghError);
     }
 
     res.json({ buildId: buildId, message: "Build lance." });
 
     // Nettoyage auto apres 2h
     setTimeout(async () => {
-      await supabase.storage.from(BUCKET).remove([zipKey, apkKey]).catch(() => {});
+      const keysToRemove = [zipKey, apkKey];
+      const buildData = builds.get(buildId);
+      if (buildData?.keystoreGenerated && buildData.keystoreName) {
+        keysToRemove.push(`${buildId}/${buildData.keystoreName}`);
+      }
+      await supabase.storage.from(BUCKET).remove(keysToRemove).catch(() => {});
       builds.delete(buildId);
     }, 2 * 60 * 60 * 1000);
 
@@ -239,7 +255,7 @@ app.get("/api/build/:id/status", (req, res) => {
 });
 
 app.get("/api/build/:id/download", async (req, res) => {
-  const apkKey = req.params.id + "/app-debug.apk";
+  const apkKey = req.params.id + "/app.apk";
   
   try {
     const { data, error } = await supabase.storage
