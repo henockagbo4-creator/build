@@ -50,8 +50,6 @@ jobs:
       - name: Download source zip
         run: |
           curl -L -o source.zip "${{ inputs.zip_url }}"
-          ls -la source.zip
-          file source.zip
           mkdir -p src
           unzip source.zip -d src/
 
@@ -61,15 +59,32 @@ jobs:
           node-version: '20'
 
       - name: Install Cordova
-        run: |
-          npm install -g cordova
+        run: npm install -g cordova
 
-      - name: Download keystore if needed
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Download or generate keystore
         run: |
-          if [ "${{ inputs.keystore_url }}" != "" ]; then
-            curl -L -o my-release-key.keystore "${{ inputs.keystore_url }}"
-            echo "Keystore downloaded"
-            ls -la my-release-key.keystore
+          if [ "${{ inputs.build_type }}" == "release" ]; then
+            if [ "${{ inputs.keystore_mode }}" == "generate" ]; then
+              echo "Generating new keystore..."
+              keytool -genkey -v \
+                -keystore my-release-key.keystore \
+                -alias "${{ inputs.keystore_alias }}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${{ inputs.keystore_password }}" \
+                -keypass "${{ inputs.keystore_password }}" \
+                -dname "CN=PhilTech, O=PhilTech, C=CI"
+              echo "Keystore generated"
+            elif [ "${{ inputs.keystore_url }}" != "" ]; then
+              echo "Downloading user keystore..."
+              curl -L -o my-release-key.keystore "${{ inputs.keystore_url }}"
+              echo "Keystore downloaded"
+            fi
           fi
 
       - name: Build APK
@@ -91,9 +106,14 @@ jobs:
             echo "Building DEBUG"
             cordova build android --debug
           fi
-          
-          echo "=== APK built ==="
-          ls -la platforms/android/app/build/outputs/apk/${{ inputs.build_type == 'release' && 'release' || 'debug' }}/
+
+      - name: Upload keystore to Supabase (if generated)
+        if: inputs.keystore_mode == 'generate' && inputs.build_type == 'release'
+        run: |
+          curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/keystore-${{ inputs.build_id }}.keystore" \
+            -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @my-release-key.keystore
 
       - name: Upload APK to Supabase
         run: |
@@ -112,8 +132,7 @@ jobs:
           curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app.apk" \
             -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
-            --data-binary @"$APK_PATH" \
-            -w "\nHTTP Status: %{http_code}\n"
+            --data-binary @"$APK_PATH"
 
       - name: Upload APK as GitHub Artifact
         uses: actions/upload-artifact@v4
@@ -126,18 +145,13 @@ jobs:
         run: |
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
           if [ "${{ inputs.build_type }}" == "release" ]; then
-            if [ -f "${APK_DIR}/release/app-release.apk" ]; then
-              APK_PATH="${APK_DIR}/release/app-release.apk"
-              STATE="success"
-            elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
-              APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
+            if [ -f "${APK_DIR}/release/app-release.apk" ] || [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
               STATE="success"
             else
               STATE="error"
             fi
           else
             if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
-              APK_PATH="${APK_DIR}/debug/app-debug.apk"
               STATE="success"
             else
               STATE="error"
