@@ -1,105 +1,70 @@
-name: Build APK Debug
+name: Build APK
 
-# Déclenché manuellement par ton backend via l'API GitHub
-# (workflow_dispatch = "appel à distance" avec des paramètres)
 on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "URL signée (presigned) du zip à télécharger depuis R2"
         required: true
         type: string
       app_name:
-        description: "Nom de l'application"
         required: true
         type: string
       package_id:
-        description: "Package ID Android (ex: com.exemple.monapp)"
-        required: true
-        type: string
-      upload_url:
-        description: "URL signée (presigned PUT) où envoyer l'APK final sur R2"
         required: true
         type: string
       build_id:
-        description: "Identifiant unique du build (pour le nom de fichier / suivi)"
+        required: true
+        type: string
+      supabase_url:
+        required: true
+        type: string
+      supabase_key:
+        required: true
+        type: string
+      bucket:
         required: true
         type: string
       callback_url:
-        description: "URL du backend à notifier une fois le build terminé (succès ou échec)"
         required: true
         type: string
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 20 # sécurité anti-build infini
     steps:
-      - name: Checkout du repo (contient les scripts)
-        uses: actions/checkout@v4
+      - name: Download source zip
+        run: |
+          curl -L "${{ inputs.zip_url }}" -o source.zip
+          unzip source.zip -d src/
 
-      - name: Installer Node.js
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: '20'
 
-      - name: Installer Java (requis par Gradle/Android)
-        uses: actions/setup-java@v4
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: Installer Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Télécharger le zip utilisateur depuis R2
+      - name: Install Cordova
         run: |
-          curl -L "${{ inputs.zip_url }}" -o project.zip
-          mkdir -p workdir
-          unzip -q project.zip -d workdir
+          npm install -g cordova
 
-      - name: Préparer le projet Capacitor
+      - name: Build APK
         run: |
-          bash scripts/prepare-capacitor.sh \
-            "workdir" \
-            "${{ inputs.app_name }}" \
-            "${{ inputs.package_id }}"
+          cd src
+          cordova create app ${{ inputs.package_id }} "${{ inputs.app_name }}"
+          cd app
+          cp -r ../www/* www/ 2>/dev/null || cp -r ../* www/ 2>/dev/null || true
+          cordova platform add android
+          cordova build android --debug
 
-      - name: Build APK debug
-        working-directory: capacitor-project/android
+      - name: Upload APK to Supabase
         run: |
-          chmod +x gradlew
-          ./gradlew assembleDebug --no-daemon
-
-      - name: Localiser l'APK générée
-        id: locate
-        run: |
-          APK_PATH=$(find capacitor-project/android -name "*-debug.apk" | head -n 1)
-          echo "apk_path=$APK_PATH" >> "$GITHUB_OUTPUT"
-
-      - name: Uploader l'APK sur R2 (stockage temporaire)
-        run: |
-          curl -X PUT \
+          cd src/app/platforms/android/app/build/outputs/apk/debug
+          curl -X POST "${{ inputs.supabase_url }}/storage/v1/object/${{ inputs.bucket }}/${{ inputs.build_id }}/app-debug.apk" \
+            -H "Authorization: Bearer ${{ inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
-            --upload-file "${{ steps.locate.outputs.apk_path }}" \
-            "${{ inputs.upload_url }}"
+            --data-binary @app-debug.apk
 
-      - name: Notifier le backend du succès
-        if: success()
+      - name: Notify backend
         run: |
           curl -X POST "${{ inputs.callback_url }}" \
             -H "Content-Type: application/json" \
             -d '{"state":"success"}'
-
-      - name: Notifier le backend de l'échec
-        if: failure()
-        run: |
-          curl -X POST "${{ inputs.callback_url }}" \
-            -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Le build a échoué — vérifie la structure du zip (index.html attendu à la racine)."}'
-
-      - name: Nettoyage (rien ne doit rester sur le runner de toute façon)
-        if: always()
-        run: |
-          rm -rf workdir project.zip capacitor-project
-          echo "Runner détruit automatiquement par GitHub après ce job — pas de trace persistante."
