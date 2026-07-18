@@ -1,7 +1,12 @@
 /**
  * Backend Node.js/Express — build APK via GitHub Actions + Cloudflare R2.
  */
-
+console.log("=== DEBUG R2 ===");
+console.log("Account ID:", R2_ACCOUNT_ID ? "OK (longueur: " + R2_ACCOUNT_ID.length + ")" : "MANQUANT");
+console.log("Access Key:", R2_ACCESS_KEY_ID ? "OK (debut: " + R2_ACCESS_KEY_ID.substring(0, 4) + "...)" : "MANQUANT");
+console.log("Secret Key:", R2_SECRET_ACCESS_KEY ? "OK (longueur: " + R2_SECRET_ACCESS_KEY.length + ")" : "MANQUANT");
+console.log("Bucket:", BUCKET || "MANQUANT");
+console.log("Endpoint:", `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`);
 import "dotenv/config";
 import express from "express";
 import cors from "cors";
