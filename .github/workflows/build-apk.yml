@@ -1,199 +1,24 @@
-name: Build APK
-
-on:
-  workflow_dispatch:
-    inputs:
-      zip_url:
-        required: true
-        type: string
-      app_name:
-        required: true
-        type: string
-      package_id:
-        required: true
-        type: string
-      build_id:
-        required: true
-        type: string
-      build_type:
-        required: true
-        type: string
-      keystore_mode:
-        required: true
-        type: string
-      keystore_url:
-        required: false
-        type: string
-      keystore_password:
-        required: false
-        type: string
-      keystore_alias:
-        required: false
-        type: string
-      supabase_url:
-        required: true
-        type: string
-      supabase_key:
-        required: true
-        type: string
-      bucket:
-        required: true
-        type: string
-      callback_url:
-        required: true
-        type: string
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source zip
+- name: Upload APK to Supabase
         run: |
-          curl -L -o source.zip "${{ github.event.inputs.zip_url }}"
-          mkdir -p src
-          unzip source.zip -d src/
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Cordova
-        run: npm install -g cordova
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Generate keystore
-        if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate'
-        run: |
-          keytool -genkey -v \
-            -keystore my-release-key.keystore \
-            -alias "${{ github.event.inputs.keystore_alias }}" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
-            -storepass "${{ github.event.inputs.keystore_password }}" \
-            -keypass "${{ github.event.inputs.keystore_password }}" \
-            -dname "CN=PhilTech, O=PhilTech, C=CI"
-          echo "Keystore generated at: $(pwd)/my-release-key.keystore"
-          ls -la my-release-key.keystore
-
-      - name: Download user keystore
-        if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != ''
-        run: |
-          curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
-          echo "Keystore downloaded"
-          ls -la my-release-key.keystore
-
-      - name: Build APK
-        run: |
-          cd src
-          cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
-          cd app
-          
-          # Copier le contenu du zip dans www/
-          cp -r ../www/* www/ 2>/dev/null || cp -r ../* www/ 2>/dev/null || true
-          
-          cordova platform add android
-          
-          # Le keystore est à la racine du workspace
-          # Depuis src/app/ : ../../ = racine du workspace
-          KEYSTORE_PATH="../../my-release-key.keystore"
-          
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
-            echo "Building RELEASE with signing"
-            echo "Using keystore: $KEYSTORE_PATH"
-            ls -la "$KEYSTORE_PATH"
-            cordova build android --release -- \
-              --keystore="$KEYSTORE_PATH" \
-              --storePassword="${{ github.event.inputs.keystore_password }}" \
-              --alias="${{ github.event.inputs.keystore_alias }}" \
-              --password="${{ github.event.inputs.keystore_password }}"
-          else
-            echo "Building DEBUG"
-            cordova build android --debug
-          fi
-          
-          echo "=== Listing APK outputs ==="
-          find platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
-
-      - name: Upload keystore to Supabase
-        if: github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate'
-        run: |
-          curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/keystore-${{ github.event.inputs.build_id }}.keystore" \
-            -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
-            -H "Content-Type: application/octet-stream" \
-            --data-binary @my-release-key.keystore
-
-      - name: Upload APK to Supabase
-        run: |
-          echo "=== Searching for APK ==="
-          find src/app/platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
-          
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
-          
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            if [ -f "${APK_DIR}/release/app-release.apk" ]; then
-              APK_PATH="${APK_DIR}/release/app-release.apk"
-              echo "Found signed release APK"
-            elif [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
-              APK_PATH="${APK_DIR}/release/app-release-unsigned.apk"
-              echo "Found unsigned release APK"
-            else
-              echo "ERROR: No release APK found"
-              ls -la ${APK_DIR}/release/ 2>/dev/null || true
-              exit 1
-            fi
+            APK_PATH="${APK_DIR}/release/app-release.apk"
           else
-            if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
-              APK_PATH="${APK_DIR}/debug/app-debug.apk"
-              echo "Found debug APK"
-            else
-              echo "ERROR: No debug APK found"
-              ls -la ${APK_DIR}/debug/ 2>/dev/null || true
-              exit 1
-            fi
+            APK_PATH="${APK_DIR}/debug/app-debug.apk"
           fi
           
-          echo "Uploading: $APK_PATH"
-          ls -la "$APK_PATH"
+          # Upload sur Supabase
           curl -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/app.apk" \
             -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
             -H "Content-Type: application/vnd.android.package-archive" \
             --data-binary @"$APK_PATH"
-
-      - name: Upload APK as GitHub Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: apk-${{ github.event.inputs.build_id }}
-          path: src/app/platforms/android/app/build/outputs/apk/*/*.apk
-          retention-days: 1
-
-      - name: Notify backend
-        run: |
-          APK_DIR="src/app/platforms/android/app/build/outputs/apk"
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            if [ -f "${APK_DIR}/release/app-release.apk" ] || [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
-              STATE="success"
-            else
-              STATE="error"
-            fi
-          else
-            if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
-              STATE="success"
-            else
-              STATE="error"
-            fi
-          fi
           
-          echo "Build state: $STATE"
+          # Créer URL signée (1 heure)
+          SIGNED_URL=$(curl -s -X POST "${{ github.event.inputs.supabase_url }}/storage/v1/object/sign/${{ github.event.inputs.bucket }}/${{ github.event.inputs.build_id }}/app.apk?expires-in=3600" \
+            -H "Authorization: Bearer ${{ github.event.inputs.supabase_key }}" \
+            -H "Content-Type: application/json" | jq -r '.signedURL')
           
-          for i in 1 2 3 4 5; do
-            curl -X POST "${{ github.event.inputs.callback_url }}" \
-              -H "Content-Type: application/json" \
-              -d "{\"state\":\"$STATE\",\"message\":\"Build $STATE\"}" && break
-            echo "Retry $i..."
-            sleep 15
-          done
+          # Envoyer au backend
+          curl -X POST "${{ github.event.inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d "{\"state\":\"success\",\"message\":\"Build success\",\"download_url\":\"${{ github.event.inputs.supabase_url }}/storage/v1${SIGNED_URL}\"}"
