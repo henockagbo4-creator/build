@@ -34,9 +34,7 @@ const r2 = new S3Client({
     accessKeyId: R2_ACCESS_KEY_ID,
     secretAccessKey: R2_SECRET_ACCESS_KEY,
   },
-  // CRITICAL pour R2 :
   forcePathStyle: true,
-  // Pour éviter les erreurs de checksum avec R2 :
   requestChecksumCalculation: "WHEN_REQUIRED",
   responseChecksumValidation: "WHEN_REQUIRED",
 });
@@ -57,7 +55,7 @@ app.get("/api/health", (req, res) => {
   res.json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
-// Test R2 (temporaire, pour déboguer)
+// Test R2 (temporaire, pour deboguer)
 app.get("/api/test-r2", async (req, res) => {
   try {
     const testKey = `test-${Date.now()}.txt`;
@@ -69,7 +67,6 @@ app.get("/api/test-r2", async (req, res) => {
         ContentType: "text/plain",
       })
     );
-    // Cleanup
     await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: testKey }));
     res.json({ ok: true, message: "R2 read/write OK" });
   } catch (err) {
@@ -81,7 +78,7 @@ app.get("/api/test-r2", async (req, res) => {
 // Lancer un build
 app.post("/api/build", upload.single("zip"), async (req, res) => {
   if (!req.file) {
-    return res.status(400).json({ message: "Aucun fichier reçu." });
+    return res.status(400).json({ message: "Aucun fichier recu." });
   }
 
   const buildId = randomUUID();
@@ -101,15 +98,14 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       })
     );
 
-    // 2. URL signée pour télécharger le zip (GitHub Actions)
+    // 2. URL signee pour telecharger le zip (GitHub Actions)
     const zipDownloadUrl = await getSignedUrl(
       r2,
       new GetObjectCommand({ Bucket: BUCKET, Key: zipKey }),
       { expiresIn: 3600 }
     );
 
-    // 3. URL signée pour uploader l'APK (GitHub Actions)
-    // IMPORTANT: PutObjectCommand pour upload pré-signé
+    // 3. URL signee pour uploader l'APK (GitHub Actions)
     const apkUploadUrl = await getSignedUrl(
       r2,
       new PutObjectCommand({
@@ -120,7 +116,7 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       { expiresIn: 3600 }
     );
 
-    // 4. Déclenche GitHub Actions
+    // 4. Declenche GitHub Actions
     const dispatchRes = await fetch(
       `https://api.github.com/repos/${GITHUB_OWNER}/${GITHUB_REPO}/actions/workflows/build-apk.yml/dispatches`,
       {
@@ -149,20 +145,16 @@ app.post("/api/build", upload.single("zip"), async (req, res) => {
       throw new Error(`GitHub refused: ${dispatchRes.status} — ${ghError}`);
     }
 
-    res.json({ buildId, message: "Build lancé." });
+    res.json({ buildId, message: "Build lance." });
 
-    // 5. Nettoyage auto après 2h
+    // 5. Nettoyage auto apres 2h
     setTimeout(async () => {
       try {
         await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: zipKey }));
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
       try {
         await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: apkKey }));
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
       builds.delete(buildId);
     }, 2 * 60 * 60 * 1000);
 
@@ -189,13 +181,13 @@ app.get("/api/build/:id/status", (req, res) => {
   if (!build) {
     return res.status(404).json({
       state: "error",
-      message: "Build introuvable ou expiré.",
+      message: "Build introuvable ou expire.",
     });
   }
   res.json(build);
 });
 
-// Télécharger l'APK
+// Telecharger l'APK
 app.get("/api/build/:id/download", async (req, res) => {
   const apkKey = `${req.params.id}/app-debug.apk`;
 
@@ -206,27 +198,23 @@ app.get("/api/build/:id/download", async (req, res) => {
       { expiresIn: 300 }
     );
 
-    // Redirection vers l'URL signée R2
     res.redirect(url);
 
-    // Suppression différée de l'APK (5 min après dl)
     setTimeout(async () => {
       try {
         await r2.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: apkKey }));
-      } catch (e) {
-        // ignore
-      }
+      } catch (e) {}
       builds.delete(req.params.id);
     }, 5 * 60 * 1000);
   } catch (err) {
-    res.status(404).json({ message: "APK introuvable ou déjà supprimée." });
+    res.status(404).json({ message: "APK introuvable ou deja supprimee." });
   }
 });
 
-// ============ DÉMARRAGE ============
+// ============ DEMARRAGE ============
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`✅ Backend prêt sur le port ${PORT}`);
-  console.log(`📦 Bucket R2: ${BUCKET || "NON CONFIGURÉ"}`);
-  console.log(`🔧 GitHub: ${GITHUB_OWNER}/${GITHUB_REPO || "NON CONFIGURÉ"}`);
+  console.log(`Backend pret sur le port ${PORT}`);
+  console.log(`Bucket R2: ${BUCKET || "NON CONFIGURE"}`);
+  console.log(`GitHub: ${GITHUB_OWNER}/${GITHUB_REPO || "NON CONFIGURE"}`);
 });
