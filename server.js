@@ -23,13 +23,13 @@ app.use(express.json());
 const upload = multer({ storage: multer.memoryStorage() });
 
 // ============ CONFIG R2 (Cloudflare) — CLÉS EN DUR ============
-const R2_ACCOUNT_ID = "6d38332d43a0646b19db772a01d85515";  // ← ton Account ID
-const R2_ACCESS_KEY_ID = "1ce3e2b243260468d73fc4309b15dc75";              // ← remplace
-const R2_SECRET_ACCESS_KEY = "cfat_SCjE5LwZvyUixBCgwq0DAFbH8J50Qm29GLwlcLb98c4eb679";      // ← remplace
+const R2_ACCOUNT_ID = "6d38332d43a0646b19db772a01d85515";
+const R2_ACCESS_KEY_ID = "NOUVELLE_ACCESS_KEY_ICI";           // ← remplace après révocation
+const R2_SECRET_ACCESS_KEY = "NOUVELLE_SECRET_KEY_ICI";       // ← remplace après révocation
 const BUCKET = "apk-builder";
 
+// FIX : plus de region dupliquée
 const r2 = new S3Client({
-  region: "us-east-1",
   region: "auto",
   endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
   credentials: {
@@ -38,10 +38,10 @@ const r2 = new S3Client({
   },
 });
 
-// ============ CONFIG GITHUB — CLÉS EN DUR ============
-const GITHUB_OWNER = "henockagbo4-creator";                   // ← vérifie
-const GITHUB_REPO = "build";                                   // ← vérifie
-const GITHUB_TOKEN = "ghp_TON_TOKEN_ICI";                     // ← remplace
+// ============ CONFIG GITHUB ============
+const GITHUB_OWNER = "henockagbo4-creator";
+const GITHUB_REPO = "build";
+const GITHUB_TOKEN = "ghp_TON_TOKEN_ICI";                     // ← remplace aussi si besoin
 const PUBLIC_BACKEND_URL = "https://build-production-89f7.up.railway.app";
 
 // ============ SUIVI DES BUILDS ============
