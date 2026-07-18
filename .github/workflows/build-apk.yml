@@ -25,6 +25,10 @@ on:
         description: "Identifiant unique du build (pour le nom de fichier / suivi)"
         required: true
         type: string
+      callback_url:
+        description: "URL du backend à notifier une fois le build terminé (succès ou échec)"
+        required: true
+        type: string
 
 jobs:
   build:
@@ -79,6 +83,20 @@ jobs:
             -H "Content-Type: application/vnd.android.package-archive" \
             --upload-file "${{ steps.locate.outputs.apk_path }}" \
             "${{ inputs.upload_url }}"
+
+      - name: Notifier le backend du succès
+        if: success()
+        run: |
+          curl -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"state":"success"}'
+
+      - name: Notifier le backend de l'échec
+        if: failure()
+        run: |
+          curl -X POST "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Le build a échoué — vérifie la structure du zip (index.html attendu à la racine)."}'
 
       - name: Nettoyage (rien ne doit rester sur le runner de toute façon)
         if: always()
