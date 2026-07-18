@@ -82,14 +82,12 @@ jobs:
             -storepass "${{ github.event.inputs.keystore_password }}" \
             -keypass "${{ github.event.inputs.keystore_password }}" \
             -dname "CN=PhilTech, O=PhilTech, C=CI"
-          ls -la my-release-key.keystore
 
       - name: Download user keystore
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
         run: |
           set -e
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
-          ls -la my-release-key.keystore
 
       - name: Build APK with Cordova
         run: |
@@ -97,19 +95,27 @@ jobs:
           
           cd src
           
-          echo "=== Contents of src/ (fichiers du zip) ==="
+          echo "=== Contents of src/ ==="
           ls -la
           
-          # Sauvegarder les fichiers du zip
-          mkdir -p /tmp/zipcontents
-          cp -r * /tmp/zipcontents/ 2>/dev/null || true
+          # Détecter si le zip contenait un seul dossier
+          ITEM_COUNT=$(ls -1 | wc -l)
+          FIRST_ITEM=$(ls -1 | head -1)
+          
+          if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
+            SOURCE_DIR="$FIRST_ITEM"
+            echo "Single folder detected: $SOURCE_DIR"
+          else
+            SOURCE_DIR="."
+            echo "Files directly in src/"
+          fi
           
           # Créer le projet Cordova
           cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
           
-          # Vider www/ et copier les fichiers du zip
+          # Vider www/ et copier les fichiers
           rm -rf app/www/*
-          cp -r /tmp/zipcontents/* app/www/ 2>/dev/null || true
+          cp -r "$SOURCE_DIR"/* app/www/ 2>/dev/null || true
           
           cd app
           
@@ -119,16 +125,13 @@ jobs:
           # Vérifier index.html
           if [ ! -f "www/index.html" ]; then
             echo "ERROR: www/index.html not found!"
+            find www/ -type f | head -20
             exit 1
           fi
           
           cordova platform add android
           
-          # Le keystore est à la racine du workspace
           KEYSTORE_PATH="../../my-release-key.keystore"
-          
-          echo "=== Looking for keystore ==="
-          ls -la ../../my-release-key.keystore 2>/dev/null || echo "Keystore not found"
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
             echo "Building RELEASE with signing"
@@ -141,9 +144,6 @@ jobs:
             echo "Building DEBUG"
             cordova build android --debug
           fi
-          
-          echo "=== APK outputs ==="
-          find platforms/android/app/build/outputs/apk/ -type f -name "*.apk" 2>/dev/null || true
 
       - name: Upload APK as GitHub Artifact
         uses: actions/upload-artifact@v4
