@@ -23,6 +23,11 @@ on:
         description: 'Type de build'
         required: true
         type: string
+      output_format:
+        description: 'Format de sortie (apk, aab, both)'
+        required: false
+        type: string
+        default: 'apk'
       keystore_mode:
         description: 'Mode keystore'
         required: true
@@ -132,14 +137,30 @@ jobs:
           cordova platform add android
           
           KEYSTORE_PATH="../../my-release-key.keystore"
+          FORMAT="${{ github.event.inputs.output_format }}"
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
-            echo "Building RELEASE with signing"
-            cordova build android --release -- \
-              --keystore="$KEYSTORE_PATH" \
-              --storePassword="${{ github.event.inputs.keystore_password }}" \
-              --alias="${{ github.event.inputs.keystore_alias }}" \
-              --password="${{ github.event.inputs.keystore_password }}"
+          
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
+              echo "Building RELEASE APK"
+              cordova build android --release -- \
+                --packageType=apk \
+                --keystore="$KEYSTORE_PATH" \
+                --storePassword="${{ github.event.inputs.keystore_password }}" \
+                --alias="${{ github.event.inputs.keystore_alias }}" \
+                --password="${{ github.event.inputs.keystore_password }}"
+            fi
+          
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              echo "Building RELEASE AAB (bundle)"
+              cordova build android --release -- \
+                --packageType=bundle \
+                --keystore="$KEYSTORE_PATH" \
+                --storePassword="${{ github.event.inputs.keystore_password }}" \
+                --alias="${{ github.event.inputs.keystore_alias }}" \
+                --password="${{ github.event.inputs.keystore_password }}"
+            fi
+          
           else
             echo "Building DEBUG"
             cordova build android --debug
@@ -153,14 +174,15 @@ jobs:
           retention-days: 1
 
       - name: Upload APK to R2 (via Worker)
+        if: ${{ github.event.inputs.output_format != 'aab' }}
         run: |
           set -e
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            APK_FILE=$(find "${APK_DIR}/release" -name "*.apk" | head -1)
+            APK_FILE=$(find "${APK_DIR}/release" -name "*.apk" 2>/dev/null | head -1)
           else
-            APK_FILE=$(find "${APK_DIR}/debug" -name "*.apk" | head -1)
+            APK_FILE=$(find "${APK_DIR}/debug" -name "*.apk" 2>/dev/null | head -1)
           fi
 
           if [ -f "$APK_FILE" ]; then
@@ -171,6 +193,23 @@ jobs:
               "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/apk"
           else
             echo "No APK file found, skipping R2 upload."
+          fi
+
+      - name: Upload AAB to R2 (via Worker)
+        if: ${{ github.event.inputs.build_type == 'release' && (github.event.inputs.output_format == 'aab' || github.event.inputs.output_format == 'both') }}
+        run: |
+          set -e
+          AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
+          AAB_FILE=$(find "${AAB_DIR}/release" -name "*.aab" 2>/dev/null | head -1)
+
+          if [ -f "$AAB_FILE" ]; then
+            echo "Uploading $AAB_FILE to R2..."
+            curl -X POST \
+              --data-binary "@${AAB_FILE}" \
+              -H "Content-Type: application/octet-stream" \
+              "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/aab"
+          else
+            echo "No AAB file found, skipping R2 upload."
           fi
 
       - name: Upload generated keystore to R2 (via Worker)
@@ -188,17 +227,25 @@ jobs:
       - name: Notify backend
         run: |
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
+          AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
+          FORMAT="${{ github.event.inputs.output_format }}"
+          STATE="error"
+
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            if [ -f "${APK_DIR}/release/app-release.apk" ] || [ -f "${APK_DIR}/release/app-release-unsigned.apk" ]; then
+            APK_OK=true
+            AAB_OK=true
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
+              [ -n "$(find "${APK_DIR}/release" -name '*.apk' 2>/dev/null)" ] && APK_OK=true || APK_OK=false
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              [ -n "$(find "${AAB_DIR}/release" -name '*.aab' 2>/dev/null)" ] && AAB_OK=true || AAB_OK=false
+            fi
+            if [ "$APK_OK" == "true" ] && [ "$AAB_OK" == "true" ]; then
               STATE="success"
-            else
-              STATE="error"
             fi
           else
             if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
               STATE="success"
-            else
-              STATE="error"
             fi
           fi
           
