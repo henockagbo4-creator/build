@@ -152,6 +152,39 @@ jobs:
           path: src/app/platforms/android/app/build/outputs/apk/*/*.apk
           retention-days: 1
 
+      - name: Upload APK to R2 (via Worker)
+        run: |
+          set -e
+          APK_DIR="src/app/platforms/android/app/build/outputs/apk"
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            APK_FILE=$(find "${APK_DIR}/release" -name "*.apk" | head -1)
+          else
+            APK_FILE=$(find "${APK_DIR}/debug" -name "*.apk" | head -1)
+          fi
+
+          if [ -f "$APK_FILE" ]; then
+            echo "Uploading $APK_FILE to R2..."
+            curl -X POST \
+              --data-binary "@${APK_FILE}" \
+              -H "Content-Type: application/octet-stream" \
+              "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/apk"
+          else
+            echo "No APK file found, skipping R2 upload."
+          fi
+
+      - name: Upload generated keystore to R2 (via Worker)
+        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        run: |
+          set -e
+          if [ -f "my-release-key.keystore" ]; then
+            echo "Uploading generated keystore to R2..."
+            curl -X POST \
+              --data-binary "@my-release-key.keystore" \
+              -H "Content-Type: application/octet-stream" \
+              "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/keystore"
+          fi
+
       - name: Notify backend
         run: |
           APK_DIR="src/app/platforms/android/app/build/outputs/apk"
