@@ -209,10 +209,18 @@ jobs:
           if [ -z "$PKG_ID" ]; then
             PKG_ID="com.philtech.app"
           fi
-          cordova create app "$PKG_ID" "${{ github.event.inputs.app_name }}"
-          rm -rf app/www/*
-          cp -r "$COPY_FROM"/* app/www/
-          cd app
+          # Utiliser un nom de dossier unique pour eviter les conflits avec le contenu source
+          CORDOVA_DIR="cordova-project-${{ github.event.inputs.build_id }}"
+          cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
+          rm -rf "$CORDOVA_DIR"/www/*
+          # Copier en excluant le dossier cordova-project pour eviter la copie recursive
+          for item in "$COPY_FROM"/*; do
+            item_name=$(basename "$item")
+            if [ "$item_name" != "$CORDOVA_DIR" ]; then
+              cp -r "$item" "$CORDOVA_DIR"/www/
+            fi
+          done
+          cd "$CORDOVA_DIR"
           cordova platform add android
           KEYSTORE_PATH="../../my-release-key.keystore"
           FORMAT="${{ github.event.inputs.output_format }}"
