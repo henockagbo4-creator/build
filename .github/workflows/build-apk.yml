@@ -236,8 +236,11 @@ jobs:
           retention-days: 1
           if-no-files-found: ignore
 
-      - name: Upload APK to R2 (via Worker)
+      - name: Upload APK to R2 (direct, S3 API)
         if: ${{ github.event.inputs.output_format != 'aab' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -e
           APK_FILE=""
@@ -255,17 +258,21 @@ jobs:
           fi
 
           if [ -f "$APK_FILE" ]; then
-            echo "Uploading $APK_FILE to R2..."
-            curl -X POST \
-              --data-binary "@${APK_FILE}" \
-              -H "Content-Type: application/octet-stream" \
-              "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/apk"
+            echo "Uploading $APK_FILE to R2 (direct)..."
+            aws s3 cp "$APK_FILE" \
+              "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/app.apk" \
+              --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
+              --region auto \
+              --content-type application/vnd.android.package-archive
           else
             echo "No APK file found, skipping R2 upload."
           fi
 
-      - name: Upload AAB to R2 (via Worker)
+      - name: Upload AAB to R2 (direct, S3 API)
         if: ${{ github.event.inputs.build_type == 'release' && (github.event.inputs.output_format == 'aab' || github.event.inputs.output_format == 'both') }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -e
           AAB_FILE=""
@@ -279,25 +286,30 @@ jobs:
           fi
 
           if [ -f "$AAB_FILE" ]; then
-            echo "Uploading $AAB_FILE to R2..."
-            curl -X POST \
-              --data-binary "@${AAB_FILE}" \
-              -H "Content-Type: application/octet-stream" \
-              "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/aab"
+            echo "Uploading $AAB_FILE to R2 (direct)..."
+            aws s3 cp "$AAB_FILE" \
+              "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/app.aab" \
+              --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
+              --region auto \
+              --content-type application/octet-stream
           else
             echo "No AAB file found, skipping R2 upload."
           fi
 
-      - name: Upload generated keystore to R2 (via Worker)
+      - name: Upload generated keystore to R2 (direct, S3 API)
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
         run: |
           set -e
           if [ -f "my-release-key.keystore" ]; then
-            echo "Uploading generated keystore to R2..."
-            curl -X POST \
-              --data-binary "@my-release-key.keystore" \
-              -H "Content-Type: application/octet-stream" \
-              "https://apk-builder.philtech-organisation.workers.dev/api/build/${{ github.event.inputs.build_id }}/upload/keystore"
+            echo "Uploading generated keystore to R2 (direct)..."
+            aws s3 cp "my-release-key.keystore" \
+              "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/keystore-${{ github.event.inputs.build_id }}.keystore" \
+              --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
+              --region auto \
+              --content-type application/octet-stream
           fi
 
       - name: Notify backend
