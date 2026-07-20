@@ -20,7 +20,7 @@ on:
         required: true
         type: string
       build_type:
-        description: 'Type de build'
+        description: 'Type de build (debug ou release)'
         required: true
         type: string
       output_format:
@@ -34,7 +34,7 @@ on:
         type: string
         default: 'web'
       keystore_mode:
-        description: 'Mode keystore'
+        description: 'Mode keystore (generate ou upload)'
         required: true
         type: string
       keystore_url:
@@ -83,7 +83,7 @@ jobs:
           fi
 
       # ============================================================
-      # 2. SETUP TOOLCHAINS
+      # 2. SETUP TOOLCHAINS (Node, Java, Android SDK, Flutter, Python, .NET, Go, Ruby, Godot, Lua)
       # ============================================================
       - name: Setup Node
         if: ${{ contains(fromJson('["web","react","vue","svelte","angular","solidjs","preact","nativescript","ionic","capacitor","react-native"]'), github.event.inputs.project_type) }}
@@ -210,11 +210,8 @@ jobs:
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
         run: |
           set -e
-          curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
-
-      # ============================================================
-      # 5–15.
-            # ============================================================
+          curl -
+                # ============================================================
       # 5. BUILD — WEB PROJECTS (Cordova)
       # ============================================================
       - name: Install & build (React / Vue)
@@ -272,7 +269,6 @@ jobs:
           else
             cordova build android --debug
           fi
-
       # ============================================================
       # 6. BUILD — CAPACITOR PROJECTS
       # ============================================================
@@ -290,7 +286,6 @@ jobs:
           else
             ./gradlew assembleDebug
           fi
-
       # ============================================================
       # 7. BUILD — REACT NATIVE
       # ============================================================
@@ -307,7 +302,6 @@ jobs:
           else
             ./gradlew assembleDebug
           fi
-
       # ============================================================
       # 8. BUILD — NATIVESCRIPT
       # ============================================================
@@ -316,40 +310,21 @@ jobs:
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
+          if [ ! -f "package.json" ]; then
+            echo "ERROR: package.json not found."
+            exit 1
+          fi
           npm install
           ns platform add android
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            ns build android --release
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            ns build android --release \
+              --key-store-path "$GITHUB_WORKSPACE/my-release-key.keystore" \
+              --key-store-password "${{ github.event.inputs.keystore_password }}" \
+              --key-store-alias "${{ github.event.inputs.keystore_alias }}" \
+              --key-store-alias-password "${{ github.event.inputs.keystore_password }}"
           else
             ns build android --debug
           fi
-
-      # ============================================================
-      # 9. BUILD — KOTLIN / JAVA NATIF
-      # ============================================================
-      - name: Build Kotlin/Java Native
-        if: ${{ contains(fromJson('["kotlin","java"]'), github.event.inputs.project_type) }}
-        run: |
-          set -e
-          cd "${{ env.SRC_PATH }}"
-          chmod +x gradlew
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            ./gradlew assembleRelease
-          else
-            ./gradlew assembleDebug
-          fi
-
-      # ============================================================
-      # 10. BUILD — KOTLIN MULTIPLATFORM
-      # ============================================================
-      - name: Build Kotlin Multiplatform
-        if: ${{ github.event.inputs.project_type == 'kotlin-multiplatform' }}
-        run: |
-          set -e
-          cd "${{ env.SRC_PATH }}"
-          chmod +x gradlew
-          ./gradlew assembleDebug
-
       # ============================================================
       # 11. BUILD — FLUTTER
       # ============================================================
@@ -358,6 +333,10 @@ jobs:
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "ERROR: pubspec.yaml not found"
+            exit 1
+          fi
           flutter pub get
           FORMAT="${{ github.event.inputs.output_format }}"
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
@@ -370,7 +349,6 @@ jobs:
           else
             flutter build apk --debug
           fi
-
       # ============================================================
       # 12. BUILD — PYTHON (Briefcase)
       # ============================================================
@@ -379,11 +357,14 @@ jobs:
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
+          if [ ! -f "pyproject.toml" ] || ! grep -q "tool.briefcase" pyproject.toml; then
+            echo "ERROR: pyproject.toml avec [tool.briefcase] requis"
+            exit 1
+          fi
           pip install briefcase
           briefcase create android
           briefcase build android
           briefcase package android -p apk --adhoc-sign
-
       # ============================================================
       # 13. BUILD — .NET MAUI
       # ============================================================
@@ -393,12 +374,15 @@ jobs:
           set -e
           cd "${{ env.SRC_PATH }}"
           CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          if [ -z "$CSPROJ" ]; then
+            echo "ERROR: Aucun fichier .csproj trouvé."
+            exit 1
+          fi
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             dotnet publish "$CSPROJ" -f net8.0-android -c Release
           else
             dotnet build "$CSPROJ" -f net8.0-android -c Debug
           fi
-
       # ============================================================
       # 14. BUILD — GO (gomobile)
       # ============================================================
@@ -407,8 +391,11 @@ jobs:
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
+          if [ ! -f "go.mod" ]; then
+            echo "ERROR: go.mod non trouvé"
+            exit 1
+          fi
           gomobile build -target=android -o app.apk .
-
       # ============================================================
       # 15. BUILD — RUBY (RubyMotion)
       # ============================================================
@@ -417,23 +404,13 @@ jobs:
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
+          if [ ! -f "Rakefile" ]; then
+            echo "ERROR: Rakefile non trouvé"
+            exit 1
+          fi
           rake android:build || echo "Build RubyMotion échoué — licence requise."
-
       # ============================================================
-      # 16. BUILD — LUA (Solar2D/Corona)
-      # ============================================================
-      - name: Build Lua (Solar2D)
-        if: ${{ github.event.inputs.project_type == 'lua' }}
-        run: |
-          set -e
-          cd "${{ env.SRC_PATH }}"
-          if [ ! -f "build.settings" ]; then
-            echo "ERROR: build.settings not found"
-            exit 1
-          fi
-          /opt/solar2d/solar2d.sh build android
-                # ============================================================
-      # 16. BUILD — LUA (Solar2D/Corona)
+      # 16. BUILD — LUA (Solar2D)
       # ============================================================
       - name: Build Lua (Solar2D)
         if: ${{ github.event.inputs.project_type == 'lua' }}
@@ -441,12 +418,11 @@ jobs:
           set -e
           cd "${{ env.SRC_PATH }}"
           if [ ! -f "build.settings" ]; then
-            echo "ERROR: build.settings not found"
+            echo "ERROR: build.settings non trouvé"
             exit 1
           fi
-          echo "Building Lua project with Solar2D..."
+          echo "Building Lua project avec Solar2D..."
           /opt/solar2d/solar2d.sh build android
-
       # ============================================================
       # 17. BUILD — GODOT
       # ============================================================
@@ -456,11 +432,10 @@ jobs:
           set -e
           cd "${{ env.SRC_PATH }}"
           if [ ! -f "project.godot" ]; then
-            echo "ERROR: project.godot not found"
+            echo "ERROR: project.godot non trouvé"
             exit 1
           fi
           godot --export-release Android build.apk
-
       # ============================================================
       # 18. POST-BUILD — COLLECT ARTIFACTS
       # ============================================================
@@ -478,7 +453,6 @@ jobs:
         with:
           name: build-artifacts
           path: output/
-
       # ============================================================
       # 19. CALLBACK NOTIFICATION
       # ============================================================
@@ -487,6 +461,5 @@ jobs:
           set -e
           echo "Envoi notification au callback..."
           curl -X POST -H "Content-Type: application/json" \
-            -d '{"build_id":"${{ github.event.inputs.build_id }}","status":"success"}' \
+            -d '{"build_id":"${{ github.event.inputs.build_id}}","status":"success"}' \
             "${{ github.event.inputs.callback_url }}"
-
