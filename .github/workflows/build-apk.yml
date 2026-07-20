@@ -101,14 +101,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      #- name: Cache Android SDK
-      #  uses: actions/cache@v4
-      #  with:
-       #   path: |
-        #    ~/.android/sdk
-         #  /usr/local/lib/android/sdk
-        #  key: android-sdk-${{ runner.os }}-${{ hashFiles('**/build.gradle') }}
-       #   restore-keys: android-sdk-${{ runner.os }}-
 
       - name: Generate keystore
         id: keystore
@@ -379,14 +371,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: gradle-${{ runner.os }}-
 
       - name: Build React Native
         run: |
@@ -466,14 +450,6 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: gradle-${{ runner.os }}-
 
       - name: Build Kotlin/Java
         run: |
@@ -557,14 +533,6 @@ jobs:
         with:
           channel: 'stable'
 
-      - name: Cache Flutter
-        uses: actions/cache@v4
-        with:
-          path: |
-            /opt/hostedtoolcache/flutter
-            ~/.pub-cache
-          key: flutter-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: flutter-${{ runner.os }}-
 
       - name: Build Flutter
         run: |
@@ -622,12 +590,6 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml') }}
-          restore-keys: pip-${{ runner.os }}-
 
       - name: Build with Briefcase
         run: |
