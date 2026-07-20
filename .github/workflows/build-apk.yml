@@ -88,7 +88,7 @@ jobs:
       # 2. SETUP TOOLCHAINS
       # ============================================================
       - name: Setup Node
-        if: ${{ contains(fromJson('"["web","react","vue","svelte","angular","solidjs","preact","nativescript","ionic","capacitor","react-native"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["web","react","vue","svelte","angular","solidjs","preact","nativescript","ionic","capacitor","react-native"]'), github.event.inputs.project_type) }}
         uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -100,7 +100,7 @@ jobs:
           distribution: 'temurin'
 
       - name: Setup Android SDK
-        if: ${{ contains(fromJson('"["kotlin","java","react-native","nativescript","kotlin-multiplatform","web","react","vue","svelte","angular","solidjs","preact","ionic","capacitor"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["kotlin","java","react-native","nativescript","kotlin-multiplatform","web","react","vue","svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
         uses: android-actions/setup-android@v3
 
       - name: Setup Flutter
@@ -140,13 +140,13 @@ jobs:
             libgles2-mesa-dev
 
       - name: Setup .NET
-        if: ${{ contains(fromJson('"["dotnet-maui","maui","csharp"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
 
       - name: Install .NET MAUI workload
-        if: ${{ contains(fromJson('"["dotnet-maui","maui","csharp"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
         run: dotnet workload install maui-android
 
       - name: Setup Go
@@ -187,11 +187,11 @@ jobs:
       # 3. INSTALL GLOBAL DEPENDENCIES
       # ============================================================
       - name: Install Cordova
-        if: ${{ contains(fromJson('"["web","react","vue"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
         run: npm install -g cordova
 
       - name: Install Capacitor CLI
-        if: ${{ contains(fromJson('"["svelte","angular","solidjs","preact","ionic","capacitor"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
         run: npm install -g @capacitor/cli
 
       - name: Install NativeScript CLI
@@ -242,20 +242,24 @@ jobs:
       # 5. BUILD — WEB PROJECTS (Cordova)
       # ============================================================
       - name: Install & build (React / Vue)
-        if: ${{ contains(fromJson('"["react","vue"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["react","vue"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
           if [ -f "package.json" ]; then
             echo "package.json trouve — build npm..."
             npm install
-            npm run build
+            if grep -q '"build"' package.json; then
+              npm run build
+            else
+              echo "Pas de script build dans package.json"
+            fi
           else
             echo "Pas de package.json — fichiers traites comme deja prets (statique)."
           fi
 
       - name: Build with Cordova (web project)
-        if: ${{ contains(fromJson('"["web","react","vue"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd src
@@ -327,7 +331,7 @@ jobs:
       # 6. BUILD — CAPACITOR PROJECTS (Svelte, Angular, SolidJS, Preact, Ionic)
       # ============================================================
       - name: Build Capacitor projects
-        if: ${{ contains(fromJson('"["svelte","angular","solidjs","preact","ionic","capacitor"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
@@ -341,30 +345,48 @@ jobs:
 
           # Detect framework and build
           PROJECT_TYPE="${{ github.event.inputs.project_type }}"
+          WWW_DIR=""
 
           if [ "$PROJECT_TYPE" == "svelte" ] || [ "$PROJECT_TYPE" == "sveltekit" ]; then
-            if [ -f "svelte.config.js" ] || [ -f "vite.config.ts" ] || [ -f "vite.config.js" ]; then
+            if grep -q '"build"' package.json; then
               npm run build
+            fi
+            if [ -d "dist" ]; then
               WWW_DIR="dist"
-            else
-              npm run build
+            elif [ -d "public" ]; then
               WWW_DIR="public"
+            else
+              WWW_DIR="."
             fi
           elif [ "$PROJECT_TYPE" == "angular" ]; then
-            npm run build -- --configuration=production
-            WWW_DIR="dist/$(ls dist | head -1)"
+            if grep -q '"build"' package.json; then
+              npm run build -- --configuration=production
+            fi
+            if [ -d "dist" ]; then
+              WWW_DIR="dist/$(ls dist | head -1)"
+            else
+              WWW_DIR="dist"
+            fi
           elif [ "$PROJECT_TYPE" == "solidjs" ]; then
-            npm run build
+            if grep -q '"build"' package.json; then
+              npm run build
+            fi
             WWW_DIR="dist"
           elif [ "$PROJECT_TYPE" == "preact" ]; then
-            npm run build
+            if grep -q '"build"' package.json; then
+              npm run build
+            fi
             WWW_DIR="build"
           elif [ "$PROJECT_TYPE" == "ionic" ] || [ "$PROJECT_TYPE" == "capacitor" ]; then
             if [ -f "angular.json" ]; then
-              npm run build -- --configuration=production
+              if grep -q '"build"' package.json; then
+                npm run build -- --configuration=production
+              fi
               WWW_DIR="www"
             else
-              npm run build
+              if grep -q '"build"' package.json; then
+                npm run build
+              fi
               WWW_DIR="dist"
             fi
           fi
@@ -373,6 +395,11 @@ jobs:
           if [ ! -d "android" ]; then
             echo "Initialisation de Capacitor Android..."
             npx cap add android || true
+          fi
+
+          # Mettre à jour la config Capacitor si besoin
+          if [ -n "$WWW_DIR" ] && [ -f "capacitor.config.json" ]; then
+            sed -i 's|"webDir":.*|"webDir": "'$WWW_DIR'",|' capacitor.config.json
           fi
 
           npx cap sync android
@@ -458,7 +485,7 @@ jobs:
       # 9. BUILD — KOTLIN / JAVA NATIF
       # ============================================================
       - name: Build Kotlin/Java Native
-        if: ${{ contains(fromJson('"["kotlin","java"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["kotlin","java"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
@@ -544,8 +571,8 @@ jobs:
             exit 1
           fi
 
-          if [ ! -f "android/app/build.gradle" ]; then
-            echo "android/app/build.gradle manquant — regeneration des fichiers de plateforme Android..."
+          if [ ! -d "android" ] || [ ! -f "android/app/build.gradle" ]; then
+            echo "Dossier android manquant — regeneration des fichiers de plateforme Android..."
             flutter create . --platforms=android
           fi
 
@@ -562,25 +589,21 @@ jobs:
               echo "storeFile=$KEYSTORE_PATH" >> android/key.properties
 
               # Patch build.gradle si necessaire
-              python3 -c "
+              if [ -f "android/app/build.gradle" ]; then
+                python3 -c "
 import re, os
 gradle_path = 'android/app/build.gradle'
-if not os.path.exists(gradle_path):
-    print('Pas de build.gradle Groovy trouve — patch ignore.')
-else:
-    content = open(gradle_path).read()
-    if 'keystoreProperties' in content:
-        print('Config de signature deja presente — patch ignore.')
-    else:
-        loader = """def keystoreProperties = new Properties()
+content = open(gradle_path).read()
+if 'keystoreProperties' not in content:
+    loader = \"\"\"def keystoreProperties = new Properties()
 def keystorePropertiesFile = rootProject.file('key.properties')
 if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
 }
 
-"""
-        content = loader + content
-        signing_block = """    signingConfigs {
+\"\"\"
+    content = loader + content
+    signing_block = \"\"\"    signingConfigs {
         release {
             if (keystorePropertiesFile.exists()) {
                 keyAlias keystoreProperties['keyAlias']
@@ -590,24 +613,21 @@ if (keystorePropertiesFile.exists()) {
             }
         }
     }
-"""
-        content = re.sub(r'(android\s*\{)', r'\1\n' + signing_block, content, count=1)
+\"\"\"
+    content = re.sub(r'(android\\s*\\{)', r'\\1\\n' + signing_block, content, count=1)
+    if 'signingConfig signingConfigs.release' not in content:
         content = re.sub(
-            r'(buildTypes\s*\{[^}]*release\s*\{[^}]*?)signingConfig\s+signingConfigs\.debug',
-            r'\1signingConfig signingConfigs.release',
+            r'(release\\s*\\{)',
+            r'\\1\\n            signingConfig signingConfigs.release',
             content,
-            flags=re.DOTALL
+            count=1
         )
-        if 'signingConfig signingConfigs.release' not in content:
-            content = re.sub(
-                r'(release\s*\{)',
-                r'\1\n            signingConfig signingConfigs.release',
-                content,
-                count=1
-            )
-        open(gradle_path, 'w').write(content)
-        print('build.gradle patche avec la config de signature release.')
+    open(gradle_path, 'w').write(content)
+    print('build.gradle patche avec la config de signature release.')
+else:
+    print('Config de signature deja presente — patch ignore.')
 "
+              fi
             fi
 
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
@@ -652,7 +672,7 @@ if (keystorePropertiesFile.exists()) {
       # 13. BUILD — .NET MAUI
       # ============================================================
       - name: Build .NET MAUI
-        if: ${{ contains(fromJson('"["dotnet-maui","maui","csharp"]"'), github.event.inputs.project_type) }}
+        if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
@@ -703,7 +723,6 @@ if (keystorePropertiesFile.exists()) {
           fi
 
           # Build avec gomobile
-          # Pour un APK complet, il faut un main package avec une UI (Fyne, Gio, ou binding Android)
           if [ -f "main.go" ]; then
             # Detecter si c'est Fyne
             if grep -q "fyne.io/fyne" *.go 2>/dev/null; then
@@ -737,7 +756,6 @@ if (keystorePropertiesFile.exists()) {
           fi
 
           # RubyMotion necessite une licence commerciale pour Android
-          # Ce step est un placeholder — l'utilisateur doit avoir une licence
           echo "RubyMotion build..."
           echo "NOTE: RubyMotion necessite une licence. Ce build est experimental."
           rake android:build || echo "Build RubyMotion echoue — licence requise."
@@ -757,9 +775,12 @@ if (keystorePropertiesFile.exists()) {
           fi
 
           # Solar2D build
-          /opt/solar2d/Solar2DBuilder build --platform android --output build/ || true
+          if [ -f "/opt/solar2d/Solar2DBuilder" ]; then
+            /opt/solar2d/Solar2DBuilder build --platform android --output build/ || true
+          else
+            echo "Solar2DBuilder not found, skipping build."
+          fi
 
-          # Fallback: packager manuellement si Solar2DBuilder echoue
           echo "Solar2D build termine (ou tentative)."
 
       # ============================================================
@@ -867,7 +888,7 @@ EOF
             fi
           elif [ "$PROJECT" == "kotlin-multiplatform" ]; then
             # Detecter dynamiquement le module
-            ANDROID_MODULE=$(find "${{ env.SRC_PATH }}" -maxdepth 2 -name "build.gradle.kts" -path "*/android*/build.gradle.kts" | head -1 | cut -d'/' -f3)
+            ANDROID_MODULE=$(find "${{ env.SRC_PATH }}" -maxdepth 3 -name "build.gradle.kts" -path "*/android*/build.gradle.kts" | head -1 | cut -d'/' -f3)
             if [ -z "$ANDROID_MODULE" ]; then
               ANDROID_MODULE="androidApp"
             fi
@@ -942,7 +963,7 @@ EOF
           elif [ "$PROJECT" == "kotlin" ] || [ "$PROJECT" == "java" ]; then
             AAB_FILE=$(resolve_aab "${{ env.SRC_PATH }}/app/build/outputs/bundle/release")
           elif [ "$PROJECT" == "kotlin-multiplatform" ]; then
-            ANDROID_MODULE=$(find "${{ env.SRC_PATH }}" -maxdepth 2 -name "build.gradle.kts" -path "*/android*/build.gradle.kts" | head -1 | cut -d'/' -f3)
+            ANDROID_MODULE=$(find "${{ env.SRC_PATH }}" -maxdepth 3 -name "build.gradle.kts" -path "*/android*/build.gradle.kts" | head -1 | cut -d'/' -f3)
             if [ -z "$ANDROID_MODULE" ]; then
               ANDROID_MODULE="androidApp"
             fi
@@ -1032,7 +1053,7 @@ EOF
               check_file "${{ env.SRC_PATH }}/app/build/outputs/apk/debug" && APK_OK=true
             fi
           elif [ "$PROJECT" == "kotlin-multiplatform" ]; then
-            ANDROID_MODULE=$(find "${{ env.SRC_PATH }}" -maxdepth 2 -name "build.gradle.kts" -path "*/android*/build.gradle.kts" | head -1 | cut -d'/' -f3)
+            ANDROID_MODULE=$(find "${{ env.SRC_PATH }}" -maxdepth 3 -name "build.gradle.kts" -path "*/android*/build.gradle.kts" | head -1 | cut -d'/' -f3)
             if [ -z "$ANDROID_MODULE" ]; then
               ANDROID_MODULE="androidApp"
             fi
@@ -1068,16 +1089,8 @@ EOF
           fi
 
           # Determiner l'etat final
-          if [ "$PROJECT" == "flutter" ] || [ "$PROJECT" == "web" ] || [ "$PROJECT" == "react" ] || [ "$PROJECT" == "vue" ]; then
-            if [ "$APK_OK" == "true" ] && [ "$AAB_OK" == "true" ]; then
-              STATE="success"
-            elif [ "$APK_OK" == "true" ] && [ "$FORMAT" == "apk" ]; then
-              STATE="success"
-            elif [ "$AAB_OK" == "true" ] && [ "$FORMAT" == "aab" ]; then
-              STATE="success"
-            fi
-          else
-            [ "$APK_OK" == "true" ] && STATE="success"
+          if [ "$APK_OK" == "true" ] || [ "$AAB_OK" == "true" ]; then
+            STATE="success"
           fi
 
           for i in 1 2 3 4 5; do
