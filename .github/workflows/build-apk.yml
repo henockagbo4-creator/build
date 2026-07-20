@@ -101,44 +101,14 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-jobs:
-  prepare:
-    runs-on: ubuntu-latest
-    outputs:
-      source_dir: ${{ steps.detect.outputs.source_dir }}
-      src_path: ${{ steps.detect.outputs.src_path }}
-      has_keystore: ${{ steps.keystore.outputs.has_keystore }}
-      keystore_path: ${{ steps.keystore.outputs.keystore_path }}
-    steps:
-      - name: Download source zip
-        run: |
-          set -e
-          curl -L -o source.zip "${{ github.event.inputs.zip_url }}"
-          mkdir -p src
-          unzip -o source.zip -d src/
-
-      - name: Detect source directory
-        id: detect
-        run: |
-          cd src
-          ITEM_COUNT=$(ls -1 | wc -l)
-          FIRST_ITEM=$(ls -1 | head -1)
-          if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
-            echo "source_dir=$FIRST_ITEM" >> "$GITHUB_OUTPUT"
-            echo "src_path=src/$FIRST_ITEM" >> "$GITHUB_OUTPUT"
-          else
-            echo "source_dir=." >> "$GITHUB_OUTPUT"
-            echo "src_path=src" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
+      - name: Cache Android SDK
+        uses: actions/cache@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+          path: |
+            ~/.android/sdk
+            /usr/local/lib/android/sdk
+          key: android-sdk-${{ runner.os }}-${{ hashFiles('**/build.gradle') }}
+          restore-keys: android-sdk-${{ runner.os }}-
 
       - name: Generate keystore
         id: keystore
