@@ -187,6 +187,11 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f "android/app/build.gradle" ]; then
+            echo "android/app/build.gradle manquant — regeneration des fichiers de plateforme Android..."
+            flutter create . --platforms=android
+          fi
+
           flutter pub get
 
           FORMAT="${{ github.event.inputs.output_format }}"
