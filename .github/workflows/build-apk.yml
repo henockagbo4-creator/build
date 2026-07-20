@@ -29,7 +29,7 @@ on:
         type: string
         default: 'apk'
       project_type:
-        description: 'Type de projet (web, flutter)'
+        description: 'Type de projet (web, flutter, react-native, kotlin, java, dotnet-maui, go, svelte, angular, solidjs, preact, nativescript, kotlin-multiplatform, ruby, lua, godot, react, vue, python)'
         required: false
         type: string
         default: 'web'
@@ -58,6 +58,9 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
+      # ============================================================
+      # 1. DOWNLOAD & DETECT SOURCE
+      # ============================================================
       - name: Download source zip
         run: |
           set -e
@@ -81,17 +84,14 @@ jobs:
             echo "Files directly in src/"
           fi
 
+      # ============================================================
+      # 2. SETUP TOOLCHAINS
+      # ============================================================
       - name: Setup Node
-        if: ${{ github.event.inputs.project_type != 'flutter' && github.event.inputs.project_type != 'python' }}
+        if: ${{ contains(fromJson('["web","react","vue","svelte","angular","solidjs","preact","nativescript","ionic","capacitor"]'), github.event.inputs.project_type) }}
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Install Cordova
-        if: ${{ github.event.inputs.project_type != 'flutter' && github.event.inputs.project_type != 'python' }}
-        run: |
-          set -e
-          npm install -g cordova
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -99,33 +99,9 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Python
-        if: ${{ github.event.inputs.project_type == 'python' }}
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Build with Briefcase (Python/Kivy)
-        if: ${{ github.event.inputs.project_type == 'python' }}
-        run: |
-          set -e
-          cd "${{ env.SRC_PATH }}"
-
-          if [ ! -f "pyproject.toml" ] || ! grep -q "tool.briefcase" pyproject.toml; then
-            echo "ERROR: pyproject.toml avec une section [tool.briefcase] est requis pour Briefcase."
-            echo "Contrairement a Buildozer, Briefcase attend un projet structure (genere via 'briefcase new' en local)."
-            echo "Uploade un projet deja initialise avec Briefcase, contenant un pyproject.toml valide."
-            exit 1
-          fi
-
-          pip install briefcase
-
-          briefcase create android
-          briefcase build android
-          briefcase package android -p apk --adhoc-sign
-
-          echo "=== Recherche de l'APK genere ==="
-          find . -name "*.apk" 2>/dev/null
+      - name: Setup Android SDK
+        if: ${{ contains(fromJson('["kotlin","java","react-native","nativescript","kotlin-multiplatform"]'), github.event.inputs.project_type) }}
+        uses: android-actions/setup-android@v3
 
       - name: Setup Flutter
         if: ${{ github.event.inputs.project_type == 'flutter' }}
@@ -133,8 +109,89 @@ jobs:
         with:
           channel: 'stable'
 
+      - name: Setup Python
+        if: ${{ github.event.inputs.project_type == 'python' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
 
+      - name: Setup .NET
+        if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
 
+      - name: Install .NET MAUI workload
+        if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+        run: dotnet workload install maui-android
+
+      - name: Setup Go
+        if: ${{ github.event.inputs.project_type == 'go' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Ruby
+        if: ${{ github.event.inputs.project_type == 'ruby' }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Setup Godot
+        if: ${{ github.event.inputs.project_type == 'godot' }}
+        run: |
+          set -e
+          GODOT_VERSION="4.2.2"
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+
+      - name: Setup Lua/Solar2D
+        if: ${{ github.event.inputs.project_type == 'lua' }}
+        run: |
+          set -e
+          wget -q https://github.com/coronalabs/corona/releases/download/3700/Solar2DConsole.tgz
+          tar -xzf Solar2DConsole.tgz
+          sudo mv Solar2DConsole /opt/solar2d
+          echo "/opt/solar2d" >> $GITHUB_PATH
+
+      # ============================================================
+      # 3. INSTALL GLOBAL DEPENDENCIES
+      # ============================================================
+      - name: Install Cordova
+        if: ${{ contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
+        run: npm install -g cordova
+
+      - name: Install Capacitor CLI
+        if: ${{ contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
+        run: npm install -g @capacitor/cli
+
+      - name: Install NativeScript CLI
+        if: ${{ github.event.inputs.project_type == 'nativescript' }}
+        run: npm install -g nativescript
+
+      - name: Install gomobile
+        if: ${{ github.event.inputs.project_type == 'go' }}
+        run: |
+          set -e
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+
+      - name: Install RubyMotion
+        if: ${{ github.event.inputs.project_type == 'ruby' }}
+        run: |
+          set -e
+          sudo apt-get update && sudo apt-get install -y build-essential
+          gem install motion-game || true
+
+      # ============================================================
+      # 4. KEYSTORE MANAGEMENT
+      # ============================================================
       - name: Generate keystore
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
@@ -153,12 +210,14 @@ jobs:
           set -e
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
 
+      # ============================================================
+      # 5. BUILD — WEB PROJECTS (Cordova)
+      # ============================================================
       - name: Install & build (React / Vue)
-        if: ${{ github.event.inputs.project_type == 'react' || github.event.inputs.project_type == 'vue' }}
+        if: ${{ contains(fromJson('["react","vue"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd "${{ env.SRC_PATH }}"
-
           if [ -f "package.json" ]; then
             echo "package.json trouve — build npm..."
             npm install
@@ -167,18 +226,13 @@ jobs:
             echo "Pas de package.json — fichiers traites comme deja prets (statique)."
           fi
 
-      # ============ BUILD — SITE WEB / CORDOVA ============
       - name: Build with Cordova (web project)
-        if: ${{ github.event.inputs.project_type != 'flutter' && github.event.inputs.project_type != 'python' }}
+        if: ${{ contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
         run: |
           set -e
           cd src
-
           SOURCE_DIR="${{ env.SOURCE_DIR }}"
           PROJECT_TYPE="${{ github.event.inputs.project_type }}"
-
-          # Pour React/Vue, le contenu à empaqueter est le dossier de sortie du build (dist/ ou build/)
-          # S'il n'y a pas eu de build (pas de package.json), on utilise directement les fichiers uploadés.
           COPY_FROM="$SOURCE_DIR"
           if [ "$PROJECT_TYPE" == "react" ] || [ "$PROJECT_TYPE" == "vue" ]; then
             if [ -d "$SOURCE_DIR/dist" ]; then
@@ -191,26 +245,19 @@ jobs:
               echo "Pas de dossier dist/ ou build/ — utilisation directe des fichiers sources: $COPY_FROM"
             fi
           fi
-
           cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
           rm -rf app/www/*
           cp -r "$COPY_FROM"/* app/www/ 2>/dev/null || true
-
           cd app
-
           if [ ! -f "www/index.html" ]; then
             echo "ERROR: www/index.html not found!"
             find www/ -type f | head -20
             exit 1
           fi
-
           cordova platform add android
-
           KEYSTORE_PATH="../../my-release-key.keystore"
           FORMAT="${{ github.event.inputs.output_format }}"
-
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
-
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
               echo "Building RELEASE APK"
               cordova build android --release -- \
@@ -220,7 +267,6 @@ jobs:
                 --alias="${{ github.event.inputs.keystore_alias }}" \
                 --password="${{ github.event.inputs.keystore_password }}"
             fi
-
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
               echo "Building RELEASE AAB (bundle)"
               cordova build android --release -- \
@@ -230,14 +276,209 @@ jobs:
                 --alias="${{ github.event.inputs.keystore_alias }}" \
                 --password="${{ github.event.inputs.keystore_password }}"
             fi
-
           else
             echo "Building DEBUG"
             cordova build android --debug
           fi
 
-      # ============ BUILD — FLUTTER ============
-      - name: Build with Flutter
+      # ============================================================
+      # 6. BUILD — CAPACITOR PROJECTS (Svelte, Angular, SolidJS, Preact, Ionic)
+      # ============================================================
+      - name: Build Capacitor projects
+        if: ${{ contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "package.json" ]; then
+            echo "ERROR: package.json not found."
+            exit 1
+          fi
+
+          npm install
+
+          # Detect framework and build
+          PROJECT_TYPE="${{ github.event.inputs.project_type }}"
+
+          if [ "$PROJECT_TYPE" == "svelte" ] || [ "$PROJECT_TYPE" == "sveltekit" ]; then
+            if [ -f "svelte.config.js" ] || [ -f "vite.config.ts" ] || [ -f "vite.config.js" ]; then
+              npm run build
+              WWW_DIR="dist"
+            else
+              npm run build
+              WWW_DIR="public"
+            fi
+          elif [ "$PROJECT_TYPE" == "angular" ]; then
+            npm run build -- --configuration=production
+            WWW_DIR="dist/$(ls dist | head -1)"
+          elif [ "$PROJECT_TYPE" == "solidjs" ]; then
+            npm run build
+            WWW_DIR="dist"
+          elif [ "$PROJECT_TYPE" == "preact" ]; then
+            npm run build
+            WWW_DIR="build"
+          elif [ "$PROJECT_TYPE" == "ionic" ] || [ "$PROJECT_TYPE" == "capacitor" ]; then
+            if [ -f "angular.json" ]; then
+              npm run build -- --configuration=production
+              WWW_DIR="www"
+            else
+              npm run build
+              WWW_DIR="dist"
+            fi
+          fi
+
+          # Init Capacitor Android si pas présent
+          if [ ! -d "android" ]; then
+            echo "Initialisation de Capacitor Android..."
+            npx cap add android || true
+          fi
+
+          npx cap sync android
+
+          cd android
+          chmod +x gradlew
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p app/keystore
+            cp "$GITHUB_WORKSPACE/my-release-key.keystore" app/keystore/
+            echo "RELEASE_STORE_FILE=keystore/my-release-key.keystore" >> gradle.properties
+            echo "RELEASE_KEY_ALIAS=${{ github.event.inputs.keystore_alias }}" >> gradle.properties
+            echo "RELEASE_STORE_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            echo "RELEASE_KEY_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
+
+      # ============================================================
+      # 7. BUILD — REACT NATIVE
+      # ============================================================
+      - name: Build React Native
+        if: ${{ github.event.inputs.project_type == 'react-native' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "package.json" ]; then
+            echo "ERROR: package.json not found — ce n'est pas un projet React Native valide."
+            exit 1
+          fi
+
+          npm install
+
+          if [ ! -d "android" ]; then
+            echo "ERROR: dossier android/ manquant. Exécute 'npx react-native init' ou 'npx expo prebuild' en local."
+            exit 1
+          fi
+
+          cd android
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p app/keystore
+            cp "$GITHUB_WORKSPACE/my-release-key.keystore" app/keystore/
+            echo "MYAPP_UPLOAD_STORE_FILE=keystore/my-release-key.keystore" >> gradle.properties
+            echo "MYAPP_UPLOAD_KEY_ALIAS=${{ github.event.inputs.keystore_alias }}" >> gradle.properties
+            echo "MYAPP_UPLOAD_STORE_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            echo "MYAPP_UPLOAD_KEY_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
+
+      # ============================================================
+      # 8. BUILD — NATIVESCRIPT
+      # ============================================================
+      - name: Build NativeScript
+        if: ${{ github.event.inputs.project_type == 'nativescript' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "package.json" ]; then
+            echo "ERROR: package.json not found."
+            exit 1
+          fi
+
+          npm install
+          ns platform add android
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            ns build android --release \
+              --key-store-path "$GITHUB_WORKSPACE/my-release-key.keystore" \
+              --key-store-password "${{ github.event.inputs.keystore_password }}" \
+              --key-store-alias "${{ github.event.inputs.keystore_alias }}" \
+              --key-store-alias-password "${{ github.event.inputs.keystore_password }}"
+          else
+            ns build android --debug
+          fi
+
+      # ============================================================
+      # 9. BUILD — KOTLIN / JAVA NATIF
+      # ============================================================
+      - name: Build Kotlin/Java Native
+        if: ${{ contains(fromJson('["kotlin","java"]'), github.event.inputs.project_type) }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          # Détecter le fichier build.gradle
+          if [ -f "build.gradle" ] || [ -f "build.gradle.kts" ] || [ -f "app/build.gradle" ] || [ -f "app/build.gradle.kts" ]; then
+            echo "Projet Gradle détecté."
+          else
+            echo "ERROR: Aucun build.gradle trouvé — ce n'est pas un projet Android natif valide."
+            exit 1
+          fi
+
+          # Setup keystore pour release
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p app/keystore
+            cp "$GITHUB_WORKSPACE/my-release-key.keystore" app/keystore/
+            echo "RELEASE_STORE_FILE=keystore/my-release-key.keystore" >> gradle.properties
+            echo "RELEASE_KEY_ALIAS=${{ github.event.inputs.keystore_alias }}" >> gradle.properties
+            echo "RELEASE_STORE_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            echo "RELEASE_KEY_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+          fi
+
+          chmod +x gradlew
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
+
+      # ============================================================
+      # 10. BUILD — KOTLIN MULTIPLATFORM
+      # ============================================================
+      - name: Build Kotlin Multiplatform
+        if: ${{ github.event.inputs.project_type == 'kotlin-multiplatform' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "build.gradle.kts" ] && [ ! -f "build.gradle" ]; then
+            echo "ERROR: build.gradle.kts non trouvé."
+            exit 1
+          fi
+
+          chmod +x gradlew
+
+          # Build Android target
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p androidApp/keystore
+            cp "$GITHUB_WORKSPACE/my-release-key.keystore" androidApp/keystore/
+            echo "RELEASE_STORE_FILE=keystore/my-release-key.keystore" >> gradle.properties
+            echo "RELEASE_KEY_ALIAS=${{ github.event.inputs.keystore_alias }}" >> gradle.properties
+            echo "RELEASE_STORE_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            echo "RELEASE_KEY_PASSWORD=${{ github.event.inputs.keystore_password }}" >> gradle.properties
+            ./gradlew :androidApp:assembleRelease
+          else
+            ./gradlew :androidApp:assembleDebug
+          fi
+
+      # ============================================================
+      # 11. BUILD — FLUTTER
+      # ============================================================
+      - name: Build Flutter
         if: ${{ github.event.inputs.project_type == 'flutter' }}
         run: |
           set -e
@@ -260,34 +501,244 @@ jobs:
           KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-
             if [ -f "$KEYSTORE_PATH" ]; then
               echo "storePassword=${{ github.event.inputs.keystore_password }}" > android/key.properties
               echo "keyPassword=${{ github.event.inputs.keystore_password }}" >> android/key.properties
               echo "keyAlias=${{ github.event.inputs.keystore_alias }}" >> android/key.properties
               echo "storeFile=$KEYSTORE_PATH" >> android/key.properties
 
-              echo "aW1wb3J0IHJlLCBvcwoKZ3JhZGxlX3BhdGggPSAiYW5kcm9pZC9hcHAvYnVpbGQuZ3JhZGxlIgppZiBub3Qgb3MucGF0aC5leGlzdHMoZ3JhZGxlX3BhdGgpOgogICAgcHJpbnQoIlBhcyBkZSBidWlsZC5ncmFkbGUgR3Jvb3Z5IHRyb3V2ZSAocGV1dC1ldHJlIEtvdGxpbiBEU0wpIC0gcGF0Y2ggaWdub3JlLiIpCmVsc2U6CiAgICBjb250ZW50ID0gb3BlbihncmFkbGVfcGF0aCkucmVhZCgpCiAgICBpZiAia2V5c3RvcmVQcm9wZXJ0aWVzIiBpbiBjb250ZW50OgogICAgICAgIHByaW50KCJDb25maWcgZGUgc2lnbmF0dXJlIGRlamEgcHJlc2VudGUgLSBwYXRjaCBpZ25vcmUuIikKICAgIGVsc2U6CiAgICAgICAgbG9hZGVyID0gIiIiZGVmIGtleXN0b3JlUHJvcGVydGllcyA9IG5ldyBQcm9wZXJ0aWVzKCkKZGVmIGtleXN0b3JlUHJvcGVydGllc0ZpbGUgPSByb290UHJvamVjdC5maWxlKCdrZXkucHJvcGVydGllcycpCmlmIChrZXlzdG9yZVByb3BlcnRpZXNGaWxlLmV4aXN0cygpKSB7CiAgICBrZXlzdG9yZVByb3BlcnRpZXMubG9hZChuZXcgRmlsZUlucHV0U3RyZWFtKGtleXN0b3JlUHJvcGVydGllc0ZpbGUpKQp9CgoiIiIKICAgICAgICBjb250ZW50ID0gbG9hZGVyICsgY29udGVudAoKICAgICAgICBzaWduaW5nX2Jsb2NrID0gIiIiICAgIHNpZ25pbmdDb25maWdzIHsKICAgICAgICByZWxlYXNlIHsKICAgICAgICAgICAgaWYgKGtleXN0b3JlUHJvcGVydGllc0ZpbGUuZXhpc3RzKCkpIHsKICAgICAgICAgICAgICAgIGtleUFsaWFzIGtleXN0b3JlUHJvcGVydGllc1sna2V5QWxpYXMnXQogICAgICAgICAgICAgICAga2V5UGFzc3dvcmQga2V5c3RvcmVQcm9wZXJ0aWVzWydrZXlQYXNzd29yZCddCiAgICAgICAgICAgICAgICBzdG9yZUZpbGUgZmlsZShrZXlzdG9yZVByb3BlcnRpZXNbJ3N0b3JlRmlsZSddKQogICAgICAgICAgICAgICAgc3RvcmVQYXNzd29yZCBrZXlzdG9yZVByb3BlcnRpZXNbJ3N0b3JlUGFzc3dvcmQnXQogICAgICAgICAgICB9CiAgICAgICAgfQogICAgfQoiIiIKICAgICAgICBjb250ZW50ID0gcmUuc3ViKHInKGFuZHJvaWRccypceyknLCByJ1wxXG4nICsgc2lnbmluZ19ibG9jaywgY29udGVudCwgY291bnQ9MSkKCiAgICAgICAgY29udGVudCA9IHJlLnN1YigKICAgICAgICAgICAgcicoYnVpbGRUeXBlc1xzKlx7W159XSpyZWxlYXNlXHMqXHtbXn1dKilzaWduaW5nQ29uZmlnXHMrc2lnbmluZ0NvbmZpZ3NcLmRlYnVnJywKICAgICAgICAgICAgcidcMXNpZ25pbmdDb25maWcgc2lnbmluZ0NvbmZpZ3MucmVsZWFzZScsCiAgICAgICAgICAgIGNvbnRlbnQsCiAgICAgICAgICAgIGZsYWdzPXJlLkRPVEFMTAogICAgICAgICkKICAgICAgICBpZiAnc2lnbmluZ0NvbmZpZyBzaWduaW5nQ29uZmlncy5yZWxlYXNlJyBub3QgaW4gY29udGVudDoKICAgICAgICAgICAgY29udGVudCA9IHJlLnN1YigKICAgICAgICAgICAgICAgIHInKHJlbGVhc2VccypceyknLAogICAgICAgICAgICAgICAgcidcMVxuICAgICAgICAgICAgc2lnbmluZ0NvbmZpZyBzaWduaW5nQ29uZmlncy5yZWxlYXNlJywKICAgICAgICAgICAgICAgIGNvbnRlbnQsCiAgICAgICAgICAgICAgICBjb3VudD0xCiAgICAgICAgICAgICkKCiAgICAgICAgb3BlbihncmFkbGVfcGF0aCwgJ3cnKS53cml0ZShjb250ZW50KQogICAgICAgIHByaW50KCJidWlsZC5ncmFkbGUgcGF0Y2hlIGF2ZWMgbGEgY29uZmlnIGRlIHNpZ25hdHVyZSByZWxlYXNlLiIpCg==" | base64 -d > /tmp/patch_gradle.py
-              python3 /tmp/patch_gradle.py
+              # Patch build.gradle si nécessaire
+              python3 -c "
+import re, os
+gradle_path = 'android/app/build.gradle'
+if not os.path.exists(gradle_path):
+    print('Pas de build.gradle Groovy trouve — patch ignore.')
+else:
+    content = open(gradle_path).read()
+    if 'keystoreProperties' in content:
+        print('Config de signature deja presente — patch ignore.')
+    else:
+        loader = '''def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file('key.properties')
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
 
-              echo "key.properties cree."
+'''
+        content = loader + content
+        signing_block = '''    signingConfigs {
+        release {
+            if (keystorePropertiesFile.exists()) {
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+            }
+        }
+    }
+'''
+        content = re.sub(r'(android\s*\{)', r'\1\n' + signing_block, content, count=1)
+        content = re.sub(
+            r'(buildTypes\s*\{[^}]*release\s*\{[^}]*?)signingConfig\s+signingConfigs\.debug',
+            r'\1signingConfig signingConfigs.release',
+            content,
+            flags=re.DOTALL
+        )
+        if 'signingConfig signingConfigs.release' not in content:
+            content = re.sub(
+                r'(release\s*\{)',
+                r'\1\n            signingConfig signingConfigs.release',
+                content,
+                count=1
+            )
+        open(gradle_path, 'w').write(content)
+        print('build.gradle patche avec la config de signature release.')
+"
             fi
 
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
               echo "Building Flutter RELEASE APK"
               flutter build apk --release
             fi
-
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
               echo "Building Flutter RELEASE AAB"
               flutter build appbundle --release
             fi
-
           else
             echo "Building Flutter DEBUG APK"
             flutter build apk --debug
           fi
 
+      # ============================================================
+      # 12. BUILD — PYTHON (Briefcase)
+      # ============================================================
+      - name: Build with Briefcase (Python/Kivy)
+        if: ${{ github.event.inputs.project_type == 'python' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "pyproject.toml" ] || ! grep -q "tool.briefcase" pyproject.toml; then
+            echo "ERROR: pyproject.toml avec une section [tool.briefcase] est requis pour Briefcase."
+            exit 1
+          fi
+
+          pip install briefcase
+          briefcase create android
+          briefcase build android
+          briefcase package android -p apk --adhoc-sign
+
+          echo "=== Recherche de l'APK genere ==="
+          find . -name "*.apk" 2>/dev/null
+
+      # ============================================================
+      # 13. BUILD — .NET MAUI
+      # ============================================================
+      - name: Build .NET MAUI
+        if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          if [ -z "$CSPROJ" ]; then
+            echo "ERROR: Aucun fichier .csproj trouvé."
+            exit 1
+          fi
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            dotnet publish "$CSPROJ" \
+              -f net8.0-android \
+              -c Release \
+              -p:AndroidSigningKeyStore="$GITHUB_WORKSPACE/my-release-key.keystore" \
+              -p:AndroidSigningKeyAlias="${{ github.event.inputs.keystore_alias }}" \
+              -p:AndroidSigningKeyPass="${{ github.event.inputs.keystore_password }}" \
+              -p:AndroidSigningStorePass="${{ github.event.inputs.keystore_password }}"
+          else
+            dotnet build "$CSPROJ" -f net8.0-android -c Debug
+          fi
+
+      # ============================================================
+      # 14. BUILD — GO (gomobile)
+      # ============================================================
+      - name: Build Go (gomobile)
+        if: ${{ github.event.inputs.project_type == 'go' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          # Vérifier go.mod
+          if [ ! -f "go.mod" ]; then
+            echo "ERROR: go.mod not found."
+            exit 1
+          fi
+
+          # Build avec gomobile
+          # Pour un APK complet, il faut un main package avec une UI (Fyne, Gio, ou binding Android)
+          if [ -f "main.go" ]; then
+            # Détecter si c'est Fyne
+            if grep -q "fyne.io/fyne" *.go 2>/dev/null; then
+              go install fyne.io/fyne/v2/cmd/fyne@latest
+              if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+                fyne package -os android -release -appID "${{ github.event.inputs.package_id }}" -name "${{ github.event.inputs.app_name }}"
+              else
+                fyne package -os android -appID "${{ github.event.inputs.package_id }}" -name "${{ github.event.inputs.app_name }}"
+              fi
+            else
+              # gomobile bind pour lib native, ou gomobile build pour APK simple
+              gomobile build -target=android -o app.apk .
+            fi
+          else
+            echo "ERROR: main.go not found."
+            exit 1
+          fi
+
+      # ============================================================
+      # 15. BUILD — RUBY (RubyMotion)
+      # ============================================================
+      - name: Build Ruby (RubyMotion)
+        if: ${{ github.event.inputs.project_type == 'ruby' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "Rakefile" ]; then
+            echo "ERROR: Rakefile not found — ce n'est pas un projet RubyMotion valide."
+            exit 1
+          fi
+
+          # RubyMotion nécessite une licence commerciale pour Android
+          # Ce step est un placeholder — l'utilisateur doit avoir une licence
+          echo "RubyMotion build..."
+          echo "NOTE: RubyMotion nécessite une licence. Ce build est experimental."
+          rake android:build || echo "Build RubyMotion échoué — licence requise."
+
+      # ============================================================
+      # 16. BUILD — LUA (Solar2D/Corona)
+      # ============================================================
+      - name: Build Lua (Solar2D)
+        if: ${{ github.event.inputs.project_type == 'lua' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "main.lua" ] && [ ! -f "main.lua" ]; then
+            echo "ERROR: main.lua not found."
+            exit 1
+          fi
+
+          # Solar2D build
+          /opt/solar2d/Solar2DBuilder build --platform android --output build/ || true
+
+          # Fallback: packager manuellement si Solar2DBuilder échoue
+          echo "Solar2D build terminé (ou tentative)."
+
+      # ============================================================
+      # 17. BUILD — GODOT
+      # ============================================================
+      - name: Build Godot
+        if: ${{ github.event.inputs.project_type == 'godot' }}
+        run: |
+          set -e
+          cd "${{ env.SRC_PATH }}"
+
+          if [ ! -f "project.godot" ]; then
+            echo "ERROR: project.godot not found."
+            exit 1
+          fi
+
+          mkdir -p exports
+
+          # Créer le preset d'export Android si absent
+          if [ ! -f "export_presets.cfg" ]; then
+            cat > export_presets.cfg << 'EOF'
+[preset.0]
+name="Android"
+platform="Android"
+runnable=true
+export_filter="all_resources"
+include_filter=""
+exclude_filter=""
+export_path="exports/android.apk"
+script_export_mode=1
+
+[preset.0.options]
+gradle_build/use_gradle_build=true
+gradle_build/export_format=0
+gradle_build/min_sdk=21
+gradle_build/target_sdk=34
+EOF
+          fi
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            godot --headless --export-release "Android" exports/android.apk
+          else
+            godot --headless --export-debug "Android" exports/android.apk
+          fi
+
+      # ============================================================
+      # 18. UPLOAD ARTIFACTS (GitHub)
+      # ============================================================
       - name: Upload APK as GitHub Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -295,9 +746,18 @@ jobs:
           path: |
             src/app/platforms/android/app/build/outputs/apk/*/*.apk
             ${{ env.SRC_PATH }}/build/app/outputs/flutter-apk/*.apk
+            ${{ env.SRC_PATH }}/android/app/build/outputs/apk/*/*.apk
+            ${{ env.SRC_PATH }}/app/build/outputs/apk/*/*.apk
+            ${{ env.SRC_PATH }}/**/bin/Release/net8.0-android/**/*.apk
+            ${{ env.SRC_PATH }}/exports/*.apk
+            ${{ env.SRC_PATH }}/*.apk
+            ${{ env.SRC_PATH }}/build/outputs/apk/*/*.apk
           retention-days: 1
           if-no-files-found: ignore
 
+      # ============================================================
+      # 19. UPLOAD TO R2 — APK
+      # ============================================================
       - name: Upload APK to R2 (direct, S3 API)
         if: ${{ github.event.inputs.output_format != 'aab' }}
         env:
@@ -308,18 +768,65 @@ jobs:
         run: |
           set -e
           APK_FILE=""
+          PROJECT="${{ github.event.inputs.project_type }}"
 
-          if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_APK_DIR="${{ env.SRC_PATH }}/build/app/outputs/flutter-apk"
-            APK_FILE=$(find "$FLUTTER_APK_DIR" -name "*.apk" 2>/dev/null | head -1)
-          elif [ "${{ github.event.inputs.project_type }}" == "python" ]; then
-            APK_FILE=$(find "${{ env.SRC_PATH }}" -name "*.apk" 2>/dev/null | head -1)
+          resolve_apk() {
+            local dir="$1"
+            local pattern="$2"
+            find "$dir" -name "$pattern" 2>/dev/null | head -1
+          }
+
+          if [ "$PROJECT" == "flutter" ]; then
+            APK_FILE=$(resolve_apk "${{ env.SRC_PATH }}/build/app/outputs/flutter-apk" "*.apk")
+          elif [ "$PROJECT" == "python" ]; then
+            APK_FILE=$(resolve_apk "${{ env.SRC_PATH }}" "*.apk")
+          elif [ "$PROJECT" == "react-native" ]; then
+            APK_DIR="${{ env.SRC_PATH }}/android/app/build/outputs/apk"
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              APK_FILE=$(resolve_apk "${APK_DIR}/release" "*.apk")
+            else
+              APK_FILE=$(resolve_apk "${APK_DIR}/debug" "*.apk")
+            fi
+          elif [ "$PROJECT" == "nativescript" ]; then
+            APK_FILE=$(resolve_apk "${{ env.SRC_PATH }}/platforms/android/app/build/outputs/apk" "*.apk")
+          elif [ "$PROJECT" == "kotlin" ] || [ "$PROJECT" == "java" ]; then
+            APK_DIR="${{ env.SRC_PATH }}/app/build/outputs/apk"
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              APK_FILE=$(resolve_apk "${APK_DIR}/release" "*.apk")
+            else
+              APK_FILE=$(resolve_apk "${APK_DIR}/debug" "*.apk")
+            fi
+          elif [ "$PROJECT" == "kotlin-multiplatform" ]; then
+            APK_DIR="${{ env.SRC_PATH }}/androidApp/build/outputs/apk"
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              APK_FILE=$(resolve_apk "${APK_DIR}/release" "*.apk")
+            else
+              APK_FILE=$(resolve_apk "${APK_DIR}/debug" "*.apk")
+            fi
+          elif [ "$PROJECT" == "dotnet-maui" ] || [ "$PROJECT" == "maui" ] || [ "$PROJECT" == "csharp" ]; then
+            APK_FILE=$(resolve_apk "${{ env.SRC_PATH }}" "*.apk")
+          elif [ "$PROJECT" == "go" ]; then
+            if [ -f "${{ env.SRC_PATH }}/app.apk" ]; then
+              APK_FILE="${{ env.SRC_PATH }}/app.apk"
+            else
+              APK_FILE=$(resolve_apk "${{ env.SRC_PATH }}" "*.apk")
+            fi
+          elif [ "$PROJECT" == "godot" ]; then
+            APK_FILE=$(resolve_apk "${{ env.SRC_PATH }}/exports" "*.apk")
+          elif [ "$PROJECT" == "svelte" ] || [ "$PROJECT" == "angular" ] || [ "$PROJECT" == "solidjs" ] || [ "$PROJECT" == "preact" ] || [ "$PROJECT" == "ionic" ] || [ "$PROJECT" == "capacitor" ]; then
+            APK_DIR="${{ env.SRC_PATH }}/android/app/build/outputs/apk"
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              APK_FILE=$(resolve_apk "${APK_DIR}/release" "*.apk")
+            else
+              APK_FILE=$(resolve_apk "${APK_DIR}/debug" "*.apk")
+            fi
           else
+            # Default: Cordova (web, react, vue)
             APK_DIR="src/app/platforms/android/app/build/outputs/apk"
             if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-              APK_FILE=$(find "${APK_DIR}/release" -name "*.apk" 2>/dev/null | head -1)
+              APK_FILE=$(resolve_apk "${APK_DIR}/release" "*.apk")
             else
-              APK_FILE=$(find "${APK_DIR}/debug" -name "*.apk" 2>/dev/null | head -1)
+              APK_FILE=$(resolve_apk "${APK_DIR}/debug" "*.apk")
             fi
           fi
 
@@ -334,6 +841,9 @@ jobs:
             echo "No APK file found, skipping R2 upload."
           fi
 
+      # ============================================================
+      # 20. UPLOAD TO R2 — AAB
+      # ============================================================
       - name: Upload AAB to R2 (direct, S3 API)
         if: ${{ github.event.inputs.build_type == 'release' && (github.event.inputs.output_format == 'aab' || github.event.inputs.output_format == 'both') }}
         env:
@@ -344,13 +854,25 @@ jobs:
         run: |
           set -e
           AAB_FILE=""
+          PROJECT="${{ github.event.inputs.project_type }}"
 
-          if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_AAB_DIR="${{ env.SRC_PATH }}/build/app/outputs/bundle/release"
-            AAB_FILE=$(find "$FLUTTER_AAB_DIR" -name "*.aab" 2>/dev/null | head -1)
+          resolve_aab() {
+            local dir="$1"
+            find "$dir" -name "*.aab" 2>/dev/null | head -1
+          }
+
+          if [ "$PROJECT" == "flutter" ]; then
+            AAB_FILE=$(resolve_aab "${{ env.SRC_PATH }}/build/app/outputs/bundle/release")
+          elif [ "$PROJECT" == "react-native" ]; then
+            AAB_FILE=$(resolve_aab "${{ env.SRC_PATH }}/android/app/build/outputs/bundle/release")
+          elif [ "$PROJECT" == "kotlin" ] || [ "$PROJECT" == "java" ]; then
+            AAB_FILE=$(resolve_aab "${{ env.SRC_PATH }}/app/build/outputs/bundle/release")
+          elif [ "$PROJECT" == "kotlin-multiplatform" ]; then
+            AAB_FILE=$(resolve_aab "${{ env.SRC_PATH }}/androidApp/build/outputs/bundle/release")
+          elif [ "$PROJECT" == "dotnet-maui" ] || [ "$PROJECT" == "maui" ] || [ "$PROJECT" == "csharp" ]; then
+            AAB_FILE=$(resolve_aab "${{ env.SRC_PATH }}")
           else
-            AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
-            AAB_FILE=$(find "${AAB_DIR}/release" -name "*.aab" 2>/dev/null | head -1)
+            AAB_FILE=$(resolve_aab "src/app/platforms/android/app/build/outputs/bundle/release")
           fi
 
           if [ -f "$AAB_FILE" ]; then
@@ -364,7 +886,10 @@ jobs:
             echo "No AAB file found, skipping R2 upload."
           fi
 
-      - name: Upload generated keystore to R2 (direct, S3 API)
+      # ============================================================
+      # 21. UPLOAD GENERATED KEYSTORE
+      # ============================================================
+      - name: Upload generated keystore to R2
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -374,7 +899,7 @@ jobs:
         run: |
           set -e
           if [ -f "my-release-key.keystore" ]; then
-            echo "Uploading generated keystore to R2 (direct)..."
+            echo "Uploading generated keystore to R2..."
             aws s3 cp "my-release-key.keystore" \
               "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/keystore-${{ github.event.inputs.build_id }}.keystore" \
               --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
@@ -382,49 +907,95 @@ jobs:
               --content-type application/octet-stream
           fi
 
+      # ============================================================
+      # 22. NOTIFY BACKEND
+      # ============================================================
       - name: Notify backend
         run: |
+          set -e
           STATE="error"
           FORMAT="${{ github.event.inputs.output_format }}"
+          PROJECT="${{ github.event.inputs.project_type }}"
 
-          if [ "${{ github.event.inputs.project_type }}" == "python" ]; then
-            if [ -n "$(find "${{ env.SRC_PATH }}" -name '*.apk' 2>/dev/null)" ]; then
-              STATE="success"
-            fi
-          elif [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_APK_DIR="${{ env.SRC_PATH }}/build/app/outputs/flutter-apk"
-            FLUTTER_AAB_DIR="${{ env.SRC_PATH }}/build/app/outputs/bundle/release"
-            APK_OK=true
-            AAB_OK=true
+          check_file() {
+            local path="$1"
+            [ -n "$(find "$path" -name '*.apk' 2>/dev/null)" ]
+          }
+
+          check_aab() {
+            local path="$1"
+            [ -n "$(find "$path" -name '*.aab' 2>/dev/null)" ]
+          }
+
+          APK_OK=false
+          AAB_OK=false
+
+          if [ "$PROJECT" == "python" ]; then
+            check_file "${{ env.SRC_PATH }}" && APK_OK=true
+          elif [ "$PROJECT" == "flutter" ]; then
             if [ "${{ github.event.inputs.build_type }}" != "release" ] || [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
-              [ -n "$(find "$FLUTTER_APK_DIR" -name '*.apk' 2>/dev/null)" ] && APK_OK=true || APK_OK=false
+              check_file "${{ env.SRC_PATH }}/build/app/outputs/flutter-apk" && APK_OK=true
             fi
             if [ "${{ github.event.inputs.build_type }}" == "release" ] && ([ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]); then
-              [ -n "$(find "$FLUTTER_AAB_DIR" -name '*.aab' 2>/dev/null)" ] && AAB_OK=true || AAB_OK=false
+              check_aab "${{ env.SRC_PATH }}/build/app/outputs/bundle/release" && AAB_OK=true
             fi
+          elif [ "$PROJECT" == "react-native" ]; then
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              check_file "${{ env.SRC_PATH }}/android/app/build/outputs/apk/release" && APK_OK=true
+            else
+              check_file "${{ env.SRC_PATH }}/android/app/build/outputs/apk/debug" && APK_OK=true
+            fi
+          elif [ "$PROJECT" == "nativescript" ]; then
+            check_file "${{ env.SRC_PATH }}/platforms/android/app/build/outputs/apk" && APK_OK=true
+          elif [ "$PROJECT" == "kotlin" ] || [ "$PROJECT" == "java" ]; then
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              check_file "${{ env.SRC_PATH }}/app/build/outputs/apk/release" && APK_OK=true
+            else
+              check_file "${{ env.SRC_PATH }}/app/build/outputs/apk/debug" && APK_OK=true
+            fi
+          elif [ "$PROJECT" == "kotlin-multiplatform" ]; then
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              check_file "${{ env.SRC_PATH }}/androidApp/build/outputs/apk/release" && APK_OK=true
+            else
+              check_file "${{ env.SRC_PATH }}/androidApp/build/outputs/apk/debug" && APK_OK=true
+            fi
+          elif [ "$PROJECT" == "dotnet-maui" ] || [ "$PROJECT" == "maui" ] || [ "$PROJECT" == "csharp" ]; then
+            check_file "${{ env.SRC_PATH }}" && APK_OK=true
+          elif [ "$PROJECT" == "go" ]; then
+            [ -f "${{ env.SRC_PATH }}/app.apk" ] || check_file "${{ env.SRC_PATH }}" && APK_OK=true
+          elif [ "$PROJECT" == "godot" ]; then
+            check_file "${{ env.SRC_PATH }}/exports" && APK_OK=true
+          elif [ "$PROJECT" == "svelte" ] || [ "$PROJECT" == "angular" ] || [ "$PROJECT" == "solidjs" ] || [ "$PROJECT" == "preact" ] || [ "$PROJECT" == "ionic" ] || [ "$PROJECT" == "capacitor" ]; then
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              check_file "${{ env.SRC_PATH }}/android/app/build/outputs/apk/release" && APK_OK=true
+            else
+              check_file "${{ env.SRC_PATH }}/android/app/build/outputs/apk/debug" && APK_OK=true
+            fi
+          else
+            # Default Cordova
+            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+              if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
+                check_file "src/app/platforms/android/app/build/outputs/apk/release" && APK_OK=true
+              fi
+              if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+                check_aab "src/app/platforms/android/app/build/outputs/bundle/release" && AAB_OK=true
+              fi
+            else
+              [ -f "src/app/platforms/android/app/build/outputs/apk/debug/app-debug.apk" ] && APK_OK=true
+            fi
+          fi
+
+          # Déterminer l'état final
+          if [ "$PROJECT" == "flutter" ] || [ "$PROJECT" == "web" ] || [ "$PROJECT" == "react" ] || [ "$PROJECT" == "vue" ]; then
             if [ "$APK_OK" == "true" ] && [ "$AAB_OK" == "true" ]; then
+              STATE="success"
+            elif [ "$APK_OK" == "true" ] && [ "$FORMAT" == "apk" ]; then
+              STATE="success"
+            elif [ "$AAB_OK" == "true" ] && [ "$FORMAT" == "aab" ]; then
               STATE="success"
             fi
           else
-            APK_DIR="src/app/platforms/android/app/build/outputs/apk"
-            AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
-            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-              APK_OK=true
-              AAB_OK=true
-              if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
-                [ -n "$(find "${APK_DIR}/release" -name '*.apk' 2>/dev/null)" ] && APK_OK=true || APK_OK=false
-              fi
-              if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-                [ -n "$(find "${AAB_DIR}/release" -name '*.aab' 2>/dev/null)" ] && AAB_OK=true || AAB_OK=false
-              fi
-              if [ "$APK_OK" == "true" ] && [ "$AAB_OK" == "true" ]; then
-                STATE="success"
-              fi
-            else
-              if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
-                STATE="success"
-              fi
-            fi
+            [ "$APK_OK" == "true" ] && STATE="success"
           fi
 
           for i in 1 2 3 4 5; do
