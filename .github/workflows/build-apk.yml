@@ -73,9 +73,11 @@ jobs:
           FIRST_ITEM=$(ls -1 | head -1)
           if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
             echo "SOURCE_DIR=$FIRST_ITEM" >> "$GITHUB_ENV"
+            echo "SRC_PATH=src/$FIRST_ITEM" >> "$GITHUB_ENV"
             echo "Single folder detected: $FIRST_ITEM"
           else
             echo "SOURCE_DIR=." >> "$GITHUB_ENV"
+            echo "SRC_PATH=src" >> "$GITHUB_ENV"
             echo "Files directly in src/"
           fi
 
@@ -107,7 +109,7 @@ jobs:
         if: ${{ github.event.inputs.project_type == 'python' }}
         run: |
           set -e
-          cd "src/${{ env.SOURCE_DIR }}"
+          cd "${{ env.SRC_PATH }}"
 
           if [ ! -f "pyproject.toml" ] || ! grep -q "tool.briefcase" pyproject.toml; then
             echo "ERROR: pyproject.toml avec une section [tool.briefcase] est requis pour Briefcase."
@@ -155,7 +157,7 @@ jobs:
         if: ${{ github.event.inputs.project_type == 'react' || github.event.inputs.project_type == 'vue' }}
         run: |
           set -e
-          cd "src/${{ env.SOURCE_DIR }}"
+          cd "${{ env.SRC_PATH }}"
 
           if [ -f "package.json" ]; then
             echo "package.json trouve — build npm..."
@@ -239,7 +241,7 @@ jobs:
         if: ${{ github.event.inputs.project_type == 'flutter' }}
         run: |
           set -e
-          cd "src/${{ env.SOURCE_DIR }}"
+          cd "${{ env.SRC_PATH }}"
 
           if [ ! -f "pubspec.yaml" ]; then
             echo "ERROR: pubspec.yaml not found — ce n'est pas un projet Flutter valide."
@@ -292,7 +294,7 @@ jobs:
           name: apk-${{ github.event.inputs.build_id }}
           path: |
             src/app/platforms/android/app/build/outputs/apk/*/*.apk
-            src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk/*.apk
+            ${{ env.SRC_PATH }}/build/app/outputs/flutter-apk/*.apk
           retention-days: 1
           if-no-files-found: ignore
 
@@ -308,10 +310,10 @@ jobs:
           APK_FILE=""
 
           if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_APK_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk"
+            FLUTTER_APK_DIR="${{ env.SRC_PATH }}/build/app/outputs/flutter-apk"
             APK_FILE=$(find "$FLUTTER_APK_DIR" -name "*.apk" 2>/dev/null | head -1)
           elif [ "${{ github.event.inputs.project_type }}" == "python" ]; then
-            APK_FILE=$(find "src/${{ env.SOURCE_DIR }}" -name "*.apk" 2>/dev/null | head -1)
+            APK_FILE=$(find "${{ env.SRC_PATH }}" -name "*.apk" 2>/dev/null | head -1)
           else
             APK_DIR="src/app/platforms/android/app/build/outputs/apk"
             if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
@@ -344,7 +346,7 @@ jobs:
           AAB_FILE=""
 
           if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_AAB_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/bundle/release"
+            FLUTTER_AAB_DIR="${{ env.SRC_PATH }}/build/app/outputs/bundle/release"
             AAB_FILE=$(find "$FLUTTER_AAB_DIR" -name "*.aab" 2>/dev/null | head -1)
           else
             AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
@@ -386,12 +388,12 @@ jobs:
           FORMAT="${{ github.event.inputs.output_format }}"
 
           if [ "${{ github.event.inputs.project_type }}" == "python" ]; then
-            if [ -n "$(find "src/${{ env.SOURCE_DIR }}" -name '*.apk' 2>/dev/null)" ]; then
+            if [ -n "$(find "${{ env.SRC_PATH }}" -name '*.apk' 2>/dev/null)" ]; then
               STATE="success"
             fi
           elif [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_APK_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk"
-            FLUTTER_AAB_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/bundle/release"
+            FLUTTER_APK_DIR="${{ env.SRC_PATH }}/build/app/outputs/flutter-apk"
+            FLUTTER_AAB_DIR="${{ env.SRC_PATH }}/build/app/outputs/bundle/release"
             APK_OK=true
             AAB_OK=true
             if [ "${{ github.event.inputs.build_type }}" != "release" ] || [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
