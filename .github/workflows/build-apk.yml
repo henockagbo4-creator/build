@@ -80,13 +80,13 @@ jobs:
           fi
 
       - name: Setup Node
-        if: ${{ github.event.inputs.project_type != 'flutter' }}
+        if: ${{ github.event.inputs.project_type != 'flutter' && github.event.inputs.project_type != 'python' }}
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
       - name: Install Cordova
-        if: ${{ github.event.inputs.project_type != 'flutter' }}
+        if: ${{ github.event.inputs.project_type != 'flutter' && github.event.inputs.project_type != 'python' }}
         run: |
           set -e
           npm install -g cordova
@@ -97,11 +97,41 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
+      - name: Setup Python
+        if: ${{ github.event.inputs.project_type == 'python' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build with Briefcase (Python/Kivy)
+        if: ${{ github.event.inputs.project_type == 'python' }}
+        run: |
+          set -e
+          cd "src/${{ env.SOURCE_DIR }}"
+
+          if [ ! -f "pyproject.toml" ] || ! grep -q "tool.briefcase" pyproject.toml; then
+            echo "ERROR: pyproject.toml avec une section [tool.briefcase] est requis pour Briefcase."
+            echo "Contrairement a Buildozer, Briefcase attend un projet structure (genere via 'briefcase new' en local)."
+            echo "Uploade un projet deja initialise avec Briefcase, contenant un pyproject.toml valide."
+            exit 1
+          fi
+
+          pip install briefcase
+
+          briefcase create android
+          briefcase build android
+          briefcase package android -p apk --adhoc-sign
+
+          echo "=== Recherche de l'APK genere ==="
+          find . -name "*.apk" 2>/dev/null
+
       - name: Setup Flutter
         if: ${{ github.event.inputs.project_type == 'flutter' }}
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
+
+
 
       - name: Generate keystore
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
@@ -121,18 +151,48 @@ jobs:
           set -e
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
 
+      - name: Install & build (React / Vue)
+        if: ${{ github.event.inputs.project_type == 'react' || github.event.inputs.project_type == 'vue' }}
+        run: |
+          set -e
+          cd "src/${{ env.SOURCE_DIR }}"
+
+          if [ -f "package.json" ]; then
+            echo "package.json trouve — build npm..."
+            npm install
+            npm run build
+          else
+            echo "Pas de package.json — fichiers traites comme deja prets (statique)."
+          fi
+
       # ============ BUILD — SITE WEB / CORDOVA ============
       - name: Build with Cordova (web project)
-        if: ${{ github.event.inputs.project_type != 'flutter' }}
+        if: ${{ github.event.inputs.project_type != 'flutter' && github.event.inputs.project_type != 'python' }}
         run: |
           set -e
           cd src
 
           SOURCE_DIR="${{ env.SOURCE_DIR }}"
+          PROJECT_TYPE="${{ github.event.inputs.project_type }}"
+
+          # Pour React/Vue, le contenu à empaqueter est le dossier de sortie du build (dist/ ou build/)
+          # S'il n'y a pas eu de build (pas de package.json), on utilise directement les fichiers uploadés.
+          COPY_FROM="$SOURCE_DIR"
+          if [ "$PROJECT_TYPE" == "react" ] || [ "$PROJECT_TYPE" == "vue" ]; then
+            if [ -d "$SOURCE_DIR/dist" ]; then
+              COPY_FROM="$SOURCE_DIR/dist"
+              echo "Utilisation du dossier de sortie build: $COPY_FROM"
+            elif [ -d "$SOURCE_DIR/build" ]; then
+              COPY_FROM="$SOURCE_DIR/build"
+              echo "Utilisation du dossier de sortie build: $COPY_FROM"
+            else
+              echo "Pas de dossier dist/ ou build/ — utilisation directe des fichiers sources: $COPY_FROM"
+            fi
+          fi
 
           cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
           rm -rf app/www/*
-          cp -r "$SOURCE_DIR"/* app/www/ 2>/dev/null || true
+          cp -r "$COPY_FROM"/* app/www/ 2>/dev/null || true
 
           cd app
 
@@ -250,6 +310,8 @@ jobs:
           if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
             FLUTTER_APK_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk"
             APK_FILE=$(find "$FLUTTER_APK_DIR" -name "*.apk" 2>/dev/null | head -1)
+          elif [ "${{ github.event.inputs.project_type }}" == "python" ]; then
+            APK_FILE=$(find "src/${{ env.SOURCE_DIR }}" -name "*.apk" 2>/dev/null | head -1)
           else
             APK_DIR="src/app/platforms/android/app/build/outputs/apk"
             if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
@@ -323,7 +385,11 @@ jobs:
           STATE="error"
           FORMAT="${{ github.event.inputs.output_format }}"
 
-          if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
+          if [ "${{ github.event.inputs.project_type }}" == "python" ]; then
+            if [ -n "$(find "src/${{ env.SOURCE_DIR }}" -name '*.apk' 2>/dev/null)" ]; then
+              STATE="success"
+            fi
+          elif [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
             FLUTTER_APK_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk"
             FLUTTER_AAB_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/bundle/release"
             APK_OK=true
