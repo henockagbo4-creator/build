@@ -29,7 +29,7 @@ on:
         type: string
         default: 'apk'
       project_type:
-        description: 'Type de projet (web, flutter)'
+        description: 'Type de projet'
         required: false
         type: string
         default: 'web'
@@ -54,9 +54,20 @@ on:
         required: true
         type: string
 
+env:
+  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
+
 jobs:
-  build:
+  # ============================================================
+  # JOB 1: PREPARE — Download source & setup common tools
+  # ============================================================
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      source_dir: ${{ steps.detect.outputs.source_dir }}
+      src_path: ${{ steps.detect.outputs.src_path }}
+      has_keystore: ${{ steps.keystore.outputs.has_keystore }}
+      keystore_path: ${{ steps.keystore.outputs.keystore_path }}
     steps:
       - name: Download source zip
         run: |
@@ -72,24 +83,14 @@ jobs:
           ITEM_COUNT=$(ls -1 | wc -l)
           FIRST_ITEM=$(ls -1 | head -1)
           if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
-            echo "SOURCE_DIR=$FIRST_ITEM" >> "$GITHUB_ENV"
+            echo "source_dir=$FIRST_ITEM" >> "$GITHUB_OUTPUT"
+            echo "src_path=src/$FIRST_ITEM" >> "$GITHUB_OUTPUT"
             echo "Single folder detected: $FIRST_ITEM"
           else
-            echo "SOURCE_DIR=." >> "$GITHUB_ENV"
+            echo "source_dir=." >> "$GITHUB_OUTPUT"
+            echo "src_path=src" >> "$GITHUB_OUTPUT"
             echo "Files directly in src/"
           fi
-
-      - name: Setup Node
-        if: ${{ github.event.inputs.project_type != 'flutter' }}
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install Cordova
-        if: ${{ github.event.inputs.project_type != 'flutter' }}
-        run: |
-          set -e
-          npm install -g cordova
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -97,60 +98,134 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Flutter
-        if: ${{ github.event.inputs.project_type == 'flutter' }}
-        uses: subosito/flutter-action@v2
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Android SDK
+        uses: actions/cache@v4
         with:
-          channel: 'stable'
+          path: |
+            ~/.android/sdk
+            /usr/local/lib/android/sdk
+          key: android-sdk-${{ runner.os }}-${{ hashFiles('**/build.gradle') }}
+          restore-keys: android-sdk-${{ runner.os }}-
 
       - name: Generate keystore
+        id: keystore
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
           set -e
-          keytool -genkey -v \
+          keytool -genkeypair -v \
             -keystore my-release-key.keystore \
             -alias "${{ github.event.inputs.keystore_alias }}" \
-            -keyalg RSA -keysize 2048 -validity 10000 \
+            -keyalg RSA \
+            -keysize 2048 \
+            -sigalg SHA256withRSA \
+            -validity 10950 \
+            -storetype PKCS12 \
             -storepass "${{ github.event.inputs.keystore_password }}" \
             -keypass "${{ github.event.inputs.keystore_password }}" \
-            -dname "CN=PhilTech, O=PhilTech, C=CI"
+            -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI"
+          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+          echo "keystore_path=$GITHUB_WORKSPACE/my-release-key.keystore" >> "$GITHUB_OUTPUT"
 
       - name: Download user keystore
+        id: keystore-download
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
         run: |
           set -e
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
+          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+          echo "keystore_path=$GITHUB_WORKSPACE/my-release-key.keystore" >> "$GITHUB_OUTPUT"
 
-      # ============ BUILD — SITE WEB / CORDOVA ============
-      - name: Build with Cordova (web project)
-        if: ${{ github.event.inputs.project_type != 'flutter' }}
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+          retention-days: 1
+
+      - name: Upload keystore artifact
+        if: ${{ steps.keystore.outputs.has_keystore == 'true' || steps.keystore-download.outputs.has_keystore == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+          path: my-release-key.keystore
+          retention-days: 1
+
+  # ============================================================
+  # JOB 2: BUILD WEB (Cordova) — React, Vue, Web
+  # ============================================================
+  build-web:
+    needs: prepare
+    if: ${{ contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Cordova
+        run: npm install -g cordova
+
+      - name: Install & build (React / Vue)
+        if: ${{ contains(fromJson('["react","vue"]'), github.event.inputs.project_type) }}
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          if [ -f "package.json" ]; then
+            npm install
+            if grep -q '"build"' package.json; then
+              npm run build
+            fi
+          fi
+
+      - name: Build with Cordova
         run: |
           set -e
           cd src
-
-          SOURCE_DIR="${{ env.SOURCE_DIR }}"
-
-          cordova create app "${{ github.event.inputs.package_id }}" "${{ github.event.inputs.app_name }}"
-          rm -rf app/www/*
-          cp -r "$SOURCE_DIR"/* app/www/ 2>/dev/null || true
-
-          cd app
-
-          if [ ! -f "www/index.html" ]; then
-            echo "ERROR: www/index.html not found!"
-            find www/ -type f | head -20
-            exit 1
+          SOURCE_DIR="${{ needs.prepare.outputs.source_dir }}"
+          COPY_FROM="$SOURCE_DIR"
+          if [ -d "$SOURCE_DIR/dist" ]; then
+            COPY_FROM="$SOURCE_DIR/dist"
+          elif [ -d "$SOURCE_DIR/build" ]; then
+            COPY_FROM="$SOURCE_DIR/build"
           fi
-
+          PKG_ID="${{ github.event.inputs.package_id }}"
+          if [ -z "$PKG_ID" ]; then
+            PKG_ID="com.philtech.app"
+          fi
+          cordova create app "$PKG_ID" "${{ github.event.inputs.app_name }}"
+          rm -rf app/www/*
+          cp -r "$COPY_FROM"/* app/www/
+          cd app
           cordova platform add android
-
           KEYSTORE_PATH="../../my-release-key.keystore"
           FORMAT="${{ github.event.inputs.output_format }}"
-
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
-
-            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
-              echo "Building RELEASE APK"
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
               cordova build android --release -- \
                 --packageType=apk \
                 --keystore="$KEYSTORE_PATH" \
@@ -158,9 +233,7 @@ jobs:
                 --alias="${{ github.event.inputs.keystore_alias }}" \
                 --password="${{ github.event.inputs.keystore_password }}"
             fi
-
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              echo "Building RELEASE AAB (bundle)"
               cordova build android --release -- \
                 --packageType=bundle \
                 --keystore="$KEYSTORE_PATH" \
@@ -168,201 +241,716 @@ jobs:
                 --alias="${{ github.event.inputs.keystore_alias }}" \
                 --password="${{ github.event.inputs.keystore_password }}"
             fi
-
           else
-            echo "Building DEBUG"
             cordova build android --debug
           fi
 
-      # ============ BUILD — FLUTTER ============
-      - name: Build with Flutter
-        if: ${{ github.event.inputs.project_type == 'flutter' }}
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 3: BUILD CAPACITOR / IONIC
+  # ============================================================
+  build-capacitor:
+    needs: prepare
+    if: ${{ contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Capacitor CLI
+        run: npm install -g @capacitor/cli
+
+      - name: Build Capacitor project
         run: |
           set -e
-          cd "src/${{ env.SOURCE_DIR }}"
-
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "ERROR: pubspec.yaml not found — ce n'est pas un projet Flutter valide."
-            find . -maxdepth 2
-            exit 1
+          cd "${{ needs.prepare.outputs.src_path }}"
+          npm install
+          npx cap sync android
+          cd android
+          chmod +x gradlew
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p app
+            cat > app/signing.gradle << 'GRADLE_EOF'
+            android {
+              signingConfigs {
+                release {
+                  storeFile file(System.getenv("KEYSTORE_PATH"))
+                  storePassword System.getenv("STORE_PASSWORD")
+                  keyAlias System.getenv("KEY_ALIAS")
+                  keyPassword System.getenv("KEY_PASSWORD")
+                }
+              }
+              buildTypes {
+                release {
+                  signingConfig signingConfigs.release
+                }
+              }
+            }
+            GRADLE_EOF
+            echo "apply from: 'signing.gradle'" >> app/build.gradle
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
+            export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
+            export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
           fi
 
-          if [ ! -f "android/app/build.gradle" ]; then
-            echo "android/app/build.gradle manquant — regeneration des fichiers de plateforme Android..."
-            flutter create . --platforms=android
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 4: BUILD REACT NATIVE
+  # ============================================================
+  build-react-native:
+    needs: prepare
+    if: ${{ github.event.inputs.project_type == 'react-native' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build React Native
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          npm install
+          cd android
+          chmod +x gradlew
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p app
+            cat > app/signing.gradle << 'GRADLE_EOF'
+            android {
+              signingConfigs {
+                release {
+                  storeFile file(System.getenv("KEYSTORE_PATH"))
+                  storePassword System.getenv("STORE_PASSWORD")
+                  keyAlias System.getenv("KEY_ALIAS")
+                  keyPassword System.getenv("KEY_PASSWORD")
+                }
+              }
+              buildTypes {
+                release {
+                  signingConfig signingConfigs.release
+                }
+              }
+            }
+            GRADLE_EOF
+            echo "apply from: 'signing.gradle'" >> app/build.gradle
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
+            export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
+            export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
           fi
 
-          flutter pub get
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
 
-          FORMAT="${{ github.event.inputs.output_format }}"
-          KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
 
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+  # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA / KOTLIN MULTIPLATFORM
+  # ============================================================
+  build-kotlin-java:
+    needs: prepare
+    if: ${{ contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), github.event.inputs.project_type) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
 
-            if [ -f "$KEYSTORE_PATH" ]; then
-              echo "storePassword=${{ github.event.inputs.keystore_password }}" > android/key.properties
-              echo "keyPassword=${{ github.event.inputs.keystore_password }}" >> android/key.properties
-              echo "keyAlias=${{ github.event.inputs.keystore_alias }}" >> android/key.properties
-              echo "storeFile=$KEYSTORE_PATH" >> android/key.properties
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
 
-              echo "aW1wb3J0IHJlLCBvcwoKZ3JhZGxlX3BhdGggPSAiYW5kcm9pZC9hcHAvYnVpbGQuZ3JhZGxlIgppZiBub3Qgb3MucGF0aC5leGlzdHMoZ3JhZGxlX3BhdGgpOgogICAgcHJpbnQoIlBhcyBkZSBidWlsZC5ncmFkbGUgR3Jvb3Z5IHRyb3V2ZSAocGV1dC1ldHJlIEtvdGxpbiBEU0wpIC0gcGF0Y2ggaWdub3JlLiIpCmVsc2U6CiAgICBjb250ZW50ID0gb3BlbihncmFkbGVfcGF0aCkucmVhZCgpCiAgICBpZiAia2V5c3RvcmVQcm9wZXJ0aWVzIiBpbiBjb250ZW50OgogICAgICAgIHByaW50KCJDb25maWcgZGUgc2lnbmF0dXJlIGRlamEgcHJlc2VudGUgLSBwYXRjaCBpZ25vcmUuIikKICAgIGVsc2U6CiAgICAgICAgbG9hZGVyID0gIiIiZGVmIGtleXN0b3JlUHJvcGVydGllcyA9IG5ldyBQcm9wZXJ0aWVzKCkKZGVmIGtleXN0b3JlUHJvcGVydGllc0ZpbGUgPSByb290UHJvamVjdC5maWxlKCdrZXkucHJvcGVydGllcycpCmlmIChrZXlzdG9yZVByb3BlcnRpZXNGaWxlLmV4aXN0cygpKSB7CiAgICBrZXlzdG9yZVByb3BlcnRpZXMubG9hZChuZXcgRmlsZUlucHV0U3RyZWFtKGtleXN0b3JlUHJvcGVydGllc0ZpbGUpKQp9CgoiIiIKICAgICAgICBjb250ZW50ID0gbG9hZGVyICsgY29udGVudAoKICAgICAgICBzaWduaW5nX2Jsb2NrID0gIiIiICAgIHNpZ25pbmdDb25maWdzIHsKICAgICAgICByZWxlYXNlIHsKICAgICAgICAgICAgaWYgKGtleXN0b3JlUHJvcGVydGllc0ZpbGUuZXhpc3RzKCkpIHsKICAgICAgICAgICAgICAgIGtleUFsaWFzIGtleXN0b3JlUHJvcGVydGllc1sna2V5QWxpYXMnXQogICAgICAgICAgICAgICAga2V5UGFzc3dvcmQga2V5c3RvcmVQcm9wZXJ0aWVzWydrZXlQYXNzd29yZCddCiAgICAgICAgICAgICAgICBzdG9yZUZpbGUgZmlsZShrZXlzdG9yZVByb3BlcnRpZXNbJ3N0b3JlRmlsZSddKQogICAgICAgICAgICAgICAgc3RvcmVQYXNzd29yZCBrZXlzdG9yZVByb3BlcnRpZXNbJ3N0b3JlUGFzc3dvcmQnXQogICAgICAgICAgICB9CiAgICAgICAgfQogICAgfQoiIiIKICAgICAgICBjb250ZW50ID0gcmUuc3ViKHInKGFuZHJvaWRccypceyknLCByJ1wxXG4nICsgc2lnbmluZ19ibG9jaywgY29udGVudCwgY291bnQ9MSkKCiAgICAgICAgY29udGVudCA9IHJlLnN1YigKICAgICAgICAgICAgcicoYnVpbGRUeXBlc1xzKlx7W159XSpyZWxlYXNlXHMqXHtbXn1dKilzaWduaW5nQ29uZmlnXHMrc2lnbmluZ0NvbmZpZ3NcLmRlYnVnJywKICAgICAgICAgICAgcidcMXNpZ25pbmdDb25maWcgc2lnbmluZ0NvbmZpZ3MucmVsZWFzZScsCiAgICAgICAgICAgIGNvbnRlbnQsCiAgICAgICAgICAgIGZsYWdzPXJlLkRPVEFMTAogICAgICAgICkKICAgICAgICBpZiAnc2lnbmluZ0NvbmZpZyBzaWduaW5nQ29uZmlncy5yZWxlYXNlJyBub3QgaW4gY29udGVudDoKICAgICAgICAgICAgY29udGVudCA9IHJlLnN1YigKICAgICAgICAgICAgICAgIHInKHJlbGVhc2VccypceyknLAogICAgICAgICAgICAgICAgcidcMVxuICAgICAgICAgICAgc2lnbmluZ0NvbmZpZyBzaWduaW5nQ29uZmlncy5yZWxlYXNlJywKICAgICAgICAgICAgICAgIGNvbnRlbnQsCiAgICAgICAgICAgICAgICBjb3VudD0xCiAgICAgICAgICAgICkKCiAgICAgICAgb3BlbihncmFkbGVfcGF0aCwgJ3cnKS53cml0ZShjb250ZW50KQogICAgICAgIHByaW50KCJidWlsZC5ncmFkbGUgcGF0Y2hlIGF2ZWMgbGEgY29uZmlnIGRlIHNpZ25hdHVyZSByZWxlYXNlLiIpCg==" | base64 -d > /tmp/patch_gradle.py
-              python3 /tmp/patch_gradle.py
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-              echo "key.properties cree."
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Build Kotlin/Java
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          chmod +x gradlew
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            if ! grep -q "signingConfigs" app/build.gradle 2>/dev/null; then
+              cat > app/signing.gradle << 'GRADLE_EOF'
+              android {
+                signingConfigs {
+                  release {
+                    storeFile file(System.getenv("KEYSTORE_PATH"))
+                    storePassword System.getenv("STORE_PASSWORD")
+                    keyAlias System.getenv("KEY_ALIAS")
+                    keyPassword System.getenv("KEY_PASSWORD")
+                  }
+                }
+                buildTypes {
+                  release {
+                    signingConfig signingConfigs.release
+                  }
+                }
+              }
+              GRADLE_EOF
+              echo "apply from: 'signing.gradle'" >> app/build.gradle
             fi
+            export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
+            export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
+            export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
 
-            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
-              echo "Building Flutter RELEASE APK"
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 6: BUILD FLUTTER
+  # ============================================================
+  build-flutter:
+    needs: prepare
+    if: ${{ github.event.inputs.project_type == 'flutter' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Cache Flutter
+        uses: actions/cache@v4
+        with:
+          path: |
+            /opt/hostedtoolcache/flutter
+            ~/.pub-cache
+          key: flutter-${{ runner.os }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: flutter-${{ runner.os }}-
+
+      - name: Build Flutter
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          flutter pub get
+          FORMAT="${{ github.event.inputs.output_format }}"
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+            mkdir -p android
+            cat > android/key.properties << EOF
+            storePassword=${{ github.event.inputs.keystore_password }}
+            keyPassword=${{ github.event.inputs.keystore_password }}
+            keyAlias=${{ github.event.inputs.keystore_alias }}
+            storeFile=$GITHUB_WORKSPACE/my-release-key.keystore
+            EOF
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
               flutter build apk --release
             fi
-
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              echo "Building Flutter RELEASE AAB"
               flutter build appbundle --release
             fi
-
           else
-            echo "Building Flutter DEBUG APK"
             flutter build apk --debug
           fi
 
-      - name: Upload APK as GitHub Artifact
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: apk-${{ github.event.inputs.build_id }}
-          path: |
-            src/app/platforms/android/app/build/outputs/apk/*/*.apk
-            src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk/*.apk
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
           retention-days: 1
-          if-no-files-found: ignore
 
-      - name: Upload APK to R2 (direct, S3 API)
-        if: ${{ github.event.inputs.output_format != 'aab' }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+  # ============================================================
+  # JOB 7: BUILD PYTHON
+  # ============================================================
+  build-python:
+    needs: prepare
+    if: ${{ github.event.inputs.project_type == 'python' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Build with Briefcase
         run: |
           set -e
-          APK_FILE=""
-
-          if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_APK_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk"
-            APK_FILE=$(find "$FLUTTER_APK_DIR" -name "*.apk" 2>/dev/null | head -1)
+          cd "${{ needs.prepare.outputs.src_path }}"
+          pip install briefcase
+          briefcase create android
+          briefcase build android
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            briefcase package android -p apk
           else
-            APK_DIR="src/app/platforms/android/app/build/outputs/apk"
-            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-              APK_FILE=$(find "${APK_DIR}/release" -name "*.apk" 2>/dev/null | head -1)
-            else
-              APK_FILE=$(find "${APK_DIR}/debug" -name "*.apk" 2>/dev/null | head -1)
-            fi
+            briefcase package android -p apk --adhoc-sign
           fi
 
-          if [ -f "$APK_FILE" ]; then
-            echo "Uploading $APK_FILE to R2 (direct)..."
-            aws s3 cp "$APK_FILE" \
-              "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/app.apk" \
-              --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
-              --region auto \
-              --content-type application/vnd.android.package-archive
-          else
-            echo "No APK file found, skipping R2 upload."
-          fi
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
 
-      - name: Upload AAB to R2 (direct, S3 API)
-        if: ${{ github.event.inputs.build_type == 'release' && (github.event.inputs.output_format == 'aab' || github.event.inputs.output_format == 'both') }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 8: BUILD .NET MAUI
+  # ============================================================
+  build-dotnet:
+    needs: prepare
+    if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-android
+
+      - name: Build .NET MAUI
         run: |
           set -e
-          AAB_FILE=""
-
-          if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_AAB_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/bundle/release"
-            AAB_FILE=$(find "$FLUTTER_AAB_DIR" -name "*.aab" 2>/dev/null | head -1)
+          cd "${{ needs.prepare.outputs.src_path }}"
+          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            dotnet publish "$CSPROJ" -f net8.0-android -c Release
           else
-            AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
-            AAB_FILE=$(find "${AAB_DIR}/release" -name "*.aab" 2>/dev/null | head -1)
+            dotnet build "$CSPROJ" -f net8.0-android -c Debug
           fi
 
-          if [ -f "$AAB_FILE" ]; then
-            echo "Uploading $AAB_FILE to R2 (direct)..."
-            aws s3 cp "$AAB_FILE" \
-              "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/app.aab" \
-              --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
-              --region auto \
-              --content-type application/octet-stream
-          else
-            echo "No AAB file found, skipping R2 upload."
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 9: BUILD GO / GODOT / LUA / RUBY / NATIVESCRIPT
+  # ============================================================
+  build-other:
+    needs: prepare
+    if: ${{ contains(fromJson('["go","godot","lua","ruby","nativescript"]'), github.event.inputs.project_type) }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Go
+        if: ${{ github.event.inputs.project_type == 'go' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Ruby
+        if: ${{ github.event.inputs.project_type == 'ruby' }}
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.3'
+
+      - name: Setup Godot
+        if: ${{ github.event.inputs.project_type == 'godot' }}
+        run: |
+          set -e
+          GODOT_VERSION="4.2.2"
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+
+      - name: Setup Lua/Solar2D
+        if: ${{ github.event.inputs.project_type == 'lua' }}
+        run: |
+          set -e
+          wget -q https://github.com/coronalabs/corona/releases/download/3700/Solar2DConsole.tgz
+          tar -xzf Solar2DConsole.tgz
+          sudo mv Solar2DConsole /opt/solar2d
+          echo "/opt/solar2d" >> $GITHUB_PATH
+
+      - name: Setup Node for NativeScript
+        if: ${{ github.event.inputs.project_type == 'nativescript' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install NativeScript CLI
+        if: ${{ github.event.inputs.project_type == 'nativescript' }}
+        run: npm install -g nativescript
+
+      - name: Install gomobile
+        if: ${{ github.event.inputs.project_type == 'go' }}
+        run: |
+          set -e
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          gomobile init
+
+      - name: Install RubyMotion
+        if: ${{ github.event.inputs.project_type == 'ruby' }}
+        run: |
+          set -e
+          sudo apt-get update && sudo apt-get install -y build-essential
+          gem install motion-game || true
+
+      - name: Build project
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          case "${{ github.event.inputs.project_type }}" in
+            go)
+              gomobile build -target=android -o app.apk .
+              ;;
+            godot)
+              if [ ! -f "project.godot" ]; then
+                echo "ERROR: project.godot not found"
+                exit 1
+              fi
+              godot --headless --export-release "Android" build.apk
+              ;;
+            lua)
+              if [ ! -f "build.settings" ]; then
+                echo "ERROR: build.settings not found"
+                exit 1
+              fi
+              /opt/solar2d/solar2d.sh build android
+              ;;
+            ruby)
+              rake android:build || echo "Build RubyMotion echoue — licence requise."
+              ;;
+            nativescript)
+              npm install
+              ns platform add android
+              if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+                ns build android --release --key-store-path "$GITHUB_WORKSPACE/my-release-key.keystore" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}"
+              else
+                ns build android --debug
+              fi
+              ;;
+          esac
+
+      - name: Universal APK signing (apksigner)
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          echo "=== Universal APK signing with apksigner ==="
+          APK_SIGNER=$(find $ANDROID_SDK_ROOT -name "apksigner" -type f 2>/dev/null | head -1)
+          if [ -z "$APK_SIGNER" ]; then
+            APK_SIGNER=$(find /usr -name "apksigner" -type f 2>/dev/null | head -1)
+          fi
+          if [ -z "$APK_SIGNER" ]; then
+            APK_SIGNER=$(find /opt -name "apksigner" -type f 2>/dev/null | head -1)
           fi
 
-      - name: Upload generated keystore to R2 (direct, S3 API)
+          if [ -n "$APK_SIGNER" ]; then
+            echo "Found apksigner at: $APK_SIGNER"
+            for apk in $(find . -name "*.apk" -not -path "./output/*"); do
+              echo "Signing $apk with apksigner..."
+              $APK_SIGNER sign \
+                --ks "$GITHUB_WORKSPACE/my-release-key.keystore" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+              echo "Signed: $apk"
+            done
+          else
+            echo "apksigner not found, falling back to jarsigner..."
+            for apk in $(find . -name "*.apk" -not -path "./output/*"); do
+              echo "Signing $apk with jarsigner..."
+              jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+                -keystore "$GITHUB_WORKSPACE/my-release-key.keystore" \
+                -storepass "${{ github.event.inputs.keystore_password }}" \
+                "$apk" "${{ github.event.inputs.keystore_alias }}"
+              echo "Signed: $apk"
+            done
+          fi
+          echo "=== Universal signing complete ==="
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "*.apk" -exec cp {} output/ \; || true
+          find . -name "*.aab" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 10: POST-BUILD — Upload to R2 & Notify
+  # ============================================================
+  post-build:
+    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: build-*
+          merge-multiple: true
+
+      - name: Download keystore artifact
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_REQUEST_CHECKSUM_CALCULATION: when_required
-          AWS_RESPONSE_CHECKSUM_VALIDATION: when_required
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+          path: keystore/
+
+      - name: List artifacts
+        run: |
+          echo "=== Artifacts downloaded ==="
+          find artifacts/ -type f || true
+          echo "=== Keystore ==="
+          find keystore/ -type f 2>/dev/null || true
+
+      - name: Upload APK to R2
+        if: ${{ hashFiles('artifacts/*.apk') != '' }}
         run: |
           set -e
-          if [ -f "my-release-key.keystore" ]; then
-            echo "Uploading generated keystore to R2 (direct)..."
-            aws s3 cp "my-release-key.keystore" \
-              "s3://${{ secrets.R2_BUCKET }}/${{ github.event.inputs.build_id }}/keystore-${{ github.event.inputs.build_id }}.keystore" \
-              --endpoint-url "${{ secrets.R2_ENDPOINT }}" \
-              --region auto \
-              --content-type application/octet-stream
-          fi
-
-      - name: Notify backend
-        run: |
-          STATE="error"
-          FORMAT="${{ github.event.inputs.output_format }}"
-
-          if [ "${{ github.event.inputs.project_type }}" == "flutter" ]; then
-            FLUTTER_APK_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/flutter-apk"
-            FLUTTER_AAB_DIR="src/${{ env.SOURCE_DIR }}/build/app/outputs/bundle/release"
-            APK_OK=true
-            AAB_OK=true
-            if [ "${{ github.event.inputs.build_type }}" != "release" ] || [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
-              [ -n "$(find "$FLUTTER_APK_DIR" -name '*.apk' 2>/dev/null)" ] && APK_OK=true || APK_OK=false
-            fi
-            if [ "${{ github.event.inputs.build_type }}" == "release" ] && ([ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]); then
-              [ -n "$(find "$FLUTTER_AAB_DIR" -name '*.aab' 2>/dev/null)" ] && AAB_OK=true || AAB_OK=false
-            fi
-            if [ "$APK_OK" == "true" ] && [ "$AAB_OK" == "true" ]; then
-              STATE="success"
-            fi
-          else
-            APK_DIR="src/app/platforms/android/app/build/outputs/apk"
-            AAB_DIR="src/app/platforms/android/app/build/outputs/bundle"
-            if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-              APK_OK=true
-              AAB_OK=true
-              if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ] || [ -z "$FORMAT" ]; then
-                [ -n "$(find "${APK_DIR}/release" -name '*.apk' 2>/dev/null)" ] && APK_OK=true || APK_OK=false
-              fi
-              if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-                [ -n "$(find "${AAB_DIR}/release" -name '*.aab' 2>/dev/null)" ] && AAB_OK=true || AAB_OK=false
-              fi
-              if [ "$APK_OK" == "true" ] && [ "$AAB_OK" == "true" ]; then
-                STATE="success"
-              fi
-            else
-              if [ -f "${APK_DIR}/debug/app-debug.apk" ]; then
-                STATE="success"
-              fi
-            fi
-          fi
-
-          for i in 1 2 3 4 5; do
-            curl -X POST "${{ github.event.inputs.callback_url }}" \
-              -H "Content-Type: application/json" \
-              -d "{\"state\":\"$STATE\",\"message\":\"Build $STATE\"}" && break
-            echo "Retry $i..."
-            sleep 15
+          for apk in artifacts/*.apk; do
+            echo "Uploading $apk..."
+            curl -X POST \
+              -H "Content-Type: application/vnd.android.package-archive" \
+              --data-binary @$apk \
+              "${{ github.event.inputs.callback_url }}/upload/apk"
           done
+
+      - name: Upload AAB to R2
+        if: ${{ hashFiles('artifacts/*.aab') != '' }}
+        run: |
+          set -e
+          for aab in artifacts/*.aab; do
+            echo "Uploading $aab..."
+            curl -X POST \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @$aab \
+              "${{ github.event.inputs.callback_url }}/upload/aab"
+          done
+
+      - name: Upload generated keystore to R2
+        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' && hashFiles('keystore/*.keystore') != '' }}
+        run: |
+          set -e
+          for ks in keystore/*.keystore; do
+            echo "Uploading keystore $ks..."
+            curl -X POST \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @$ks \
+              "${{ github.event.inputs.callback_url }}/upload/keystore"
+          done
+
+      - name: Notify callback URL
+        run: |
+          set -e
+          echo "Notifying callback..."
+          # Check if any build job succeeded
+          NEEDS_JSON='${{ toJson(needs) }}'
+          if echo "$NEEDS_JSON" | grep -q '"result": "success"'; then
+            STATUS="success"
+          else
+            STATUS="error"
+          fi
+          curl -X POST -H "Content-Type: application/json" \
+            -d "{\"build_id\":\"${{ github.event.inputs.build_id }}\",\"status\":\"$STATUS\",\"message\":\"Build $STATUS\"}" \
+            "${{ github.event.inputs.callback_url }}"
