@@ -1,1 +1,1759 @@
-name: Build APK on: workflow_dispatch: inputs: zip_url: description: 'URL du zip source' required: true type: string app_name: description: 'Nom de l application' required: true type: string package_id: description: 'Package ID' required: false type: string build_id: description: 'ID du build' required: true type: string build_type: description: 'Type de build' required: true type: string output_format: description: 'Format de sortie (apk, aab, both)' required: false type: string default: 'apk' project_type: description: 'Type de projet (optionnel - auto-detecte si vide)' required: false type: string default: '' platform: description: 'Plateforme cible (android, windows)' required: false type: string default: 'android' keystore_mode: description: 'Mode keystore' required: true type: string keystore_url: description: 'URL du keystore' required: false type: string keystore_password: description: 'Mot de passe du keystore' required: false type: string keystore_alias: description: 'Alias du keystore' required: false type: string callback_url: description: 'URL de callback (notification finale, avec /callback)' required: true type: string build_base_url: description: 'URL de base du build sur le Worker (sans /callback)' required: false type: string jobs: # ============================================================ # JOB 1: PREPARE (avec auto-detection du type de projet) # ============================================================ prepare: runs-on: ubuntu-latest outputs: source_dir: ${{ steps.detect.outputs.source_dir }} src_path: ${{ steps.detect.outputs.src_path }} detected_type: ${{ steps.detect-project.outputs.detected_type }} has_keystore: ${{ steps.keystore.outputs.has_keystore || steps.keystore-download.outputs.has_keystore }} keystore_path: ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }} keystore_filename: ${{ steps.keystore.outputs.keystore_filename || steps.keystore-download.outputs.keystore_filename }} build_should_run: ${{ steps.detect-project.outputs.build_should_run }} error_message: ${{ steps.detect-project.outputs.error_message }} steps: - name: Download source zip id: download run: | set -e curl -f -L -o source.zip "${{ github.event.inputs.zip_url }}" echo "=== Taille du fichier telecharge ===" ls -la source.zip file source.zip SIZE=$(stat -c%s source.zip 2>/dev/null || stat -f%z source.zip) if [ "$SIZE" -lt 100 ]; then echo "ERREUR: le fichier source.zip est suspicieusement petit ($SIZE octets)." echo "Contenu recu :" cat source.zip exit 1 fi mkdir -p src unzip -o source.zip -d src/ - name: Detect source directory id: detect run: | cd src ITEM_COUNT=$(ls -1 | wc -l) FIRST_ITEM=$(ls -1 | head -1) if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then echo "source_dir=$FIRST_ITEM" >> "$GITHUB_OUTPUT" echo "src_path=src/$FIRST_ITEM" >> "$GITHUB_OUTPUT" echo "Single folder detected: $FIRST_ITEM" else echo "source_dir=." >> "$GITHUB_OUTPUT" echo "src_path=src" >> "$GITHUB_OUTPUT" echo "Files directly in src/" fi # ============================================================ # AUTO-DETECTION DU TYPE DE PROJET # ============================================================ - name: Auto-detect project type id: detect-project run: | set -e cd src/${{ steps.detect.outputs.source_dir }} echo "=== Analyse de la structure du projet ===" find_file() { find . -name "$1" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/build/*" \ -not -path "*/dist/*" \ -not -path "*/bin/*" \ -not -path "*/obj/*" \ 2>/dev/null | head -1 } find_dir() { find . -type d -name "$1" \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ 2>/dev/null | head -1 } DETECTED="unknown" BUILD_SHOULD_RUN="true" ERROR_MSG="" if [ -n "$(find_file "pubspec.yaml")" ]; then DETECTED="flutter" echo "Flutter detecte (pubspec.yaml trouve)" elif [ -n "$(find_file "*.csproj")" ]; then DETECTED="dotnet-maui" echo ".NET MAUI detecte (.csproj trouve)" elif [ -n "$(find_file "metro.config.js")" ] || [ -n "$(find_file "metro.config.ts")" ]; then DETECTED="react-native" echo "React Native detecte (metro.config trouve)" elif [ -n "$(find_file "capacitor.config.ts")" ] || \ [ -n "$(find_file "capacitor.config.json")" ] || \ [ -n "$(find_file "capacitor.config.js")" ] || \ ( [ -n "$(find_file "package.json")" ] && \ ( grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null || \ grep -q "@capacitor/android" "$(find_file "package.json")" 2>/dev/null || \ grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null ) ); then DETECTED="capacitor" echo "Capacitor/Ionic detecte (config ou dependance explicite)" elif [ -n "$(find_file "build.gradle")" ] && [ -z "$(find_file "package.json")" ]; then DETECTED="kotlin" echo "Kotlin/Java natif detecte (build.gradle sans package.json)" elif [ -n "$(find_file "go.mod")" ]; then DETECTED="go" echo "Go detecte (go.mod trouve)" elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || \ [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ]; then DETECTED="python" echo "Python detecte" elif [ -n "$(find_file "project.godot")" ]; then DETECTED="godot" echo "Godot detecte (project.godot trouve)" elif [ -n "$(find_file "build.settings")" ]; then DETECTED="lua" echo "Lua/Solar2D detecte (build.settings trouve)" elif [ -n "$(find_file "package.json")" ] && \ grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then DETECTED="nativescript" echo "NativeScript detecte (dependance nativescript dans package.json)" elif [ -n "$(find_file "package.json")" ]; then PKG_JSON="$(find_file "package.json")" if grep -q '"react"' "$PKG_JSON" 2>/dev/null && [ -z "$(find_file "metro.config.js")" ] && [ -z "$(find_file "metro.config.ts")" ]; then DETECTED="react" echo "React detecte (package.json avec react, sans metro.config)" elif grep -q '"vue"' "$PKG_JSON" 2>/dev/null; then DETECTED="vue" echo "Vue detecte" elif grep -q '"svelte"' "$PKG_JSON" 2>/dev/null; then DETECTED="svelte" echo "Svelte detecte" elif grep -q '"preact"' "$PKG_JSON" 2>/dev/null || grep -q '"solid-js"' "$PKG_JSON" 2>/dev/null; then DETECTED="web" echo "Projet web detecte (Preact/SolidJS)" else DETECTED="web" echo "Projet web generique detecte (package.json sans framework connu)" fi elif [ -n "$(find_file "index.html")" ] || [ -n "$(find_file "*.html")" ]; then DETECTED="web" echo "Site statique detecte (HTML trouve)" else DETECTED="unknown" BUILD_SHOULD_RUN="false" ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue/preact), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), setup.py/pyproject.toml (Python), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources." echo "Aucun type de projet detecte" fi CLIENT_TYPE="${{ github.event.inputs.project_type }}" if [ "$CLIENT_TYPE" != "" ] && [ "$CLIENT_TYPE" != "web" ]; then echo "Client a specifie: $CLIENT_TYPE" case "$CLIENT_TYPE" in flutter) if [ "$DETECTED" != "flutter" ] && [ -z "$(find_file "pubspec.yaml")" ]; then echo "Client dit Flutter mais pas de pubspec.yaml - fallback sur detection" else DETECTED="$CLIENT_TYPE" fi ;; capacitor|angular|solidjs|preact|ionic) if [ "$DETECTED" == "web" ] || [ "$DETECTED" == "react" ] || [ "$DETECTED" == "vue" ]; then DETECTED="capacitor" echo "Forcage Capacitor sur base du choix client ($CLIENT_TYPE)" else DETECTED="$CLIENT_TYPE" fi ;; *) DETECTED="$CLIENT_TYPE" ;; esac fi echo "detected_type=$DETECTED" >> "$GITHUB_OUTPUT" echo "build_should_run=$BUILD_SHOULD_RUN" >> "$GITHUB_OUTPUT" echo "error_message=$ERROR_MSG" >> "$GITHUB_OUTPUT" echo "=== Type final : $DETECTED | Build: $BUILD_SHOULD_RUN ===" # ============================================================ # FALLBACK : Initialiser Capacitor si manquant # ============================================================ - name: Auto-init Capacitor config if missing if: ${{ steps.detect-project.outputs.detected_type == 'capacitor' }} run: | set -e cd src/${{ steps.detect.outputs.source_dir }} PROJECT_ROOT=$(find . -name "package.json" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." cd "$PROJECT_ROOT" if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then echo "Config Capacitor manquante - initialisation automatique..." npm install -g @capacitor/cli npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "dist" 2>/dev/null || \ npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "build" 2>/dev/null || \ npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "www" 2>/dev/null || \ npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "." 2>/dev/null || true echo "Config Capacitor generee automatiquement" else echo "Config Capacitor existante" fi - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Generate keystore id: keystore if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }} run: | set -e KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore" keytool -genkeypair -v \ -keystore "$KEYSTORE_NAME" \ -alias "${{ github.event.inputs.keystore_alias }}" \ -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \ -storetype PKCS12 \ -storepass "${{ github.event.inputs.keystore_password }}" \ -keypass "${{ github.event.inputs.keystore_password }}" \ -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI" cat > keystore-info.txt << EOF Keystore genere pour le build ${{ github.event.inputs.build_id }} Alias: ${{ github.event.inputs.keystore_alias }} Password: ${{ github.event.inputs.keystore_password }} EOF echo "has_keystore=true" >> "$GITHUB_OUTPUT" echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT" echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT" - name: Download user keystore id: keystore-download if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }} run: | set -e KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore" curl -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}" echo "has_keystore=true" >> "$GITHUB_OUTPUT" echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT" echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT" - name: Upload source artifact uses: actions/upload-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ retention-days: 1 - name: Upload keystore artifact if: ${{ steps.keystore.outputs.has_keystore == 'true' || steps.keystore-download.outputs.has_keystore == 'true' }} uses: actions/upload-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} path: | ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }} keystore-info.txt retention-days: 7 - name: Notify error if project not detected if: ${{ steps.detect-project.outputs.build_should_run == 'false' }} run: | set -e JSON_PAYLOAD=$(cat </dev/null || true cat > "$CORDOVA_DIR"/config.xml << 'EOF' EOF cd "$CORDOVA_DIR" cordova platform add android@14.0.1 KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) FORMAT="${{ github.event.inputs.output_format }}" if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then echo "=== Build RELEASE ===" if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then cordova build android --release -- \ --packageType=apk \ --keystore="$KEYSTORE_FILE" \ --storePassword="${{ github.event.inputs.keystore_password }}" \ --alias="${{ github.event.inputs.keystore_alias }}" \ --password="${{ github.event.inputs.keystore_password }}" fi if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then cordova build android --release -- \ --packageType=bundle \ --keystore="$KEYSTORE_FILE" \ --storePassword="${{ github.event.inputs.keystore_password }}" \ --alias="${{ github.event.inputs.keystore_alias }}" \ --password="${{ github.event.inputs.keystore_password }}" fi else echo "=== Build DEBUG ===" cordova build android --debug fi echo "=== Verification des artefacts ===" find . -name "*.apk" -o -name "*.aab" | head -5 - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-web-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 3: BUILD CAPACITOR # ============================================================ build-capacitor: needs: prepare if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","solidjs","preact","ionic","capacitor"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest outputs: is_capacitor: ${{ steps.build.outputs.is_capacitor }} steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup Node uses: actions/setup-node@v4 with: node-version: '24' - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Cache Gradle uses: actions/cache@v4 with: path: | ~/.gradle/caches ~/.gradle/wrapper key: gradle-cap-${{ runner.os }}-${{ github.event.inputs.build_id }} restore-keys: gradle-cap-${{ runner.os }}- - name: Cache npm uses: actions/cache@v4 with: path: ~/.npm key: npm-cap-${{ runner.os }}-${{ hashFiles('src/**/package-lock.json') }} restore-keys: npm-cap-${{ runner.os }}- - name: Install Capacitor CLI run: npm install -g @capacitor/cli - name: Build Capacitor project id: build run: | set -e echo "is_capacitor=true" >> "$GITHUB_OUTPUT" echo "=== Recherche du projet ===" cd src/ PROJECT_ROOT=$(find . -name "package.json" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/build/*" \ -not -path "*/dist/*" \ -exec dirname {} \; | head -1) if [ -z "$PROJECT_ROOT" ]; then echo "Pas de package.json trouve" echo "is_capacitor=false" >> "$GITHUB_OUTPUT" exit 0 fi echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then echo "Pas de capacitor.config.* trouve - tentative d'init" npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "dist" 2>/dev/null || \ npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "build" 2>/dev/null || \ npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "www" 2>/dev/null || \ npx cap init "${{ github.event.inputs.app_name }}" \ "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \ --web-dir "." 2>/dev/null || { echo "ERREUR: Impossible d'initialiser Capacitor" echo "is_capacitor=false" >> "$GITHUB_OUTPUT" exit 0 } fi echo "=== Installation des dependances ===" npm install if grep -q '"build"' package.json 2>/dev/null; then echo "=== Build du frontend ===" npm run build fi if [ ! -d "android" ]; then echo "=== Ajout de la plateforme Android ===" npx cap add android || { echo "ERREUR: Impossible d'ajouter la plateforme Android avec Capacitor" echo "is_capacitor=false" >> "$GITHUB_OUTPUT" exit 0 } fi echo "=== Synchronisation Android ===" npx cap sync android || { echo "ERREUR: cap sync a echoue" echo "is_capacitor=false" >> "$GITHUB_OUTPUT" exit 0 } if [ -d "android" ]; then cd android chmod +x gradlew KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then echo "=== Build RELEASE ===" mkdir -p app cat > app/signing.gradle << GRADLE_EOF android { signingConfigs { release { storeFile file("$KEYSTORE_FILE") storePassword "${{ github.event.inputs.keystore_password }}" keyAlias "${{ github.event.inputs.keystore_alias }}" keyPassword "${{ github.event.inputs.keystore_password }}" } } buildTypes { release { signingConfig signingConfigs.release } } } GRADLE_EOF if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then echo "apply from: 'signing.gradle'" >> app/build.gradle fi ./gradlew assembleRelease else echo "=== Build DEBUG ===" ./gradlew assembleDebug fi fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-capacitor-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 4: BUILD REACT NATIVE # ============================================================ build-react-native: needs: prepare if: ${{ github.event.inputs.platform != 'windows' && needs.prepare.outputs.detected_type == 'react-native' && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup Node uses: actions/setup-node@v4 with: node-version: '24' - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Cache Gradle uses: actions/cache@v4 with: path: | ~/.gradle/caches ~/.gradle/wrapper key: gradle-rn-${{ runner.os }}-${{ github.event.inputs.build_id }} restore-keys: gradle-rn-${{ runner.os }}- - name: Build React Native run: | set -e cd src/ PROJECT_ROOT=$(find . -name "package.json" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" if [ ! -f "metro.config.js" ] && [ ! -f "metro.config.ts" ]; then echo "ATTENTION: metro.config.js non trouve" fi npm install cd android chmod +x gradlew KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then mkdir -p app cat > app/signing.gradle << GRADLE_EOF android { signingConfigs { release { storeFile file("$KEYSTORE_FILE") storePassword "${{ github.event.inputs.keystore_password }}" keyAlias "${{ github.event.inputs.keystore_alias }}" keyPassword "${{ github.event.inputs.keystore_password }}" } } buildTypes { release { signingConfig signingConfigs.release } } } GRADLE_EOF if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then echo "apply from: 'signing.gradle'" >> app/build.gradle fi ./gradlew assembleRelease else ./gradlew assembleDebug fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-react-native-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 5: BUILD KOTLIN / JAVA # ============================================================ build-kotlin-java: needs: prepare if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Cache Gradle uses: actions/cache@v4 with: path: | ~/.gradle/caches ~/.gradle/wrapper key: gradle-kj-${{ runner.os }}-${{ github.event.inputs.build_id }} restore-keys: gradle-kj-${{ runner.os }}- - name: Build Kotlin/Java run: | set -e cd src/ PROJECT_ROOT=$(find . -name "build.gradle" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" chmod +x gradlew KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then if ! grep -q "signingConfigs" app/build.gradle 2>/dev/null; then mkdir -p app cat > app/signing.gradle << GRADLE_EOF android { signingConfigs { release { storeFile file("$KEYSTORE_FILE") storePassword "${{ github.event.inputs.keystore_password }}" keyAlias "${{ github.event.inputs.keystore_alias }}" keyPassword "${{ github.event.inputs.keystore_password }}" } } buildTypes { release { signingConfig signingConfigs.release } } } GRADLE_EOF echo "apply from: 'signing.gradle'" >> app/build.gradle fi ./gradlew assembleRelease else ./gradlew assembleDebug fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-kotlin-java-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 6: BUILD FLUTTER # ============================================================ build-flutter: needs: prepare if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Setup Flutter uses: subosito/flutter-action@v2 with: channel: 'stable' - name: Verify Flutter run: flutter doctor - name: Build Flutter run: | set -e cd src/ PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/build/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" if [ ! -f "pubspec.yaml" ]; then echo "ERREUR: pubspec.yaml non trouve" exit 1 fi flutter pub get FORMAT="${{ github.event.inputs.output_format }}" KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then mkdir -p android cat > android/key.properties << EOF storePassword=${{ github.event.inputs.keystore_password }} keyPassword=${{ github.event.inputs.keystore_password }} keyAlias=${{ github.event.inputs.keystore_alias }} storeFile=$KEYSTORE_FILE EOF if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then flutter build apk --release fi if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then flutter build appbundle --release fi else flutter build apk --debug fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-flutter-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 7: BUILD PYTHON # ============================================================ build-python: needs: prepare if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup Python uses: actions/setup-python@v5 with: python-version: '3.12' - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Build Python with Briefcase run: | set -e cd src/ PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/__pycache__/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" pip install briefcase briefcase create android briefcase build android briefcase package android -p apk --adhoc-sign - name: Sign APK with keystore if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }} run: | set -e APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1) KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do "$APK_SIGNER" sign \ --ks "$KEYSTORE_FILE" \ --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \ --key-pass pass:"${{ github.event.inputs.keystore_password }}" \ --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \ "$apk" done fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-python-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 8: BUILD .NET MAUI # ============================================================ build-dotnet: needs: prepare if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup .NET uses: actions/setup-dotnet@v4 with: dotnet-version: '8.0.x' - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Install MAUI workload run: dotnet workload install maui-android - name: Build .NET MAUI run: | set -e cd src/ PROJECT_ROOT=$(find . -name "*.csproj" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/bin/*" \ -not -path "*/obj/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1) if [ -z "$CSPROJ" ]; then echo "ERREUR: Aucun fichier .csproj trouve" exit 1 fi KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then dotnet publish "$CSPROJ" -f net8.0-android -c Release else dotnet build "$CSPROJ" -f net8.0-android -c Debug fi - name: Sign APK with keystore if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }} run: | set -e APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1) KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do "$APK_SIGNER" sign \ --ks "$KEYSTORE_FILE" \ --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \ --key-pass pass:"${{ github.event.inputs.keystore_password }}" \ --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \ "$apk" done fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-dotnet-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 9: BUILD OTHER (Go, Godot, Lua, NativeScript) # ============================================================ build-other: needs: prepare if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","nativescript"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Download keystore if: ${{ needs.prepare.outputs.has_keystore == 'true' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} - name: Setup Java uses: actions/setup-java@v4 with: java-version: '17' distribution: 'temurin' - name: Setup Android SDK uses: android-actions/setup-android@v3 - name: Setup Go if: ${{ needs.prepare.outputs.detected_type == 'go' }} uses: actions/setup-go@v5 with: go-version: '1.22' - name: Setup Godot if: ${{ needs.prepare.outputs.detected_type == 'godot' }} run: | set -e GODOT_VERSION="4.2.2" wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot chmod +x /usr/local/bin/godot wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/ - name: Setup Lua/Solar2D if: ${{ needs.prepare.outputs.detected_type == 'lua' }} run: | set -e wget -q https://github.com/coronalabs/corona/releases/download/3700/Solar2DConsole.tgz tar -xzf Solar2DConsole.tgz sudo mv Solar2DConsole /opt/solar2d echo "/opt/solar2d" >> $GITHUB_PATH - name: Setup Node for NativeScript if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }} uses: actions/setup-node@v4 with: node-version: '24' - name: Install NativeScript CLI if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }} run: npm install -g nativescript - name: Install gomobile if: ${{ needs.prepare.outputs.detected_type == 'go' }} run: | set -e go install golang.org/x/mobile/cmd/gomobile@latest go install golang.org/x/mobile/cmd/gobind@latest sdkmanager "ndk;25.2.9519653" 2>/dev/null || true export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/25.2.9519653" gomobile init - name: Build project run: | set -e cd src/ case "${{ needs.prepare.outputs.detected_type }}" in go) PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." cd "$PROJECT_ROOT" gomobile build -target=android -o app.apk . ;; godot) PROJECT_ROOT=$(find . -name "project.godot" -type f -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." cd "$PROJECT_ROOT" if [ ! -f "export_presets.cfg" ]; then echo "ATTENTION: export_presets.cfg non trouve, creation d'un preset par defaut" cat > export_presets.cfg << 'EOF' [preset.0] name="Android" platform="Android" runnable=true export_filter="all_resources" android_architectures/arm64-v8a=true EOF fi godot --headless --export-release "Android" build.apk ;; lua) PROJECT_ROOT=$(find . -name "build.settings" -type f -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." cd "$PROJECT_ROOT" /opt/solar2d/solar2d.sh build android ;; nativescript) PROJECT_ROOT=$(find . -name "package.json" -type f -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." cd "$PROJECT_ROOT" npm install [ -d "android" ] || ns platform add android KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then ns build android --release --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}" else ns build android --debug fi ;; esac - name: Sign APK with keystore if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }} run: | set -e APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1) [ -z "$APK_SIGNER" ] && APK_SIGNER=$(find /usr -name "apksigner" -type f 2>/dev/null | head -1) [ -z "$APK_SIGNER" ] && APK_SIGNER=$(find /opt -name "apksigner" -type f 2>/dev/null | head -1) KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1) if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do $APK_SIGNER sign \ --ks "$KEYSTORE_FILE" \ --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \ --key-pass pass:"${{ github.event.inputs.keystore_password }}" \ --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \ "$apk" done else for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \ -keystore "$KEYSTORE_FILE" \ -storepass "${{ github.event.inputs.keystore_password }}" \ "$apk" "${{ github.event.inputs.keystore_alias }}" done fi - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-other-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 10: BUILD WINDOWS - Flutter # ============================================================ build-windows-flutter: needs: prepare if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }} runs-on: windows-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Setup Flutter uses: subosito/flutter-action@v2 with: channel: 'stable' - name: Build Flutter for Windows shell: bash run: | set -e cd src/ PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/build/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" flutter config --enable-windows-desktop flutter pub get if [ "${{ github.event.inputs.build_type }}" == "release" ]; then flutter build windows --release else flutter build windows --debug fi - name: Collect artifacts shell: bash run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-windows-flutter-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 11: BUILD WINDOWS - .NET MAUI # ============================================================ build-windows-dotnet: needs: prepare if: ${{ github.event.inputs.platform == 'windows' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }} runs-on: windows-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Setup .NET uses: actions/setup-dotnet@v4 with: dotnet-version: '8.0.x' - name: Install MAUI workload run: dotnet workload install maui-windows - name: Build .NET MAUI for Windows shell: bash run: | set -e cd src/ PROJECT_ROOT=$(find . -name "*.csproj" -type f \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/bin/*" \ -not -path "*/obj/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1) if [ -z "$CSPROJ" ]; then echo "ERREUR: Aucun fichier .csproj trouve" exit 1 fi CONFIG="Debug" [ "${{ github.event.inputs.build_type }}" == "release" ] && CONFIG="Release" dotnet publish "$CSPROJ" -f net8.0-windows10.0.19041.0 -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64 - name: Collect artifacts shell: bash run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-windows-dotnet-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 12: BUILD WINDOWS - Python # ============================================================ build-windows-python: needs: prepare if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }} runs-on: windows-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Setup Python uses: actions/setup-python@v5 with: python-version: '3.12' - name: Build with Briefcase for Windows shell: bash run: | set -e cd src/ PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" \ -not -path "*/node_modules/*" \ -not -path "*/.git/*" \ -not -path "*/__pycache__/*" \ -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" pip install briefcase briefcase create windows app briefcase build windows app briefcase package windows app -p app - name: Collect artifacts shell: bash run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-windows-python-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 13: BUILD WINDOWS - Go (cross-compilation) # ============================================================ build-windows-go: needs: prepare if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'go' && needs.prepare.outputs.build_should_run == 'true' }} runs-on: ubuntu-latest steps: - name: Download source uses: actions/download-artifact@v4 with: name: source-${{ github.event.inputs.build_id }} path: src/ - name: Setup Go uses: actions/setup-go@v5 with: go-version: '1.22' - name: Cross-compile for Windows run: | set -e cd src/ PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1) [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="." echo "Projet trouve dans : $PROJECT_ROOT" cd "$PROJECT_ROOT" GOOS=windows GOARCH=amd64 go build -o app.exe . - name: Collect artifacts run: | mkdir -p $GITHUB_WORKSPACE/output find $GITHUB_WORKSPACE/src/ -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true echo "=== Fichiers dans output/ ===" ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve" - name: Upload build artifacts uses: actions/upload-artifact@v4 with: name: build-windows-go-${{ github.event.inputs.build_id }} path: output/* retention-days: 1 if-no-files-found: warn # ============================================================ # JOB 14: POST-BUILD - Upload to R2 & Notify # ============================================================ post-build: needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go] if: always() runs-on: ubuntu-latest outputs: status: ${{ steps.upload.outputs.status }} steps: - name: Download all build artifacts uses: actions/download-artifact@v4 with: path: artifacts/ pattern: build-*-${{ github.event.inputs.build_id }} merge-multiple: true - name: Download keystore artifact if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }} uses: actions/download-artifact@v4 with: name: keystore-${{ github.event.inputs.build_id }} path: keystore/ - name: List artifacts run: | echo "=== Artifacts downloaded ===" find artifacts/ -type f 2>/dev/null || true echo "=== Keystore ===" find keystore/ -type f 2>/dev/null || true - name: Upload APK to R2 id: upload-apk run: | set -e APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1) if [ -n "$APK_FILE" ]; then echo "Uploading APK: $APK_FILE" curl -sf -X POST \ -H "Content-Type: application/vnd.android.package-archive" \ --data-binary @"$APK_FILE" \ "${{ github.event.inputs.build_base_url }}/upload/apk" echo "apk_uploaded=true" >> "$GITHUB_OUTPUT" else echo "No APK found" echo "apk_uploaded=false" >> "$GITHUB_OUTPUT" fi - name: Upload AAB to R2 id: upload-aab run: | set -e AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1) if [ -n "$AAB_FILE" ]; then echo "Uploading AAB: $AAB_FILE" curl -sf -X POST \ -H "Content-Type: application/octet-stream" \ --data-binary @"$AAB_FILE" \ "${{ github.event.inputs.build_base_url }}/upload/aab" echo "aab_uploaded=true" >> "$GITHUB_OUTPUT" else echo "No AAB found" echo "aab_uploaded=false" >> "$GITHUB_OUTPUT" fi - name: Upload EXE to R2 id: upload-exe if: ${{ github.event.inputs.platform == 'windows' }} run: | set -e EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1) if [ -n "$EXE_FILE" ]; then echo "Uploading EXE: $EXE_FILE" curl -sf -X POST \ -H "Content-Type: application/octet-stream" \ --data-binary @"$EXE_FILE" \ "${{ github.event.inputs.build_base_url }}/upload/exe" echo "exe_uploaded=true" >> "$GITHUB_OUTPUT" else echo "No EXE found" echo "exe_uploaded=false" >> "$GITHUB_OUTPUT" fi - name: Upload generated keystore to R2 id: upload-keystore if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }} run: | set -e KS_FILE=$(find keystore/ -name "*.keystore" -type f | head -1) if [ -n "$KS_FILE" ]; then echo "Uploading keystore: $KS_FILE" curl -sf -X POST \ -H "Content-Type: application/octet-stream" \ --data-binary @"$KS_FILE" \ "${{ github.event.inputs.build_base_url }}/upload/keystore" echo "keystore_uploaded=true" >> "$GITHUB_OUTPUT" else echo "No keystore found" echo "keystore_uploaded=false" >> "$GITHUB_OUTPUT" fi - name: Determine build status id: build-status run: | if [ "${{ steps.upload-apk.outputs.apk_uploaded }}" == "true" ] || [ "${{ steps.upload-aab.outputs.aab_uploaded }}" == "true" ] || [ "${{ steps.upload-exe.outputs.exe_uploaded }}" == "true" ]; then echo "status=success" >> "$GITHUB_OUTPUT" else echo "status=error" >> "$GITHUB_OUTPUT" fi - name: Notify callback URL id: upload run: | set -e BUILD_ID="${{ github.event.inputs.build_id }}" STATUS="${{ steps.build-status.outputs.status }}" JSON_PAYLOAD=$(cat <> "$GITHUB_OUTPUT"
+name: Build APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: 'URL du zip source'
+        required: true
+        type: string
+      app_name:
+        description: 'Nom de l application'
+        required: true
+        type: string
+      package_id:
+        description: 'Package ID'
+        required: false
+        type: string
+      build_id:
+        description: 'ID du build'
+        required: true
+        type: string
+      build_type:
+        description: 'Type de build'
+        required: true
+        type: string
+      output_format:
+        description: 'Format de sortie (apk, aab, both)'
+        required: false
+        type: string
+        default: 'apk'
+      project_type:
+        description: 'Type de projet (optionnel - auto-detecte si vide)'
+        required: false
+        type: string
+        default: ''
+      platform:
+        description: 'Plateforme cible (android, windows)'
+        required: false
+        type: string
+        default: 'android'
+      keystore_mode:
+        description: 'Mode keystore'
+        required: true
+        type: string
+      keystore_url:
+        description: 'URL du keystore'
+        required: false
+        type: string
+      keystore_password:
+        description: 'Mot de passe du keystore'
+        required: false
+        type: string
+      keystore_alias:
+        description: 'Alias du keystore'
+        required: false
+        type: string
+      callback_url:
+        description: 'URL de callback (notification finale, avec /callback)'
+        required: true
+        type: string
+      build_base_url:
+        description: 'URL de base du build sur le Worker (sans /callback)'
+        required: false
+        type: string
+
+jobs:
+  # ============================================================
+  # JOB 1: PREPARE (avec auto-detection du type de projet)
+  # ============================================================
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      source_dir: ${{ steps.detect.outputs.source_dir }}
+      src_path: ${{ steps.detect.outputs.src_path }}
+      detected_type: ${{ steps.detect-project.outputs.detected_type }}
+      has_keystore: ${{ steps.keystore.outputs.has_keystore || steps.keystore-download.outputs.has_keystore }}
+      keystore_path: ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }}
+      keystore_filename: ${{ steps.keystore.outputs.keystore_filename || steps.keystore-download.outputs.keystore_filename }}
+      build_should_run: ${{ steps.detect-project.outputs.build_should_run }}
+      error_message: ${{ steps.detect-project.outputs.error_message }}
+    steps:
+      - name: Download source zip
+        id: download
+        run: |
+          set -e
+          curl -f -L -o source.zip "${{ github.event.inputs.zip_url }}"
+          echo "=== Taille du fichier telecharge ==="
+          ls -la source.zip
+          file source.zip
+          SIZE=$(stat -c%s source.zip 2>/dev/null || stat -f%z source.zip)
+          if [ "$SIZE" -lt 100 ]; then
+            echo "ERREUR: le fichier source.zip est suspicieusement petit ($SIZE octets)."
+            echo "Contenu recu :"
+            cat source.zip
+            exit 1
+          fi
+          mkdir -p src
+          unzip -o source.zip -d src/
+
+      - name: Detect source directory
+        id: detect
+        run: |
+          cd src
+          ITEM_COUNT=$(ls -1 | wc -l)
+          FIRST_ITEM=$(ls -1 | head -1)
+          if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
+            echo "source_dir=$FIRST_ITEM" >> "$GITHUB_OUTPUT"
+            echo "src_path=src/$FIRST_ITEM" >> "$GITHUB_OUTPUT"
+            echo "Single folder detected: $FIRST_ITEM"
+          else
+            echo "source_dir=." >> "$GITHUB_OUTPUT"
+            echo "src_path=src" >> "$GITHUB_OUTPUT"
+            echo "Files directly in src/"
+          fi
+
+      # ============================================================
+      # AUTO-DETECTION DU TYPE DE PROJET
+      # ============================================================
+      - name: Auto-detect project type
+        id: detect-project
+        run: |
+          set -e
+          cd src/${{ steps.detect.outputs.source_dir }}
+
+          echo "=== Analyse de la structure du projet ==="
+
+          find_file() {
+            find . -name "$1" -type f \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              -not -path "*/build/*" \
+              -not -path "*/dist/*" \
+              -not -path "*/bin/*" \
+              -not -path "*/obj/*" \
+              2>/dev/null | head -1
+          }
+
+          find_dir() {
+            find . -type d -name "$1" \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              2>/dev/null | head -1
+          }
+
+          DETECTED="unknown"
+          BUILD_SHOULD_RUN="true"
+          ERROR_MSG=""
+
+          if [ -n "$(find_file "pubspec.yaml")" ]; then
+            DETECTED="flutter"
+            echo "Flutter detecte (pubspec.yaml trouve)"
+
+          elif [ -n "$(find_file "*.csproj")" ]; then
+            DETECTED="dotnet-maui"
+            echo ".NET MAUI detecte (.csproj trouve)"
+
+          elif [ -n "$(find_file "metro.config.js")" ] || [ -n "$(find_file "metro.config.ts")" ]; then
+            DETECTED="react-native"
+            echo "React Native detecte (metro.config trouve)"
+
+          elif [ -n "$(find_file "capacitor.config.ts")" ] || \
+               [ -n "$(find_file "capacitor.config.json")" ] || \
+               [ -n "$(find_file "capacitor.config.js")" ] || \
+               ( [ -n "$(find_file "package.json")" ] && \
+                 ( grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null || \
+                   grep -q "@capacitor/android" "$(find_file "package.json")" 2>/dev/null || \
+                   grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null ) ); then
+            DETECTED="capacitor"
+            echo "Capacitor/Ionic detecte (config ou dependance explicite)"
+
+          elif [ -n "$(find_file "build.gradle")" ] && [ -z "$(find_file "package.json")" ]; then
+            DETECTED="kotlin"
+            echo "Kotlin/Java natif detecte (build.gradle sans package.json)"
+
+          elif [ -n "$(find_file "go.mod")" ]; then
+            DETECTED="go"
+            echo "Go detecte (go.mod trouve)"
+
+          elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || \
+               [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ]; then
+            DETECTED="python"
+            echo "Python detecte"
+
+          elif [ -n "$(find_file "project.godot")" ]; then
+            DETECTED="godot"
+            echo "Godot detecte (project.godot trouve)"
+
+          elif [ -n "$(find_file "build.settings")" ]; then
+            DETECTED="lua"
+            echo "Lua/Solar2D detecte (build.settings trouve)"
+
+          elif [ -n "$(find_file "package.json")" ] && \
+               grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
+            DETECTED="nativescript"
+            echo "NativeScript detecte (dependance nativescript dans package.json)"
+
+          elif [ -n "$(find_file "package.json")" ]; then
+            PKG_JSON="$(find_file "package.json")"
+            if grep -q '"react"' "$PKG_JSON" 2>/dev/null && [ -z "$(find_file "metro.config.js")" ] && [ -z "$(find_file "metro.config.ts")" ]; then
+              DETECTED="react"
+              echo "React detecte (package.json avec react, sans metro.config)"
+            elif grep -q '"vue"' "$PKG_JSON" 2>/dev/null; then
+              DETECTED="vue"
+              echo "Vue detecte"
+            elif grep -q '"svelte"' "$PKG_JSON" 2>/dev/null; then
+              DETECTED="svelte"
+              echo "Svelte detecte"
+            elif grep -q '"preact"' "$PKG_JSON" 2>/dev/null || grep -q '"solid-js"' "$PKG_JSON" 2>/dev/null; then
+              DETECTED="web"
+              echo "Projet web detecte (Preact/SolidJS)"
+            else
+              DETECTED="web"
+              echo "Projet web generique detecte (package.json sans framework connu)"
+            fi
+
+          elif [ -n "$(find_file "index.html")" ] || [ -n "$(find_file "*.html")" ]; then
+            DETECTED="web"
+            echo "Site statique detecte (HTML trouve)"
+
+          else
+            DETECTED="unknown"
+            BUILD_SHOULD_RUN="false"
+            ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue/preact), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), setup.py/pyproject.toml (Python), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources."
+            echo "Aucun type de projet detecte"
+          fi
+
+          CLIENT_TYPE="${{ github.event.inputs.project_type }}"
+          if [ "$CLIENT_TYPE" != "" ] && [ "$CLIENT_TYPE" != "web" ]; then
+            echo "Client a specifie: $CLIENT_TYPE"
+            case "$CLIENT_TYPE" in
+              flutter)
+                if [ "$DETECTED" != "flutter" ] && [ -z "$(find_file "pubspec.yaml")" ]; then
+                  echo "Client dit Flutter mais pas de pubspec.yaml - fallback sur detection"
+                else
+                  DETECTED="$CLIENT_TYPE"
+                fi
+                ;;
+              capacitor|angular|solidjs|preact|ionic)
+                if [ "$DETECTED" == "web" ] || [ "$DETECTED" == "react" ] || [ "$DETECTED" == "vue" ]; then
+                  DETECTED="capacitor"
+                  echo "Forcage Capacitor sur base du choix client ($CLIENT_TYPE)"
+                else
+                  DETECTED="$CLIENT_TYPE"
+                fi
+                ;;
+              *)
+                DETECTED="$CLIENT_TYPE"
+                ;;
+            esac
+          fi
+
+          echo "detected_type=$DETECTED" >> "$GITHUB_OUTPUT"
+          echo "build_should_run=$BUILD_SHOULD_RUN" >> "$GITHUB_OUTPUT"
+          echo "error_message=$ERROR_MSG" >> "$GITHUB_OUTPUT"
+          echo "=== Type final : $DETECTED | Build: $BUILD_SHOULD_RUN ==="
+
+      # ============================================================
+      # FALLBACK : Initialiser Capacitor si manquant
+      # ============================================================
+      - name: Auto-init Capacitor config if missing
+        if: ${{ steps.detect-project.outputs.detected_type == 'capacitor' }}
+        run: |
+          set -e
+          cd src/${{ steps.detect.outputs.source_dir }}
+
+          PROJECT_ROOT=$(find . -name "package.json" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+          cd "$PROJECT_ROOT"
+
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
+            echo "Config Capacitor manquante - initialisation automatique..."
+            npm install -g @capacitor/cli
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "dist" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "build" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "www" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "." 2>/dev/null || true
+            echo "Config Capacitor generee automatiquement"
+          else
+            echo "Config Capacitor existante"
+          fi
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Generate keystore
+        id: keystore
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        run: |
+          set -e
+          KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_NAME" \
+            -alias "${{ github.event.inputs.keystore_alias }}" \
+            -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \
+            -storetype PKCS12 \
+            -storepass "${{ github.event.inputs.keystore_password }}" \
+            -keypass "${{ github.event.inputs.keystore_password }}" \
+            -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI"
+
+          cat > keystore-info.txt << EOF
+          Keystore genere pour le build ${{ github.event.inputs.build_id }}
+          Alias: ${{ github.event.inputs.keystore_alias }}
+          Password: ${{ github.event.inputs.keystore_password }}
+          EOF
+
+          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
+          echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Download user keystore
+        id: keystore-download
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
+        run: |
+          set -e
+          KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
+          curl -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}"
+          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
+          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
+          echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload source artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+          retention-days: 1
+
+      - name: Upload keystore artifact
+        if: ${{ steps.keystore.outputs.has_keystore == 'true' || steps.keystore-download.outputs.has_keystore == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+          path: |
+            ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }}
+            keystore-info.txt
+          retention-days: 7
+
+      - name: Notify error if project not detected
+        if: ${{ steps.detect-project.outputs.build_should_run == 'false' }}
+        run: |
+          set -e
+          JSON_PAYLOAD=$(cat <<EOF
+          {
+            "build_id": "${{ github.event.inputs.build_id }}",
+            "state": "error",
+            "message": "${{ steps.detect-project.outputs.error_message }}",
+            "detected_type": "unknown"
+          }
+          EOF
+          )
+          for i in 1 2 3; do
+            echo "Tentative $i de notification d'erreur..."
+            curl -sf -X POST -H "Content-Type: application/json" \
+              -d "$JSON_PAYLOAD" \
+              "${{ github.event.inputs.callback_url }}" && break || sleep 5
+          done
+          echo "Build annule - type de projet non detecte"
+          exit 1
+
+  # ============================================================
+  # JOB 2: BUILD WEB (Cordova) - React, Vue, Svelte, statique
+  # ============================================================
+  build-web:
+    needs: prepare
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue","svelte"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-web-${{ runner.os }}-${{ github.event.inputs.build_id }}
+          restore-keys: gradle-web-${{ runner.os }}-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-web-${{ runner.os }}-${{ hashFiles('src/**/package-lock.json') }}
+          restore-keys: npm-web-${{ runner.os }}-
+
+      - name: Install Cordova
+        run: npm install -g cordova
+
+      - name: Build web project
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "package.json" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/build/*" \
+            -not -path "*/dist/*" \
+            -exec dirname {} \; | head -1)
+
+          IS_STATIC=false
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "Projet statique (pas de package.json)"
+            IS_STATIC=true
+            PROJECT_ROOT="${{ needs.prepare.outputs.source_dir }}"
+          else
+            echo "Projet trouve dans : $PROJECT_ROOT"
+            cd "$PROJECT_ROOT"
+
+            if [ -f "package.json" ]; then
+              echo "=== Installation des dependances ==="
+              npm install
+
+              if grep -q '"build"' package.json; then
+                echo "=== Build du projet ==="
+                npm run build
+              fi
+            fi
+          fi
+
+          PKG_ID="${{ github.event.inputs.package_id }}"
+          [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
+
+          CORDOVA_DIR="cordova-project-${{ github.event.inputs.build_id }}"
+          cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
+          rm -rf "$CORDOVA_DIR"/www/*
+
+          if [ "$IS_STATIC" = true ]; then
+            COPY_FROM="$PROJECT_ROOT"
+          else
+            if [ -d "$PROJECT_ROOT/dist" ]; then
+              COPY_FROM="$PROJECT_ROOT/dist"
+            elif [ -d "$PROJECT_ROOT/build" ]; then
+              COPY_FROM="$PROJECT_ROOT/build"
+            else
+              COPY_FROM="$PROJECT_ROOT"
+            fi
+          fi
+
+          echo "=== Nettoyage node_modules ==="
+          rm -rf "$COPY_FROM"/node_modules
+          rm -rf "$COPY_FROM"/.git
+
+          echo "=== Copie vers Cordova www/ ==="
+          cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
+
+          cat > "$CORDOVA_DIR"/config.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <widget xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+            <preference name="android-minSdkVersion" value="24" />
+            <preference name="android-targetSdkVersion" value="34" />
+            <preference name="AndroidPersistentFileLocation" value="Compatibility" />
+          </widget>
+          EOF
+
+          cd "$CORDOVA_DIR"
+          cordova platform add android@14.0.1
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          FORMAT="${{ github.event.inputs.output_format }}"
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            echo "=== Build RELEASE ==="
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              cordova build android --release -- \
+                --packageType=apk \
+                --keystore="$KEYSTORE_FILE" \
+                --storePassword="${{ github.event.inputs.keystore_password }}" \
+                --alias="${{ github.event.inputs.keystore_alias }}" \
+                --password="${{ github.event.inputs.keystore_password }}"
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              cordova build android --release -- \
+                --packageType=bundle \
+                --keystore="$KEYSTORE_FILE" \
+                --storePassword="${{ github.event.inputs.keystore_password }}" \
+                --alias="${{ github.event.inputs.keystore_alias }}" \
+                --password="${{ github.event.inputs.keystore_password }}"
+            fi
+          else
+            echo "=== Build DEBUG ==="
+            cordova build android --debug
+          fi
+
+          echo "=== Verification des artefacts ==="
+          find . -name "*.apk" -o -name "*.aab" | head -5
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-web-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 3: BUILD CAPACITOR
+  # ============================================================
+  build-capacitor:
+    needs: prepare
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","solidjs","preact","ionic","capacitor"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    outputs:
+      is_capacitor: ${{ steps.build.outputs.is_capacitor }}
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-cap-${{ runner.os }}-${{ github.event.inputs.build_id }}
+          restore-keys: gradle-cap-${{ runner.os }}-
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        with:
+          path: ~/.npm
+          key: npm-cap-${{ runner.os }}-${{ hashFiles('src/**/package-lock.json') }}
+          restore-keys: npm-cap-${{ runner.os }}-
+
+      - name: Install Capacitor CLI
+        run: npm install -g @capacitor/cli
+
+      - name: Build Capacitor project
+        id: build
+        run: |
+          set -e
+          echo "is_capacitor=true" >> "$GITHUB_OUTPUT"
+
+          echo "=== Recherche du projet ==="
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "package.json" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/build/*" \
+            -not -path "*/dist/*" \
+            -exec dirname {} \; | head -1)
+
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "Pas de package.json trouve"
+            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
+            echo "Pas de capacitor.config.* trouve - tentative d'init"
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "dist" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "build" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "www" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "." 2>/dev/null || {
+              echo "ERREUR: Impossible d'initialiser Capacitor"
+              echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+
+          echo "=== Installation des dependances ==="
+          npm install
+
+          if grep -q '"build"' package.json 2>/dev/null; then
+            echo "=== Build du frontend ==="
+            npm run build
+          fi
+
+          if [ ! -d "android" ]; then
+            echo "=== Ajout de la plateforme Android ==="
+            npx cap add android || {
+              echo "ERREUR: Impossible d'ajouter la plateforme Android avec Capacitor"
+              echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
+          fi
+
+          echo "=== Synchronisation Android ==="
+          npx cap sync android || {
+            echo "ERREUR: cap sync a echoue"
+            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+
+          if [ -d "android" ]; then
+            cd android
+            chmod +x gradlew
+
+            KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+            if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+              echo "=== Build RELEASE ==="
+
+              mkdir -p app
+              cat > app/signing.gradle << GRADLE_EOF
+          android {
+            signingConfigs {
+              release {
+                storeFile file("$KEYSTORE_FILE")
+                storePassword "${{ github.event.inputs.keystore_password }}"
+                keyAlias "${{ github.event.inputs.keystore_alias }}"
+                keyPassword "${{ github.event.inputs.keystore_password }}"
+              }
+            }
+            buildTypes {
+              release {
+                signingConfig signingConfigs.release
+              }
+            }
+          }
+          GRADLE_EOF
+
+              if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
+                echo "apply from: 'signing.gradle'" >> app/build.gradle
+              fi
+
+              ./gradlew assembleRelease
+            else
+              echo "=== Build DEBUG ==="
+              ./gradlew assembleDebug
+            fi
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-capacitor-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 4: BUILD REACT NATIVE
+  # ============================================================
+  build-react-native:
+    needs: prepare
+    if: ${{ github.event.inputs.platform != 'windows' && needs.prepare.outputs.detected_type == 'react-native' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-rn-${{ runner.os }}-${{ github.event.inputs.build_id }}
+          restore-keys: gradle-rn-${{ runner.os }}-
+
+      - name: Build React Native
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "package.json" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          if [ ! -f "metro.config.js" ] && [ ! -f "metro.config.ts" ]; then
+            echo "ATTENTION: metro.config.js non trouve"
+          fi
+
+          npm install
+          cd android
+          chmod +x gradlew
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            mkdir -p app
+            cat > app/signing.gradle << GRADLE_EOF
+          android {
+            signingConfigs {
+              release {
+                storeFile file("$KEYSTORE_FILE")
+                storePassword "${{ github.event.inputs.keystore_password }}"
+                keyAlias "${{ github.event.inputs.keystore_alias }}"
+                keyPassword "${{ github.event.inputs.keystore_password }}"
+              }
+            }
+            buildTypes {
+              release {
+                signingConfig signingConfigs.release
+              }
+            }
+          }
+          GRADLE_EOF
+            if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
+              echo "apply from: 'signing.gradle'" >> app/build.gradle
+            fi
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-react-native-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA
+  # ============================================================
+  build-kotlin-java:
+    needs: prepare
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-kj-${{ runner.os }}-${{ github.event.inputs.build_id }}
+          restore-keys: gradle-kj-${{ runner.os }}-
+
+      - name: Build Kotlin/Java
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "build.gradle" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          chmod +x gradlew
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            if ! grep -q "signingConfigs" app/build.gradle 2>/dev/null; then
+              mkdir -p app
+              cat > app/signing.gradle << GRADLE_EOF
+          android {
+            signingConfigs {
+              release {
+                storeFile file("$KEYSTORE_FILE")
+                storePassword "${{ github.event.inputs.keystore_password }}"
+                keyAlias "${{ github.event.inputs.keystore_alias }}"
+                keyPassword "${{ github.event.inputs.keystore_password }}"
+              }
+            }
+            buildTypes {
+              release {
+                signingConfig signingConfigs.release
+              }
+            }
+          }
+          GRADLE_EOF
+              echo "apply from: 'signing.gradle'" >> app/build.gradle
+            fi
+            ./gradlew assembleRelease
+          else
+            ./gradlew assembleDebug
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-kotlin-java-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 6: BUILD FLUTTER
+  # ============================================================
+  build-flutter:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Verify Flutter
+        run: flutter doctor
+
+      - name: Build Flutter
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/build/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "ERREUR: pubspec.yaml non trouve"
+            exit 1
+          fi
+
+          flutter pub get
+          FORMAT="${{ github.event.inputs.output_format }}"
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            mkdir -p android
+            cat > android/key.properties << EOF
+          storePassword=${{ github.event.inputs.keystore_password }}
+          keyPassword=${{ github.event.inputs.keystore_password }}
+          keyAlias=${{ github.event.inputs.keystore_alias }}
+          storeFile=$KEYSTORE_FILE
+          EOF
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              flutter build apk --release
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              flutter build appbundle --release
+            fi
+          else
+            flutter build apk --debug
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-flutter-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 7: BUILD PYTHON
+  # ============================================================
+  build-python:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Build Python with Briefcase
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/__pycache__/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          pip install briefcase
+          briefcase create android
+          briefcase build android
+          briefcase package android -p apk --adhoc-sign
+
+      - name: Sign APK with keystore
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do
+              "$APK_SIGNER" sign \
+                --ks "$KEYSTORE_FILE" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+            done
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-python-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 8: BUILD .NET MAUI
+  # ============================================================
+  build-dotnet:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-android
+
+      - name: Build .NET MAUI
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "*.csproj" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/bin/*" \
+            -not -path "*/obj/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          if [ -z "$CSPROJ" ]; then
+            echo "ERREUR: Aucun fichier .csproj trouve"
+            exit 1
+          fi
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            dotnet publish "$CSPROJ" -f net8.0-android -c Release
+          else
+            dotnet build "$CSPROJ" -f net8.0-android -c Debug
+          fi
+
+      - name: Sign APK with keystore
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do
+              "$APK_SIGNER" sign \
+                --ks "$KEYSTORE_FILE" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+            done
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-dotnet-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 9: BUILD OTHER (Go, Godot, Lua, NativeScript)
+  # ============================================================
+  build-other:
+    needs: prepare
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","nativescript"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Setup Go
+        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Setup Godot
+        if: ${{ needs.prepare.outputs.detected_type == 'godot' }}
+        run: |
+          set -e
+          GODOT_VERSION="4.2.2"
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          chmod +x /usr/local/bin/godot
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+
+      - name: Setup Lua/Solar2D
+        if: ${{ needs.prepare.outputs.detected_type == 'lua' }}
+        run: |
+          set -e
+          wget -q https://github.com/coronalabs/corona/releases/download/3700/Solar2DConsole.tgz
+          tar -xzf Solar2DConsole.tgz
+          sudo mv Solar2DConsole /opt/solar2d
+          echo "/opt/solar2d" >> $GITHUB_PATH
+
+      - name: Setup Node for NativeScript
+        if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install NativeScript CLI
+        if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
+        run: npm install -g nativescript
+
+      - name: Install gomobile
+        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
+        run: |
+          set -e
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          go install golang.org/x/mobile/cmd/gobind@latest
+          sdkmanager "ndk;25.2.9519653" 2>/dev/null || true
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/25.2.9519653"
+          gomobile init
+
+      - name: Build project
+        run: |
+          set -e
+          cd src/
+
+          case "${{ needs.prepare.outputs.detected_type }}" in
+            go)
+              PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
+              [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+              cd "$PROJECT_ROOT"
+              gomobile build -target=android -o app.apk .
+              ;;
+            godot)
+              PROJECT_ROOT=$(find . -name "project.godot" -type f -exec dirname {} \; | head -1)
+              [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+              cd "$PROJECT_ROOT"
+              if [ ! -f "export_presets.cfg" ]; then
+                echo "ATTENTION: export_presets.cfg non trouve, creation d'un preset par defaut"
+                cat > export_presets.cfg << 'EOF'
+          [preset.0]
+          name="Android"
+          platform="Android"
+          runnable=true
+          export_filter="all_resources"
+          android_architectures/arm64-v8a=true
+          EOF
+              fi
+              godot --headless --export-release "Android" build.apk
+              ;;
+            lua)
+              PROJECT_ROOT=$(find . -name "build.settings" -type f -exec dirname {} \; | head -1)
+              [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+              cd "$PROJECT_ROOT"
+              /opt/solar2d/solar2d.sh build android
+              ;;
+            nativescript)
+              PROJECT_ROOT=$(find . -name "package.json" -type f -exec dirname {} \; | head -1)
+              [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+              cd "$PROJECT_ROOT"
+              npm install
+              [ -d "android" ] || ns platform add android
+
+              KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+              if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+                ns build android --release --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}"
+              else
+                ns build android --debug
+              fi
+              ;;
+          esac
+
+      - name: Sign APK with keystore
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
+          [ -z "$APK_SIGNER" ] && APK_SIGNER=$(find /usr -name "apksigner" -type f 2>/dev/null | head -1)
+          [ -z "$APK_SIGNER" ] && APK_SIGNER=$(find /opt -name "apksigner" -type f 2>/dev/null | head -1)
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do
+              $APK_SIGNER sign \
+                --ks "$KEYSTORE_FILE" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+            done
+          else
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do
+              jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
+                -keystore "$KEYSTORE_FILE" \
+                -storepass "${{ github.event.inputs.keystore_password }}" \
+                "$apk" "${{ github.event.inputs.keystore_alias }}"
+            done
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-other-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 10: BUILD WINDOWS - Flutter
+  # ============================================================
+  build-windows-flutter:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Build Flutter for Windows
+        shell: bash
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/build/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          flutter config --enable-windows-desktop
+          flutter pub get
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            flutter build windows --release
+          else
+            flutter build windows --debug
+          fi
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-flutter-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 11: BUILD WINDOWS - .NET MAUI
+  # ============================================================
+  build-windows-dotnet:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-windows
+
+      - name: Build .NET MAUI for Windows
+        shell: bash
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "*.csproj" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/bin/*" \
+            -not -path "*/obj/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          if [ -z "$CSPROJ" ]; then
+            echo "ERREUR: Aucun fichier .csproj trouve"
+            exit 1
+          fi
+
+          CONFIG="Debug"
+          [ "${{ github.event.inputs.build_type }}" == "release" ] && CONFIG="Release"
+          dotnet publish "$CSPROJ" -f net8.0-windows10.0.19041.0 -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-dotnet-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 12: BUILD WINDOWS - Python
+  # ============================================================
+  build-windows-python:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build with Briefcase for Windows
+        shell: bash
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -not -path "*/__pycache__/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          pip install briefcase
+          briefcase create windows app
+          briefcase build windows app
+          briefcase package windows app -p app
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-python-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 13: BUILD WINDOWS - Go (cross-compilation)
+  # ============================================================
+  build-windows-go:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'go' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Cross-compile for Windows
+        run: |
+          set -e
+          cd src/
+
+          PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          GOOS=windows GOARCH=amd64 go build -o app.exe .
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-go-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 14: POST-BUILD - Upload to R2 & Notify
+  # ============================================================
+  post-build:
+    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      status: ${{ steps.upload.outputs.status }}
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+          pattern: build-*-${{ github.event.inputs.build_id }}
+          merge-multiple: true
+
+      - name: Download keystore artifact
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+          path: keystore/
+
+      - name: List artifacts
+        run: |
+          echo "=== Artifacts downloaded ==="
+          find artifacts/ -type f 2>/dev/null || true
+          echo "=== Keystore ==="
+          find keystore/ -type f 2>/dev/null || true
+
+      - name: Upload APK to R2
+        id: upload-apk
+        run: |
+          set -e
+          APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1)
+          if [ -n "$APK_FILE" ]; then
+            echo "Uploading APK: $APK_FILE"
+            curl -sf -X POST \
+              -H "Content-Type: application/vnd.android.package-archive" \
+              --data-binary @"$APK_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/apk"
+            echo "apk_uploaded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No APK found"
+            echo "apk_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload AAB to R2
+        id: upload-aab
+        run: |
+          set -e
+          AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1)
+          if [ -n "$AAB_FILE" ]; then
+            echo "Uploading AAB: $AAB_FILE"
+            curl -sf -X POST \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$AAB_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/aab"
+            echo "aab_uploaded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No AAB found"
+            echo "aab_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload EXE to R2
+        id: upload-exe
+        if: ${{ github.event.inputs.platform == 'windows' }}
+        run: |
+          set -e
+          EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1)
+          if [ -n "$EXE_FILE" ]; then
+            echo "Uploading EXE: $EXE_FILE"
+            curl -sf -X POST \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$EXE_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/exe"
+            echo "exe_uploaded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No EXE found"
+            echo "exe_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload generated keystore to R2
+        id: upload-keystore
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        run: |
+          set -e
+          KS_FILE=$(find keystore/ -name "*.keystore" -type f | head -1)
+          if [ -n "$KS_FILE" ]; then
+            echo "Uploading keystore: $KS_FILE"
+            curl -sf -X POST \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$KS_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/keystore"
+            echo "keystore_uploaded=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No keystore found"
+            echo "keystore_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Determine build status
+        id: build-status
+        run: |
+          if [ "${{ steps.upload-apk.outputs.apk_uploaded }}" == "true" ] || [ "${{ steps.upload-aab.outputs.aab_uploaded }}" == "true" ] || [ "${{ steps.upload-exe.outputs.exe_uploaded }}" == "true" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=error" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify callback URL
+        id: upload
+        run: |
+          set -e
+          BUILD_ID="${{ github.event.inputs.build_id }}"
+          STATUS="${{ steps.build-status.outputs.status }}"
+
+          JSON_PAYLOAD=$(cat <<EOF
+          {
+            "build_id": "$BUILD_ID",
+            "state": "$STATUS",
+            "message": "Build $STATUS"
+          }
+          EOF
+          )
+
+          for i in 1 2 3; do
+            echo "Tentative $i..."
+            RESPONSE=$(curl -sf -X POST -H "Content-Type: application/json" \
+              -d "$JSON_PAYLOAD" \
+              "${{ github.event.inputs.callback_url }}") && break || sleep 5
+          done
+
+          echo "Callback response: $RESPONSE"
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
