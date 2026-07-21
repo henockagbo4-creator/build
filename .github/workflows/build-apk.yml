@@ -81,7 +81,17 @@ jobs:
       - name: Download source zip
         run: |
           set -e
-          curl -L -o source.zip "${{ github.event.inputs.zip_url }}"
+          curl -f -L -o source.zip "${{ github.event.inputs.zip_url }}"
+          echo "=== Taille du fichier telecharge ==="
+          ls -la source.zip
+          file source.zip
+          SIZE=$(stat -c%s source.zip 2>/dev/null || stat -f%z source.zip)
+          if [ "$SIZE" -lt 100 ]; then
+            echo "ERREUR: le fichier source.zip est suspicieusement petit ($SIZE octets)."
+            echo "Contenu recu :"
+            cat source.zip
+            exit 1
+          fi
           mkdir -p src
           unzip -o source.zip -d src/
 
