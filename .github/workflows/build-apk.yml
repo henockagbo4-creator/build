@@ -152,7 +152,7 @@ jobs:
         run: |
           set -e
           KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
-          curl -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}"
+          curl -L -o "$KEYSTORE_FILE" "${{ github.event.inputs.keystore_url }}"
           echo "has_keystore=true" >> "$GITHUB_OUTPUT"
           echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
           echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
@@ -312,18 +312,20 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          # FIX: chercher depuis src/ car le build se fait dans src/
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
-          ls -la output/ || echo "Aucun artefact trouve"
+          mkdir -p $GITHUB_WORKSPACE/output
+          # Chercher depuis le workspace car on est dans src/ pendant le build
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-web-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 3: BUILD CAPACITOR
@@ -452,18 +454,19 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          # FIX: chercher depuis src/ car le build se fait dans src/
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
-          ls -la output/ || echo "Aucun artefact trouve"
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-capacitor-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 4: BUILD REACT NATIVE
@@ -553,16 +556,19 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-react-native-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 5: BUILD KOTLIN / JAVA
@@ -641,16 +647,19 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-kotlin-java-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 6: BUILD FLUTTER
@@ -735,16 +744,19 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-flutter-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 7: BUILD PYTHON
@@ -809,7 +821,7 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
-            for apk in $(find src/ -name "*.apk"); do
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do
               "$APK_SIGNER" sign \
                 --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
@@ -821,15 +833,18 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-python-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 8: BUILD .NET MAUI
@@ -907,7 +922,7 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
-            for apk in $(find src/ -name "*.apk"); do
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do
               "$APK_SIGNER" sign \
                 --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
@@ -919,16 +934,19 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-dotnet-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 9: BUILD OTHER (Go, Godot, Lua, NativeScript)
@@ -1069,7 +1087,7 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
-            for apk in $(find src/ -name "*.apk" -not -path "*/output/*"); do
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do
               $APK_SIGNER sign \
                 --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
@@ -1078,7 +1096,7 @@ jobs:
                 "$apk"
             done
           else
-            for apk in $(find src/ -name "*.apk" -not -path "*/output/*"); do
+            for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do
               jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
                 -keystore "$KEYSTORE_FILE" \
                 -storepass "${{ github.event.inputs.keystore_password }}" \
@@ -1088,16 +1106,19 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "*.apk" -exec cp {} output/ \; || true
-          find src/ -name "*.aab" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-other-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 10: BUILD WINDOWS — Flutter
@@ -1146,15 +1167,18 @@ jobs:
       - name: Collect artifacts
         shell: bash
         run: |
-          mkdir -p output
-          find src/ -name "*.exe" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-windows-flutter-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 11: BUILD WINDOWS — .NET MAUI
@@ -1209,15 +1233,18 @@ jobs:
       - name: Collect artifacts
         shell: bash
         run: |
-          mkdir -p output
-          find src/ -name "*.exe" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-windows-dotnet-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 12: BUILD WINDOWS — Python
@@ -1263,15 +1290,18 @@ jobs:
       - name: Collect artifacts
         shell: bash
         run: |
-          mkdir -p output
-          find src/ -name "*.exe" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-windows-python-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 13: BUILD WINDOWS — Go (cross-compilation)
@@ -1307,15 +1337,18 @@ jobs:
 
       - name: Collect artifacts
         run: |
-          mkdir -p output
-          find src/ -name "app.exe" -exec cp {} output/ \; || true
+          mkdir -p $GITHUB_WORKSPACE/output
+          find $GITHUB_WORKSPACE/src/ -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-${{ github.event.inputs.build_id }}
+          name: build-windows-go-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
+          if-no-files-found: warn
 
   # ============================================================
   # JOB 14: POST-BUILD — Upload to R2 & Notify
@@ -1327,11 +1360,11 @@ jobs:
     outputs:
       status: ${{ steps.upload.outputs.status }}
     steps:
-      - name: Download all artifacts
+      - name: Download all build artifacts
         uses: actions/download-artifact@v4
         with:
           path: artifacts/
-          pattern: build-*
+          pattern: build-*-${{ github.event.inputs.build_id }}
           merge-multiple: true
 
       - name: Download keystore artifact
@@ -1344,7 +1377,7 @@ jobs:
       - name: List artifacts
         run: |
           echo "=== Artifacts downloaded ==="
-          find artifacts/ -type f || true
+          find artifacts/ -type f 2>/dev/null || true
           echo "=== Keystore ==="
           find keystore/ -type f 2>/dev/null || true
 
