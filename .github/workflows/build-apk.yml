@@ -33,6 +33,11 @@ on:
         required: false
         type: string
         default: 'web'
+      platform:
+        description: 'Plateforme cible (android, windows)'
+        required: false
+        type: string
+        default: 'android'
       keystore_mode:
         description: 'Mode keystore'
         required: true
@@ -50,8 +55,12 @@ on:
         required: false
         type: string
       callback_url:
-        description: 'URL de callback'
+        description: 'URL de callback (notification finale, avec /callback)'
         required: true
+        type: string
+      build_base_url:
+        description: 'URL de base du build sur le Worker (sans /callback), utilisee pour les uploads /upload/apk|aab|keystore'
+        required: false
         type: string
 
 env:
@@ -66,8 +75,8 @@ jobs:
     outputs:
       source_dir: ${{ steps.detect.outputs.source_dir }}
       src_path: ${{ steps.detect.outputs.src_path }}
-      has_keystore: ${{ steps.keystore.outputs.has_keystore }}
-      keystore_path: ${{ steps.keystore.outputs.keystore_path }}
+      has_keystore: ${{ steps.keystore.outputs.has_keystore || steps.keystore-download.outputs.has_keystore }}
+      keystore_path: ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }}
     steps:
       - name: Download source zip
         run: |
@@ -101,10 +110,9 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-
       - name: Generate keystore
         id: keystore
-        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
           set -e
           keytool -genkeypair -v \
@@ -123,7 +131,7 @@ jobs:
 
       - name: Download user keystore
         id: keystore-download
-        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
         run: |
           set -e
           curl -L -o my-release-key.keystore "${{ github.event.inputs.keystore_url }}"
@@ -150,7 +158,7 @@ jobs:
   # ============================================================
   build-web:
     needs: prepare
-    if: ${{ contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -263,7 +271,7 @@ jobs:
   # ============================================================
   build-capacitor:
     needs: prepare
-    if: ${{ contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["svelte","angular","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -350,7 +358,7 @@ jobs:
   # ============================================================
   build-react-native:
     needs: prepare
-    if: ${{ github.event.inputs.project_type == 'react-native' }}
+    if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.project_type == 'react-native' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -378,7 +386,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
 
       - name: Build React Native
         run: |
@@ -434,7 +441,7 @@ jobs:
   # ============================================================
   build-kotlin-java:
     needs: prepare
-    if: ${{ contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -457,7 +464,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
 
       - name: Build Kotlin/Java
         run: |
@@ -512,7 +518,7 @@ jobs:
   # ============================================================
   build-flutter:
     needs: prepare
-    if: ${{ github.event.inputs.project_type == 'flutter' }}
+    if: ${{ github.event.inputs.platform == 'android' && github.event.inputs.project_type == 'flutter' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -540,7 +546,6 @@ jobs:
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
-
 
       - name: Build Flutter
         run: |
@@ -584,7 +589,7 @@ jobs:
   # ============================================================
   build-python:
     needs: prepare
-    if: ${{ github.event.inputs.project_type == 'python' }}
+    if: ${{ github.event.inputs.platform == 'android' && github.event.inputs.project_type == 'python' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -593,11 +598,25 @@ jobs:
           name: source-${{ github.event.inputs.build_id }}
           path: src/
 
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Build with Briefcase
         run: |
@@ -606,11 +625,31 @@ jobs:
           pip install briefcase
           briefcase create android
           briefcase build android
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            briefcase package android -p apk
-          else
-            briefcase package android -p apk --adhoc-sign
+          # Briefcase ne connait pas notre keystore : on packages toujours
+          # en ad-hoc ici, puis on re-signe juste apres avec la vraie cle
+          # (generee ou uploadee par l'utilisateur) si c'est un build release.
+          briefcase package android -p apk --adhoc-sign
+
+      - name: Sign APK with real keystore
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
+          if [ -z "$APK_SIGNER" ]; then
+            echo "ERROR: apksigner introuvable, l'APK reste en signature ad-hoc (non valide pour le Play Store)."
+            exit 0
           fi
+          for apk in $(find . -name "*.apk"); do
+            echo "Signing $apk with apksigner..."
+            "$APK_SIGNER" sign \
+              --ks "$GITHUB_WORKSPACE/my-release-key.keystore" \
+              --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+              --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+              --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+              "$apk"
+            echo "Signed: $apk"
+          done
 
       - name: Collect artifacts
         run: |
@@ -629,7 +668,7 @@ jobs:
   # ============================================================
   build-dotnet:
     needs: prepare
-    if: ${{ contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -638,10 +677,25 @@ jobs:
           name: source-${{ github.event.inputs.build_id }}
           path: src/
 
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Install MAUI workload
         run: dotnet workload install maui-android
@@ -656,6 +710,27 @@ jobs:
           else
             dotnet build "$CSPROJ" -f net8.0-android -c Debug
           fi
+
+      - name: Sign APK with real keystore
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
+          if [ -z "$APK_SIGNER" ]; then
+            echo "ERROR: apksigner introuvable, l'APK n'a pas pu etre signe."
+            exit 0
+          fi
+          for apk in $(find . -name "*.apk"); do
+            echo "Signing $apk with apksigner..."
+            "$APK_SIGNER" sign \
+              --ks "$GITHUB_WORKSPACE/my-release-key.keystore" \
+              --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+              --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+              --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+              "$apk"
+            echo "Signed: $apk"
+          done
 
       - name: Collect artifacts
         run: |
@@ -675,7 +750,7 @@ jobs:
   # ============================================================
   build-other:
     needs: prepare
-    if: ${{ contains(fromJson('["go","godot","lua","ruby","nativescript"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","ruby","nativescript"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -846,12 +921,207 @@ jobs:
           retention-days: 1
 
   # ============================================================
+  # JOB 11: BUILD WINDOWS — Flutter
+  # ============================================================
+  build-windows-flutter:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && github.event.inputs.project_type == 'flutter' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+
+      - name: Build Flutter for Windows
+        shell: bash
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          flutter config --enable-windows-desktop
+          flutter pub get
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            flutter build windows --release
+          else
+            flutter build windows --debug
+          fi
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p output
+          EXE=$(find "${{ needs.prepare.outputs.src_path }}/build/windows" -name "*.exe" | head -1)
+          if [ -n "$EXE" ]; then
+            cp "$EXE" output/app.exe
+          else
+            echo "ERROR: aucun .exe trouve apres le build Flutter Windows"
+            exit 1
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 12: BUILD WINDOWS — .NET MAUI / C#
+  # ============================================================
+  build-windows-dotnet:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+    runs-on: windows-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Install MAUI workload
+        run: dotnet workload install maui-windows
+
+      - name: Build .NET MAUI for Windows
+        shell: bash
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          CONFIG="Debug"
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            CONFIG="Release"
+          fi
+          dotnet publish "$CSPROJ" -f net8.0-windows10.0.19041.0 -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p output
+          EXE=$(find "${{ needs.prepare.outputs.src_path }}" -path "*win-x64*" -name "*.exe" | head -1)
+          if [ -n "$EXE" ]; then
+            cp "$EXE" output/app.exe
+          else
+            echo "ERROR: aucun .exe trouve apres le publish .NET MAUI Windows"
+            exit 1
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 13: BUILD WINDOWS — Python (Briefcase)
+  # ============================================================
+  build-windows-python:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && github.event.inputs.project_type == 'python' }}
+    runs-on: windows-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Build with Briefcase for Windows
+        shell: bash
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          pip install briefcase
+          briefcase create windows app
+          briefcase build windows app
+          briefcase package windows app -p app
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p output
+          EXE=$(find "${{ needs.prepare.outputs.src_path }}" -name "*.exe" | head -1)
+          if [ -n "$EXE" ]; then
+            cp "$EXE" output/app.exe
+          else
+            echo "ERROR: aucun .exe trouve apres le packaging Briefcase Windows"
+            exit 1
+          fi
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
+  # JOB 14: BUILD WINDOWS — Go (cross-compilation, pas besoin
+  # d'un runner Windows : Go sait croiser la compilation depuis Linux)
+  # ============================================================
+  build-windows-go:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'windows' && github.event.inputs.project_type == 'go' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Cross-compile for Windows
+        run: |
+          set -e
+          cd "${{ needs.prepare.outputs.src_path }}"
+          GOOS=windows GOARCH=amd64 go build -o app.exe .
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p output
+          find . -name "app.exe" -exec cp {} output/ \; || true
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+
+  # ============================================================
   # JOB 10: POST-BUILD — Upload to R2 & Notify
   # ============================================================
   post-build:
-    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other]
+    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
     if: always()
     runs-on: ubuntu-latest
+    outputs:
+      apk_url: ${{ steps.upload.outputs.apk_url }}
+      aab_url: ${{ steps.upload.outputs.aab_url }}
+      keystore_url: ${{ steps.upload.outputs.keystore_url }}
+      status: ${{ steps.upload.outputs.status }}
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -861,7 +1131,7 @@ jobs:
           merge-multiple: true
 
       - name: Download keystore artifact
-        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         uses: actions/download-artifact@v4
         with:
           name: keystore-${{ github.event.inputs.build_id }}
@@ -875,52 +1145,122 @@ jobs:
           find keystore/ -type f 2>/dev/null || true
 
       - name: Upload APK to R2
-        if: ${{ hashFiles('artifacts/*.apk') != '' }}
+        id: upload-apk
         run: |
           set -e
-          for apk in artifacts/*.apk; do
-            echo "Uploading $apk..."
-            curl -X POST \
+          APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1)
+          if [ -n "$APK_FILE" ]; then
+            echo "Uploading APK: $APK_FILE"
+            curl -sf -X POST \
               -H "Content-Type: application/vnd.android.package-archive" \
-              --data-binary @$apk \
-              "${{ github.event.inputs.callback_url }}/upload/apk"
-          done
+              --data-binary @"$APK_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/apk"
+            echo "apk_uploaded=true" >> "$GITHUB_OUTPUT"
+            echo "apk_filename=$(basename $APK_FILE)" >> "$GITHUB_OUTPUT"
+          else
+            echo "No APK found"
+            echo "apk_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload AAB to R2
-        if: ${{ hashFiles('artifacts/*.aab') != '' }}
+        id: upload-aab
         run: |
           set -e
-          for aab in artifacts/*.aab; do
-            echo "Uploading $aab..."
-            curl -X POST \
+          AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1)
+          if [ -n "$AAB_FILE" ]; then
+            echo "Uploading AAB: $AAB_FILE"
+            curl -sf -X POST \
               -H "Content-Type: application/octet-stream" \
-              --data-binary @$aab \
-              "${{ github.event.inputs.callback_url }}/upload/aab"
-          done
+              --data-binary @"$AAB_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/aab"
+            echo "aab_uploaded=true" >> "$GITHUB_OUTPUT"
+            echo "aab_filename=$(basename $AAB_FILE)" >> "$GITHUB_OUTPUT"
+          else
+            echo "No AAB found"
+            echo "aab_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload EXE to R2
+        id: upload-exe
+        if: ${{ github.event.inputs.platform == 'windows' }}
+        run: |
+          set -e
+          EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1)
+          if [ -n "$EXE_FILE" ]; then
+            echo "Uploading EXE: $EXE_FILE"
+            curl -sf -X POST \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary @"$EXE_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/exe"
+            echo "exe_uploaded=true" >> "$GITHUB_OUTPUT"
+            echo "exe_filename=$(basename $EXE_FILE)" >> "$GITHUB_OUTPUT"
+          else
+            echo "No EXE found"
+            echo "exe_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Upload generated keystore to R2
-        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' && hashFiles('keystore/*.keystore') != '' }}
+        id: upload-keystore
+        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
           set -e
-          for ks in keystore/*.keystore; do
-            echo "Uploading keystore $ks..."
-            curl -X POST \
+          KS_FILE=$(find keystore/ -name "*.keystore" -type f | head -1)
+          if [ -n "$KS_FILE" ]; then
+            echo "Uploading keystore: $KS_FILE"
+            curl -sf -X POST \
               -H "Content-Type: application/octet-stream" \
-              --data-binary @$ks \
-              "${{ github.event.inputs.callback_url }}/upload/keystore"
-          done
+              --data-binary @"$KS_FILE" \
+              "${{ github.event.inputs.build_base_url }}/upload/keystore"
+            echo "keystore_uploaded=true" >> "$GITHUB_OUTPUT"
+            echo "keystore_filename=$(basename $KS_FILE)" >> "$GITHUB_OUTPUT"
+          else
+            echo "No keystore found"
+            echo "keystore_uploaded=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Notify callback URL
+      - name: Determine build status
+        id: build-status
+        run: |
+          # Le statut se base sur l'upload reel d'un artefact (APK, AAB ou
+          # EXE), pas sur un simple grep de "success" dans needs — celui-ci
+          # est presque toujours vrai puisque le job "prepare" reussit meme
+          # quand le vrai job de compilation echoue.
+          if [ "${{ steps.upload-apk.outputs.apk_uploaded }}" == "true" ] || [ "${{ steps.upload-aab.outputs.aab_uploaded }}" == "true" ] || [ "${{ steps.upload-exe.outputs.exe_uploaded }}" == "true" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=error" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Notify callback URL with download links
+        id: upload
         run: |
           set -e
-          echo "Notifying callback..."
-          # Check if any build job succeeded
-          NEEDS_JSON='${{ toJson(needs) }}'
-          if echo "$NEEDS_JSON" | grep -q '"result": "success"'; then
-            STATUS="success"
-          else
-            STATUS="error"
+          BUILD_ID="${{ github.event.inputs.build_id }}"
+          STATUS="${{ steps.build-status.outputs.status }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+
+          MESSAGE="Build $STATUS"
+          if [ "$STATUS" == "error" ]; then
+            MESSAGE="Le build a echoue : aucun fichier n'a ete produit. Verifie les logs du job de compilation."
           fi
-          curl -X POST -H "Content-Type: application/json" \
-            -d "{\"build_id\":\"${{ github.event.inputs.build_id }}\",\"status\":\"$STATUS\",\"message\":\"Build $STATUS\"}" \
-            "${{ github.event.inputs.callback_url }}"
+
+          # Construire le payload JSON. Les URLs de telechargement ne sont
+          # pas envoyees ici : le Worker les recalcule lui-meme (routes R2
+          # reelles) dans handleCallback, donc pas besoin de les dupliquer.
+          JSON_PAYLOAD=$(cat <<EOF
+          {
+            "build_id": "$BUILD_ID",
+            "state": "$STATUS",
+            "message": "$MESSAGE"
+          }
+          EOF
+          )
+
+          echo "Sending notification..."
+          echo "$JSON_PAYLOAD"
+
+          curl -sf -X POST -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD" \
+            "${{ github.event.inputs.callback_url }}" || echo "Callback notification failed"
+
+          echo "status=$STATUS" >> "$GITHUB_OUTPUT"
