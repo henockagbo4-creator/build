@@ -181,8 +181,15 @@ jobs:
   # JOB 2: BUILD WEB (Cordova) — Projets web purs (React, Vue, Web)
   # ============================================================
   build-web:
-    needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
+    needs: [prepare, build-capacitor]
+    if: |
+      always() &&
+      needs.prepare.result == 'success' &&
+      (
+        (github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type))
+        ||
+        needs.build-capacitor.outputs.is_capacitor == 'false'
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -323,6 +330,8 @@ jobs:
     needs: prepare
     if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","svelte","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
+    outputs:
+      is_capacitor: ${{ steps.build.outputs.is_capacitor }}
     steps:
       - name: Download source
         uses: actions/download-artifact@v4
@@ -354,8 +363,11 @@ jobs:
         run: npm install -g @capacitor/cli
 
       - name: Build Capacitor project
+        id: build
         run: |
           set -e
+          
+          echo "is_capacitor=true" >> "$GITHUB_OUTPUT"
           
           echo "=== Recherche du projet ==="
           cd src/
@@ -376,6 +388,7 @@ jobs:
             if [ -z "$HAS_CAPACITOR_CONFIG" ] && [ -z "$HAS_ANDROID_DIR" ]; then
               echo "⚠️  Pas un projet Capacitor, sortie avec succès"
               echo "✅ build-web prendra le relais"
+              echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
               exit 0
             fi
             
@@ -412,6 +425,7 @@ jobs:
           if [ -f "package.json" ] && ! grep -q '"@capacitor/core"' package.json 2>/dev/null && [ ! -d "android" ]; then
             echo "⚠️  Pas un projet Capacitor identifiable, sortie avec succès"
             echo "✅ build-web prendra le relais"
+            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           
