@@ -1391,9 +1391,6 @@ jobs:
     if: always()
     runs-on: ubuntu-latest
     outputs:
-      apk_url: ${{ steps.upload.outputs.apk_url }}
-      aab_url: ${{ steps.upload.outputs.aab_url }}
-      keystore_url: ${{ steps.upload.outputs.keystore_url }}
       status: ${{ steps.upload.outputs.status }}
     steps:
       - name: Download all artifacts
@@ -1496,53 +1493,26 @@ jobs:
             echo "status=error" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Get build info from worker
-        id: get-build-info
-        run: |
-          set -e
-          BUILD_ID="${{ github.event.inputs.build_id }}"
-          WORKER_URL="${{ github.event.inputs.build_base_url }}"
-          
-          echo "=== Récupération des infos du build ==="
-          sleep 5
-          
-          STATUS_RESPONSE=$(curl -sf "${WORKER_URL}/status" || echo '{"state":"error"}')
-          echo "Réponse: $STATUS_RESPONSE"
-          
-          echo "keystore_url=$(echo "$STATUS_RESPONSE" | jq -r '.keystoreUrl // ""')" >> "$GITHUB_OUTPUT"
-          echo "apk_url=$(echo "$STATUS_RESPONSE" | jq -r '.apkUrl // ""')" >> "$GITHUB_OUTPUT"
-          echo "aab_url=$(echo "$STATUS_RESPONSE" | jq -r '.aabUrl // ""')" >> "$GITHUB_OUTPUT"
-          echo "exe_url=$(echo "$STATUS_RESPONSE" | jq -r '.exeUrl // ""')" >> "$GITHUB_OUTPUT"
-          echo "build_state=$(echo "$STATUS_RESPONSE" | jq -r '.state // "error"')" >> "$GITHUB_OUTPUT"
-
       - name: Notify callback URL
         id: upload
         run: |
           set -e
           BUILD_ID="${{ github.event.inputs.build_id }}"
-          STATUS="${{ steps.get-build-info.outputs.build_state }}"
-          [ -z "$STATUS" ] || [ "$STATUS" == "error" ] && STATUS="${{ steps.build-status.outputs.status }}"
-          
+          STATUS="${{ steps.build-status.outputs.status }}"
+
           JSON_PAYLOAD=$(cat <<EOF
           {
             "build_id": "$BUILD_ID",
             "state": "$STATUS",
-            "message": "Build $STATUS",
-            "keystore_url": "${{ steps.get-build-info.outputs.keystore_url }}",
-            "keystore_password": "${{ github.event.inputs.keystore_password }}",
-            "keystore_alias": "${{ github.event.inputs.keystore_alias }}",
-            "apk_url": "${{ steps.get-build-info.outputs.apk_url }}",
-            "aab_url": "${{ steps.get-build-info.outputs.aab_url }}",
-            "exe_url": "${{ steps.get-build-info.outputs.exe_url }}"
+            "message": "Build $STATUS"
           }
           EOF
           )
-          
-          echo "Sending notification..."
-          curl -sf -X POST -H "Content-Type: application/json" \
+
+          echo "Sending notification with state=$STATUS ..."
+          RESPONSE=$(curl -sf -X POST -H "Content-Type: application/json" \
             -d "$JSON_PAYLOAD" \
-            "${{ github.event.inputs.callback_url }}" || echo "Callback notification failed"
-          
+            "${{ github.event.inputs.callback_url }}") || echo "Callback notification failed"
+
+          echo "Callback response: $RESPONSE"
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
-          echo "keystore_url=${{ steps.get-build-info.outputs.keystore_url }}" >> "$GITHUB_OUTPUT"
-          echo "apk_url=${{ steps.get-build-info.outputs.apk_url }}" >> "$GITHUB_OUTPUT"
