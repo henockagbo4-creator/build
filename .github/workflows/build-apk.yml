@@ -65,7 +65,7 @@ on:
 
 jobs:
   # ============================================================
-  # JOB 1: PREPARE — Download source & setup common tools
+  # JOB 1: PREPARE
   # ============================================================
   prepare:
     runs-on: ubuntu-latest
@@ -175,8 +175,7 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # JOB 2: BUILD WEB (Cordova) — Projets web purs
-  # FIX: Ne depend plus de build-capacitor, uniquement de prepare
+  # JOB 2: BUILD WEB (Cordova)
   # ============================================================
   build-web:
     needs: prepare
@@ -217,7 +216,6 @@ jobs:
           set -e
           cd src/
 
-          # Trouver le projet
           PROJECT_ROOT=$(find . -name "package.json" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
@@ -245,7 +243,6 @@ jobs:
             fi
           fi
 
-          # Build Cordova
           PKG_ID="${{ github.event.inputs.package_id }}"
           [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
 
@@ -253,7 +250,6 @@ jobs:
           cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
           rm -rf "$CORDOVA_DIR"/www/*
 
-          # Determiner la source a copier
           if [ "$IS_STATIC" = true ]; then
             COPY_FROM="$PROJECT_ROOT"
           else
@@ -266,7 +262,6 @@ jobs:
             fi
           fi
 
-          # FIX CRITIQUE: Supprimer node_modules avant copie
           echo "=== Nettoyage node_modules ==="
           rm -rf "$COPY_FROM"/node_modules
           rm -rf "$COPY_FROM"/.git
@@ -274,7 +269,6 @@ jobs:
           echo "=== Copie vers Cordova www/ ==="
           cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
 
-          # FIX: Creer config.xml avec preferences Android
           cat > "$CORDOVA_DIR"/config.xml << 'EOF'
           <?xml version="1.0" encoding="UTF-8"?>
           <widget xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
@@ -287,7 +281,6 @@ jobs:
           cd "$CORDOVA_DIR"
           cordova platform add android
 
-          # FIX: Chercher le keystore dynamiquement
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
 
@@ -314,15 +307,15 @@ jobs:
             cordova build android --debug
           fi
 
-          # FIX: Verifier que le build a produit un artefact
           echo "=== Verification des artefacts ==="
           find . -name "*.apk" -o -name "*.aab" | head -5
 
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          # FIX: chercher depuis src/ car le build se fait dans src/
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
           ls -la output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
@@ -333,8 +326,7 @@ jobs:
           retention-days: 1
 
   # ============================================================
-  # JOB 3: BUILD CAPACITOR — Angular, Svelte, SolidJS, Preact, Ionic
-  # FIX: Job independant, parallel a build-web
+  # JOB 3: BUILD CAPACITOR
   # ============================================================
   build-capacitor:
     needs: prepare
@@ -397,7 +389,6 @@ jobs:
           echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
-          # Verifier que c'est bien un projet Capacitor
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -d "android" ]; then
             echo "Pas un projet Capacitor identifiable"
             echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
@@ -407,13 +398,11 @@ jobs:
           echo "=== Installation des dependances ==="
           npm install
 
-          # Build du frontend
           if grep -q '"build"' package.json 2>/dev/null; then
             echo "=== Build du frontend ==="
             npm run build
           fi
 
-          # FIX: Ajouter Android AVANT sync
           if [ ! -d "android" ]; then
             echo "=== Ajout de la plateforme Android ==="
             npx cap add android
@@ -422,18 +411,15 @@ jobs:
           echo "=== Synchronisation Android ==="
           npx cap sync android
 
-          # Build Android
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew
 
-            # FIX: Chercher le keystore dynamiquement
             KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
             if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
               echo "=== Build RELEASE ==="
 
-              # FIX: Creer signing.gradle avec chemin absolu
               mkdir -p app
               cat > app/signing.gradle << GRADLE_EOF
           android {
@@ -453,7 +439,6 @@ jobs:
           }
           GRADLE_EOF
 
-              # FIX: apply from avec chemin relatif correct depuis app/build.gradle
               if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
                 echo "apply from: 'signing.gradle'" >> app/build.gradle
               fi
@@ -468,8 +453,9 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          # FIX: chercher depuis src/ car le build se fait dans src/
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
           ls -la output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
@@ -528,7 +514,6 @@ jobs:
           echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
-          # Verifier metro.config.js
           if [ ! -f "metro.config.js" ] && [ ! -f "metro.config.ts" ]; then
             echo "ATTENTION: metro.config.js non trouve"
           fi
@@ -569,8 +554,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -623,7 +608,6 @@ jobs:
           echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
-          # FIX: chmod AVANT gradlew
           chmod +x gradlew
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
@@ -658,8 +642,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -721,7 +705,6 @@ jobs:
           echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
-          # Verifier pubspec.yaml
           if [ ! -f "pubspec.yaml" ]; then
             echo "ERREUR: pubspec.yaml non trouve"
             exit 1
@@ -753,8 +736,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -826,7 +809,7 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
-            for apk in $(find . -name "*.apk"); do
+            for apk in $(find src/ -name "*.apk"); do
               "$APK_SIGNER" sign \
                 --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
@@ -839,7 +822,7 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -924,7 +907,7 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
-            for apk in $(find . -name "*.apk"); do
+            for apk in $(find src/ -name "*.apk"); do
               "$APK_SIGNER" sign \
                 --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
@@ -937,8 +920,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -949,7 +932,6 @@ jobs:
 
   # ============================================================
   # JOB 9: BUILD OTHER (Go, Godot, Lua, NativeScript)
-  # FIX: Ruby retire car RubyMotion necessite une licence
   # ============================================================
   build-other:
     needs: prepare
@@ -1021,7 +1003,6 @@ jobs:
           set -e
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
-          # FIX: Installer NDK avant gomobile init
           sdkmanager "ndk;25.2.9519653" 2>/dev/null || true
           export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/25.2.9519653"
           gomobile init
@@ -1042,7 +1023,6 @@ jobs:
               PROJECT_ROOT=$(find . -name "project.godot" -type f -exec dirname {} \; | head -1)
               [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
               cd "$PROJECT_ROOT"
-              # Verifier export_presets.cfg
               if [ ! -f "export_presets.cfg" ]; then
                 echo "ATTENTION: export_presets.cfg non trouve, creation d'un preset par defaut"
                 cat > export_presets.cfg << 'EOF'
@@ -1067,7 +1047,6 @@ jobs:
               [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
               cd "$PROJECT_ROOT"
               npm install
-              # FIX: Verifier si android existe deja
               [ -d "android" ] || ns platform add android
 
               KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
@@ -1090,7 +1069,7 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
-            for apk in $(find . -name "*.apk" -not -path "./output/*"); do
+            for apk in $(find src/ -name "*.apk" -not -path "*/output/*"); do
               $APK_SIGNER sign \
                 --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
@@ -1099,7 +1078,7 @@ jobs:
                 "$apk"
             done
           else
-            for apk in $(find . -name "*.apk" -not -path "./output/*"); do
+            for apk in $(find src/ -name "*.apk" -not -path "*/output/*"); do
               jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
                 -keystore "$KEYSTORE_FILE" \
                 -storepass "${{ github.event.inputs.keystore_password }}" \
@@ -1110,8 +1089,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "*.apk" -exec cp {} output/ \; || true
-          find . -name "*.aab" -exec cp {} output/ \; || true
+          find src/ -name "*.apk" -exec cp {} output/ \; || true
+          find src/ -name "*.aab" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -1168,10 +1147,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p output
-          EXE=$(find src/build/windows -name "*.exe" | head -1)
-          if [ -n "$EXE" ]; then
-            cp "$EXE" output/app.exe
-          fi
+          find src/ -name "*.exe" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -1234,10 +1210,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p output
-          EXE=$(find src -path "*win-x64*" -name "*.exe" | head -1)
-          if [ -n "$EXE" ]; then
-            cp "$EXE" output/app.exe
-          fi
+          find src/ -name "*.exe" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -1291,10 +1264,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p output
-          EXE=$(find src -name "*.exe" | head -1)
-          if [ -n "$EXE" ]; then
-            cp "$EXE" output/app.exe
-          fi
+          find src/ -name "*.exe" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -1338,7 +1308,7 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p output
-          find . -name "app.exe" -exec cp {} output/ \; || true
+          find src/ -name "app.exe" -exec cp {} output/ \; || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -1473,7 +1443,6 @@ jobs:
           EOF
           )
 
-          # FIX: Retry logic
           for i in 1 2 3; do
             echo "Tentative $i..."
             RESPONSE=$(curl -sf -X POST -H "Content-Type: application/json" \
