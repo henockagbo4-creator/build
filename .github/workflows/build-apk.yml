@@ -112,13 +112,15 @@ jobs:
             echo "Files directly in src/"
           fi
 
-      - name: Setup Java
+      - &setup_java
+        name: Setup Java
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
+      - &setup_android_sdk
+        name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Generate keystore
@@ -204,19 +206,15 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - name: Setup Node
+      - &setup_node
+        name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Install Cordova
         run: npm install -g cordova
@@ -345,19 +343,11 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
+      - *setup_node
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
@@ -566,19 +556,11 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: '24'
+      - *setup_node
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Build React Native
         run: |
@@ -661,14 +643,9 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Build Kotlin/Java
         run: |
@@ -749,14 +726,9 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
@@ -837,14 +809,9 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Build Python with Briefcase
         run: |
@@ -923,14 +890,9 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Install MAUI workload
         run: dotnet workload install maui-android
@@ -1011,14 +973,9 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
+      - *setup_java
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - *setup_android_sdk
 
       - name: Setup Go
         if: ${{ github.event.inputs.project_type == 'go' }}
