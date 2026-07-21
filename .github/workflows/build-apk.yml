@@ -29,10 +29,10 @@ on:
         type: string
         default: 'apk'
       project_type:
-        description: 'Type de projet'
+        description: 'Type de projet (optionnel - auto-detecte si vide)'
         required: false
         type: string
-        default: 'web'
+        default: ''
       platform:
         description: 'Plateforme cible (android, windows)'
         required: false
@@ -59,24 +59,28 @@ on:
         required: true
         type: string
       build_base_url:
-        description: 'URL de base du build sur le Worker (sans /callback), utilisee pour les uploads /upload/apk|aab|keystore'
+        description: 'URL de base du build sur le Worker (sans /callback)'
         required: false
         type: string
 
 jobs:
   # ============================================================
-  # JOB 1: PREPARE
+  # JOB 1: PREPARE (avec auto-detection du type de projet)
   # ============================================================
   prepare:
     runs-on: ubuntu-latest
     outputs:
       source_dir: ${{ steps.detect.outputs.source_dir }}
       src_path: ${{ steps.detect.outputs.src_path }}
+      detected_type: ${{ steps.detect-project.outputs.detected_type }}
       has_keystore: ${{ steps.keystore.outputs.has_keystore || steps.keystore-download.outputs.has_keystore }}
       keystore_path: ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }}
       keystore_filename: ${{ steps.keystore.outputs.keystore_filename || steps.keystore-download.outputs.keystore_filename }}
+      build_should_run: ${{ steps.detect-project.outputs.build_should_run }}
+      error_message: ${{ steps.detect-project.outputs.error_message }}
     steps:
       - name: Download source zip
+        id: download
         run: |
           set -e
           curl -f -L -o source.zip "${{ github.event.inputs.zip_url }}"
@@ -109,6 +113,203 @@ jobs:
             echo "Files directly in src/"
           fi
 
+      # ============================================================
+      # AUTO-DETECTION DU TYPE DE PROJET
+      # ============================================================
+      - name: Auto-detect project type
+        id: detect-project
+        run: |
+          set -e
+          cd src/${{ steps.detect.outputs.source_dir }}
+
+          echo "=== Analyse de la structure du projet ==="
+
+          # Fonction utilitaire : chercher un fichier en excluant node_modules, .git, build, dist
+          find_file() {
+            find . -name "$1" -type f \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              -not -path "*/build/*" \
+              -not -path "*/dist/*" \
+              -not -path "*/bin/*" \
+              -not -path "*/obj/*" \
+              2>/dev/null | head -1
+          }
+
+          # Fonction utilitaire : chercher un dossier
+          find_dir() {
+            find . -type d -name "$1" \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              2>/dev/null | head -1
+          }
+
+          DETECTED="unknown"
+          BUILD_SHOULD_RUN="true"
+          ERROR_MSG=""
+
+          # --- 1. Flutter (priorite haute, tres specifique) ---
+          if [ -n "$(find_file "pubspec.yaml")" ]; then
+            DETECTED="flutter"
+            echo "Flutter detecte (pubspec.yaml trouve)"
+
+          # --- 2. .NET MAUI / C# ---
+          elif [ -n "$(find_file "*.csproj")" ]; then
+            DETECTED="dotnet-maui"
+            echo ".NET MAUI detecte (.csproj trouve)"
+
+          # --- 3. React Native ---
+          elif [ -n "$(find_file "metro.config.js")" ] || [ -n "$(find_file "metro.config.ts")" ]; then
+            DETECTED="react-native"
+            echo "React Native detecte (metro.config trouve)"
+
+          # --- 4. Capacitor / Ionic ---
+          elif [ -n "$(find_file "capacitor.config.ts")" ] || \
+               [ -n "$(find_file "capacitor.config.json")" ] || \
+               [ -n "$(find_file "capacitor.config.js")" ] || \
+               [ -d "$(find_dir "android")" ] && [ -n "$(find_file "package.json")" ] && \
+               (grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null || \
+                grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null); then
+            DETECTED="capacitor"
+            echo "Capacitor/Ionic detecte (config Capacitor ou dependance @capacitor/@ionic)"
+
+          # --- 5. Kotlin / Java natif ---
+          elif [ -n "$(find_file "build.gradle")" ] && [ -z "$(find_file "package.json")" ]; then
+            DETECTED="kotlin"
+            echo "Kotlin/Java natif detecte (build.gradle sans package.json)"
+
+          # --- 6. Go ---
+          elif [ -n "$(find_file "go.mod")" ]; then
+            DETECTED="go"
+            echo "Go detecte (go.mod trouve)"
+
+          # --- 7. Python ---
+          elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || \
+               [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ]; then
+            DETECTED="python"
+            echo "Python detecte"
+
+          # --- 8. Godot ---
+          elif [ -n "$(find_file "project.godot")" ]; then
+            DETECTED="godot"
+            echo "Godot detecte (project.godot trouve)"
+
+          # --- 9. Lua / Solar2D ---
+          elif [ -n "$(find_file "build.settings")" ]; then
+            DETECTED="lua"
+            echo "Lua/Solar2D detecte (build.settings trouve)"
+
+          # --- 10. NativeScript ---
+          elif [ -n "$(find_file "package.json")" ] && \
+               grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
+            DETECTED="nativescript"
+            echo "NativeScript detecte (dependance nativescript dans package.json)"
+
+          # --- 11. Projets Web (React, Vue, Svelte, SolidJS, Preact, etc.) ---
+          elif [ -n "$(find_file "package.json")" ]; then
+            PKG_JSON="$(find_file "package.json")"
+            # Verifier les frameworks dans les dependances
+            if grep -q '"react"' "$PKG_JSON" 2>/dev/null && [ -z "$(find_file "metro.config.js")" ] && [ -z "$(find_file "metro.config.ts")" ]; then
+              DETECTED="react"
+              echo "React detecte (package.json avec react, sans metro.config)"
+            elif grep -q '"vue"' "$PKG_JSON" 2>/dev/null; then
+              DETECTED="vue"
+              echo "Vue detecte"
+            elif grep -q '"svelte"' "$PKG_JSON" 2>/dev/null; then
+              DETECTED="svelte"
+              echo "Svelte detecte"
+            elif grep -q '"solid-js"' "$PKG_JSON" 2>/dev/null || grep -q '"preact"' "$PKG_JSON" 2>/dev/null; then
+              DETECTED="web"
+              echo "Projet web detecte (SolidJS/Preact)"
+            else
+              DETECTED="web"
+              echo "Projet web generique detecte (package.json sans framework connu)"
+            fi
+
+          # --- 12. Statique (aucun fichier reconnu) ---
+          elif [ -n "$(find_file "index.html")" ] || [ -n "$(find_file "*.html")" ]; then
+            DETECTED="web"
+            echo "Site statique detecte (HTML trouve)"
+
+          # --- Aucun projet identifiable ---
+          else
+            DETECTED="unknown"
+            BUILD_SHOULD_RUN="false"
+            ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), setup.py/pyproject.toml (Python), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources."
+            echo "Aucun type de projet detecte"
+          fi
+
+          # Si le client a fourni un project_type explicite, on l'utilise comme override
+          # sauf s'il est en conflit flagrant (ex: il dit "flutter" mais pas de pubspec.yaml)
+          CLIENT_TYPE="${{ github.event.inputs.project_type }}"
+          if [ "$CLIENT_TYPE" != "" ] && [ "$CLIENT_TYPE" != "web" ]; then
+            echo "Client a specifie: $CLIENT_TYPE"
+            # Verifier coherence minimale
+            case "$CLIENT_TYPE" in
+              flutter)
+                if [ "$DETECTED" != "flutter" ] && [ -z "$(find_file "pubspec.yaml")" ]; then
+                  echo "Client dit Flutter mais pas de pubspec.yaml - fallback sur detection"
+                else
+                  DETECTED="$CLIENT_TYPE"
+                fi
+                ;;
+              capacitor|angular|svelte|solidjs|preact|ionic)
+                if [ "$DETECTED" == "web" ] || [ "$DETECTED" == "react" ] || [ "$DETECTED" == "vue" ]; then
+                  DETECTED="capacitor"
+                  echo "Forcage Capacitor sur base du choix client ($CLIENT_TYPE)"
+                else
+                  DETECTED="$CLIENT_TYPE"
+                fi
+                ;;
+              *)
+                DETECTED="$CLIENT_TYPE"
+                ;;
+            esac
+          fi
+
+          echo "detected_type=$DETECTED" >> "$GITHUB_OUTPUT"
+          echo "build_should_run=$BUILD_SHOULD_RUN" >> "$GITHUB_OUTPUT"
+          echo "error_message=$ERROR_MSG" >> "$GITHUB_OUTPUT"
+          echo "=== Type final : $DETECTED | Build: $BUILD_SHOULD_RUN ==="
+
+      # ============================================================
+      # FALLBACK : Initialiser Capacitor si manquant
+      # ============================================================
+      - name: Auto-init Capacitor config if missing
+        if: ${{ steps.detect-project.outputs.detected_type == 'capacitor' }}
+        run: |
+          set -e
+          cd src/${{ steps.detect.outputs.source_dir }}
+
+          PROJECT_ROOT=$(find . -name "package.json" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+          cd "$PROJECT_ROOT"
+
+          # Si pas de config Capacitor, on l'init silencieusement
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
+            echo "Config Capacitor manquante - initialisation automatique..."
+            npm install -g @capacitor/cli
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "dist" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "build" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "www" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "." 2>/dev/null || true
+            echo "Config Capacitor generee automatiquement"
+          else
+            echo "Config Capacitor existante"
+          fi
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -127,10 +328,7 @@ jobs:
           keytool -genkeypair -v \
             -keystore "$KEYSTORE_NAME" \
             -alias "${{ github.event.inputs.keystore_alias }}" \
-            -keyalg RSA \
-            -keysize 2048 \
-            -sigalg SHA256withRSA \
-            -validity 10950 \
+            -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \
             -storetype PKCS12 \
             -storepass "${{ github.event.inputs.keystore_password }}" \
             -keypass "${{ github.event.inputs.keystore_password }}" \
@@ -152,7 +350,7 @@ jobs:
         run: |
           set -e
           KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
-          curl -L -o "$KEYSTORE_FILE" "${{ github.event.inputs.keystore_url }}"
+          curl -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}"
           echo "has_keystore=true" >> "$GITHUB_OUTPUT"
           echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
           echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
@@ -174,12 +372,37 @@ jobs:
             keystore-info.txt
           retention-days: 7
 
+      # ============================================================
+      # NOTIFICATION EARLY-EXIT si projet non detecte
+      # ============================================================
+      - name: Notify error if project not detected
+        if: ${{ steps.detect-project.outputs.build_should_run == 'false' }}
+        run: |
+          set -e
+          JSON_PAYLOAD=$(cat <<EOF
+          {
+            "build_id": "${{ github.event.inputs.build_id }}",
+            "state": "error",
+            "message": "${{ steps.detect-project.outputs.error_message }}",
+            "detected_type": "unknown"
+          }
+          EOF
+          )
+          for i in 1 2 3; do
+            echo "Tentative $i de notification d'erreur..."
+            curl -sf -X POST -H "Content-Type: application/json" \
+              -d "$JSON_PAYLOAD" \
+              "${{ github.event.inputs.callback_url }}" && break || sleep 5
+          done
+          echo "Build annule - type de projet non detecte"
+          exit 1
+
   # ============================================================
   # JOB 2: BUILD WEB (Cordova)
   # ============================================================
   build-web:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -313,7 +536,6 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          # Chercher depuis le workspace car on est dans src/ pendant le build
           find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
           find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
           echo "=== Fichiers dans output/ ==="
@@ -332,7 +554,7 @@ jobs:
   # ============================================================
   build-capacitor:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","svelte","solidjs","preact","ionic","capacitor"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","svelte","solidjs","preact","ionic","capacitor"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       is_capacitor: ${{ steps.build.outputs.is_capacitor }}
@@ -473,7 +695,7 @@ jobs:
   # ============================================================
   build-react-native:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.project_type == 'react-native' }}
+    if: ${{ github.event.inputs.platform != 'windows' && needs.prepare.outputs.detected_type == 'react-native' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -575,7 +797,7 @@ jobs:
   # ============================================================
   build-kotlin-java:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -666,7 +888,7 @@ jobs:
   # ============================================================
   build-flutter:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'android' && github.event.inputs.project_type == 'flutter' }}
+    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -763,7 +985,7 @@ jobs:
   # ============================================================
   build-python:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'android' && github.event.inputs.project_type == 'python' }}
+    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -851,7 +1073,7 @@ jobs:
   # ============================================================
   build-dotnet:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -953,7 +1175,7 @@ jobs:
   # ============================================================
   build-other:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","nativescript"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","nativescript"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -978,13 +1200,13 @@ jobs:
         uses: android-actions/setup-android@v3
 
       - name: Setup Go
-        if: ${{ github.event.inputs.project_type == 'go' }}
+        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
 
       - name: Setup Godot
-        if: ${{ github.event.inputs.project_type == 'godot' }}
+        if: ${{ needs.prepare.outputs.detected_type == 'godot' }}
         run: |
           set -e
           GODOT_VERSION="4.2.2"
@@ -997,7 +1219,7 @@ jobs:
           unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
       - name: Setup Lua/Solar2D
-        if: ${{ github.event.inputs.project_type == 'lua' }}
+        if: ${{ needs.prepare.outputs.detected_type == 'lua' }}
         run: |
           set -e
           wget -q https://github.com/coronalabs/corona/releases/download/3700/Solar2DConsole.tgz
@@ -1006,17 +1228,17 @@ jobs:
           echo "/opt/solar2d" >> $GITHUB_PATH
 
       - name: Setup Node for NativeScript
-        if: ${{ github.event.inputs.project_type == 'nativescript' }}
+        if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
       - name: Install NativeScript CLI
-        if: ${{ github.event.inputs.project_type == 'nativescript' }}
+        if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
         run: npm install -g nativescript
 
       - name: Install gomobile
-        if: ${{ github.event.inputs.project_type == 'go' }}
+        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
         run: |
           set -e
           go install golang.org/x/mobile/cmd/gomobile@latest
@@ -1030,7 +1252,7 @@ jobs:
           set -e
           cd src/
 
-          case "${{ github.event.inputs.project_type }}" in
+          case "${{ needs.prepare.outputs.detected_type }}" in
             go)
               PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
               [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
@@ -1121,11 +1343,11 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 10: BUILD WINDOWS — Flutter
+  # JOB 10: BUILD WINDOWS - Flutter
   # ============================================================
   build-windows-flutter:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && github.event.inputs.project_type == 'flutter' }}
+    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: windows-latest
     steps:
       - name: Download source
@@ -1181,11 +1403,11 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 11: BUILD WINDOWS — .NET MAUI
+  # JOB 11: BUILD WINDOWS - .NET MAUI
   # ============================================================
   build-windows-dotnet:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform == 'windows' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: windows-latest
     steps:
       - name: Download source
@@ -1247,11 +1469,11 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 12: BUILD WINDOWS — Python
+  # JOB 12: BUILD WINDOWS - Python
   # ============================================================
   build-windows-python:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && github.event.inputs.project_type == 'python' }}
+    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: windows-latest
     steps:
       - name: Download source
@@ -1304,11 +1526,11 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 13: BUILD WINDOWS — Go (cross-compilation)
+  # JOB 13: BUILD WINDOWS - Go (cross-compilation)
   # ============================================================
   build-windows-go:
     needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && github.event.inputs.project_type == 'go' }}
+    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'go' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -1351,7 +1573,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 14: POST-BUILD — Upload to R2 & Notify
+  # JOB 14: POST-BUILD - Upload to R2 & Notify
   # ============================================================
   post-build:
     needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
