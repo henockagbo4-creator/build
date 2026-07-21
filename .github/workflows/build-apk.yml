@@ -888,7 +888,8 @@ jobs:
   # JOB 8: BUILD .NET MAUI
   # ============================================================
   build-dotnet:
-    needs: prepare    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -1531,4 +1532,3 @@ jobs:
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
           echo "keystore_url=${{ steps.get-build-info.outputs.keystore_url }}" >> "$GITHUB_OUTPUT"
           echo "apk_url=${{ steps.get-build-info.outputs.apk_url }}" >> "$GITHUB_OUTPUT"
-          echo "aab_url=${{ steps.get-build-info.outputs.aab_url }}" >> "$GITHUB_OUTPUT"
