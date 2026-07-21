@@ -63,9 +63,6 @@ on:
         required: false
         type: string
 
-env:
-  ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
-
 jobs:
   # ============================================================
   # JOB 1: PREPARE — Download source & setup common tools
@@ -112,15 +109,13 @@ jobs:
             echo "Files directly in src/"
           fi
 
-      - &setup_java
-        name: Setup Java
+      - name: Setup Java
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      - &setup_android_sdk
-        name: Setup Android SDK
+      - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
       - name: Generate keystore
@@ -140,13 +135,13 @@ jobs:
             -storepass "${{ github.event.inputs.keystore_password }}" \
             -keypass "${{ github.event.inputs.keystore_password }}" \
             -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI"
-          
+
           cat > keystore-info.txt << EOF
-          Keystore généré pour le build ${{ github.event.inputs.build_id }}
+          Keystore genere pour le build ${{ github.event.inputs.build_id }}
           Alias: ${{ github.event.inputs.keystore_alias }}
           Password: ${{ github.event.inputs.keystore_password }}
           EOF
-          
+
           echo "has_keystore=true" >> "$GITHUB_OUTPUT"
           echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
           echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
@@ -180,18 +175,12 @@ jobs:
           retention-days: 7
 
   # ============================================================
-  # JOB 2: BUILD WEB (Cordova) — Projets web purs (React, Vue, Web)
+  # JOB 2: BUILD WEB (Cordova) — Projets web purs
+  # FIX: Ne depend plus de build-capacitor, uniquement de prepare
   # ============================================================
   build-web:
-    needs: [prepare, build-capacitor]
-    if: |
-      always() &&
-      needs.prepare.result == 'success' &&
-      (
-        (github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type))
-        ||
-        needs.build-capacitor.outputs.is_capacitor == 'false'
-      )
+    needs: prepare
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -206,15 +195,19 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - &setup_node
-        name: Setup Node
+      - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: '24'
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Install Cordova
         run: npm install -g cordova
@@ -223,7 +216,7 @@ jobs:
         run: |
           set -e
           cd src/
-          
+
           # Trouver le projet
           PROJECT_ROOT=$(find . -name "package.json" -type f \
             -not -path "*/node_modules/*" \
@@ -231,42 +224,36 @@ jobs:
             -not -path "*/build/*" \
             -not -path "*/dist/*" \
             -exec dirname {} \; | head -1)
-          
+
           IS_STATIC=false
           if [ -z "$PROJECT_ROOT" ]; then
-            echo "⚠️  Projet statique (pas de package.json)"
+            echo "Projet statique (pas de package.json)"
             IS_STATIC=true
             PROJECT_ROOT="${{ needs.prepare.outputs.source_dir }}"
           else
-            echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+            echo "Projet trouve dans : $PROJECT_ROOT"
             cd "$PROJECT_ROOT"
-            
+
             if [ -f "package.json" ]; then
-              echo "=== Installation des dépendances ==="
+              echo "=== Installation des dependances ==="
               npm install
-              
+
               if grep -q '"build"' package.json; then
                 echo "=== Build du projet ==="
-                # Vérifier si le build est interactif
-                if grep -q '"build":.*"serve"' package.json || grep -q '"build":.*"start"' package.json || grep -q '"build":.*"dev"' package.json; then
-                  echo "⚠️  Build en mode production (pas de watch)"
-                  npm run build -- --no-watch --no-serve 2>/dev/null || npm run build -- --no-watch 2>/dev/null || npm run build
-                else
-                  npm run build
-                fi
+                npm run build
               fi
             fi
           fi
-          
+
           # Build Cordova
           PKG_ID="${{ github.event.inputs.package_id }}"
           [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
-          
+
           CORDOVA_DIR="cordova-project-${{ github.event.inputs.build_id }}"
           cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
           rm -rf "$CORDOVA_DIR"/www/*
-          
-          # Déterminer la source à copier
+
+          # Determiner la source a copier
           if [ "$IS_STATIC" = true ]; then
             COPY_FROM="$PROJECT_ROOT"
           else
@@ -278,20 +265,38 @@ jobs:
               COPY_FROM="$PROJECT_ROOT"
             fi
           fi
-          
+
+          # FIX CRITIQUE: Supprimer node_modules avant copie
+          echo "=== Nettoyage node_modules ==="
+          rm -rf "$COPY_FROM"/node_modules
+          rm -rf "$COPY_FROM"/.git
+
+          echo "=== Copie vers Cordova www/ ==="
           cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
-          
+
+          # FIX: Creer config.xml avec preferences Android
+          cat > "$CORDOVA_DIR"/config.xml << 'EOF'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <widget xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
+            <preference name="android-minSdkVersion" value="24" />
+            <preference name="android-targetSdkVersion" value="34" />
+            <preference name="AndroidPersistentFileLocation" value="Compatibility" />
+          </widget>
+          EOF
+
           cd "$CORDOVA_DIR"
           cordova platform add android
-          
-          KEYSTORE_PATH="../../my-release-key.keystore"
+
+          # FIX: Chercher le keystore dynamiquement
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
-          
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$KEYSTORE_PATH" ]; then
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            echo "=== Build RELEASE ==="
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
               cordova build android --release -- \
                 --packageType=apk \
-                --keystore="$KEYSTORE_PATH" \
+                --keystore="$KEYSTORE_FILE" \
                 --storePassword="${{ github.event.inputs.keystore_password }}" \
                 --alias="${{ github.event.inputs.keystore_alias }}" \
                 --password="${{ github.event.inputs.keystore_password }}"
@@ -299,20 +304,26 @@ jobs:
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
               cordova build android --release -- \
                 --packageType=bundle \
-                --keystore="$KEYSTORE_PATH" \
+                --keystore="$KEYSTORE_FILE" \
                 --storePassword="${{ github.event.inputs.keystore_password }}" \
                 --alias="${{ github.event.inputs.keystore_alias }}" \
                 --password="${{ github.event.inputs.keystore_password }}"
             fi
           else
+            echo "=== Build DEBUG ==="
             cordova build android --debug
           fi
+
+          # FIX: Verifier que le build a produit un artefact
+          echo "=== Verification des artefacts ==="
+          find . -name "*.apk" -o -name "*.aab" | head -5
 
       - name: Collect artifacts
         run: |
           mkdir -p output
           find . -name "*.apk" -exec cp {} output/ \; || true
           find . -name "*.aab" -exec cp {} output/ \; || true
+          ls -la output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -322,7 +333,8 @@ jobs:
           retention-days: 1
 
   # ============================================================
-  # JOB 3: BUILD CAPACITOR / IONIC — Angular, Svelte, SolidJS, Preact, Ionic
+  # JOB 3: BUILD CAPACITOR — Angular, Svelte, SolidJS, Preact, Ionic
+  # FIX: Job independant, parallel a build-web
   # ============================================================
   build-capacitor:
     needs: prepare
@@ -343,11 +355,19 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - *setup_node
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
@@ -356,103 +376,73 @@ jobs:
         id: build
         run: |
           set -e
-          
           echo "is_capacitor=true" >> "$GITHUB_OUTPUT"
-          
+
           echo "=== Recherche du projet ==="
           cd src/
-          
-          # Chercher package.json
+
           PROJECT_ROOT=$(find . -name "package.json" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/build/*" \
             -not -path "*/dist/*" \
             -exec dirname {} \; | head -1)
-          
-          # Si pas de package.json, vérifier si c'est un projet Capacitor
+
           if [ -z "$PROJECT_ROOT" ]; then
-            HAS_CAPACITOR_CONFIG=$(find . -name "capacitor.config.json" -o -name "capacitor.config.ts" 2>/dev/null | head -1)
-            HAS_ANDROID_DIR=$(find . -name "android" -type d 2>/dev/null | head -1)
-            
-            if [ -z "$HAS_CAPACITOR_CONFIG" ] && [ -z "$HAS_ANDROID_DIR" ]; then
-              echo "⚠️  Pas un projet Capacitor, sortie avec succès"
-              echo "✅ build-web prendra le relais"
-              echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-            
-            echo "✅ Projet Capacitor détecté"
-            PROJECT_ROOT="."
-            
-            # Créer package.json si absent
-            if [ ! -f "package.json" ]; then
-              echo "📦 Création d'un package.json minimal..."
-              cat > package.json << 'EOF'
-          {
-            "name": "capacitor-project",
-            "version": "1.0.0",
-            "private": true,
-            "scripts": {
-              "build": "npx cap sync android && cd android && ./gradlew assembleDebug"
-            },
-            "dependencies": {
-              "@capacitor/core": "^5.0.0",
-              "@capacitor/android": "^5.0.0"
-            },
-            "devDependencies": {
-              "@capacitor/cli": "^5.0.0"
-            }
-          }
-          EOF
-            fi
-          fi
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
-          cd "$PROJECT_ROOT"
-          
-          # Vérifier que c'est bien un projet Capacitor
-          if [ -f "package.json" ] && ! grep -q '"@capacitor/core"' package.json 2>/dev/null && [ ! -d "android" ]; then
-            echo "⚠️  Pas un projet Capacitor identifiable, sortie avec succès"
-            echo "✅ build-web prendra le relais"
+            echo "Pas de package.json trouve"
             echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          
-          echo "=== Installation des dépendances ==="
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
+          cd "$PROJECT_ROOT"
+
+          # Verifier que c'est bien un projet Capacitor
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -d "android" ]; then
+            echo "Pas un projet Capacitor identifiable"
+            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "=== Installation des dependances ==="
           npm install
-          
-          # Build du projet frontend (si nécessaire)
+
+          # Build du frontend
           if grep -q '"build"' package.json 2>/dev/null; then
             echo "=== Build du frontend ==="
-            # Éviter les modes watch/serve
-            if grep -q '"build":.*"serve"' package.json || grep -q '"build":.*"start"' package.json || grep -q '"build":.*"dev"' package.json; then
-              npm run build -- --no-watch --no-serve 2>/dev/null || npm run build -- --no-watch 2>/dev/null || npm run build
-            else
-              npm run build
-            fi
+            npm run build
           fi
-          
-          # Sync Android
+
+          # FIX: Ajouter Android AVANT sync
+          if [ ! -d "android" ]; then
+            echo "=== Ajout de la plateforme Android ==="
+            npx cap add android
+          fi
+
           echo "=== Synchronisation Android ==="
-          npx cap sync android 2>/dev/null || echo "⚠️  Sync échouée, on continue..."
-          
+          npx cap sync android
+
           # Build Android
           if [ -d "android" ]; then
             cd android
             chmod +x gradlew
-            
-            if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+
+            # FIX: Chercher le keystore dynamiquement
+            KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+            if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
               echo "=== Build RELEASE ==="
+
+              # FIX: Creer signing.gradle avec chemin absolu
               mkdir -p app
-              cat > app/signing.gradle << 'GRADLE_EOF'
+              cat > app/signing.gradle << GRADLE_EOF
           android {
             signingConfigs {
               release {
-                storeFile file(System.getenv("KEYSTORE_PATH"))
-                storePassword System.getenv("STORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS")
-                keyPassword System.getenv("KEY_PASSWORD")
+                storeFile file("$KEYSTORE_FILE")
+                storePassword "${{ github.event.inputs.keystore_password }}"
+                keyAlias "${{ github.event.inputs.keystore_alias }}"
+                keyPassword "${{ github.event.inputs.keystore_password }}"
               }
             }
             buildTypes {
@@ -462,72 +452,25 @@ jobs:
             }
           }
           GRADLE_EOF
-              echo "apply from: 'signing.gradle'" >> app/build.gradle
-              
-              export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
-              export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
-              export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
-              export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
-              
+
+              # FIX: apply from avec chemin relatif correct depuis app/build.gradle
+              if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
+                echo "apply from: 'signing.gradle'" >> app/build.gradle
+              fi
+
               ./gradlew assembleRelease
             else
               echo "=== Build DEBUG ==="
               ./gradlew assembleDebug
             fi
-          else
-            echo "⚠️  Dossier android non trouvé, création..."
-            cd ..
-            npx cap add android 2>/dev/null || echo "⚠️  Échec de l'ajout d'Android"
-            
-            if [ -d "android" ]; then
-              cd android
-              chmod +x gradlew
-              if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
-                # Build release...
-                mkdir -p app
-                cat > app/signing.gradle << 'GRADLE_EOF'
-          android {
-            signingConfigs {
-              release {
-                storeFile file(System.getenv("KEYSTORE_PATH"))
-                storePassword System.getenv("STORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS")
-                keyPassword System.getenv("KEY_PASSWORD")
-              }
-            }
-            buildTypes {
-              release {
-                signingConfig signingConfigs.release
-              }
-            }
-          }
-          GRADLE_EOF
-                echo "apply from: 'signing.gradle'" >> app/build.gradle
-                
-                export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
-                export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
-                export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
-                export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
-                
-                ./gradlew assembleRelease
-              else
-                ./gradlew assembleDebug
-              fi
-            fi
           fi
-          
-          # Nettoyer les processus
-          echo "🧹 Nettoyage..."
-          pkill -f "node" 2>/dev/null || true
-          pkill -f "npm" 2>/dev/null || true
-          pkill -f "gradle" 2>/dev/null || true
-          pkill -f "java" 2>/dev/null || true
 
       - name: Collect artifacts
         run: |
           mkdir -p output
           find . -name "*.apk" -exec cp {} output/ \; || true
           find . -name "*.aab" -exec cp {} output/ \; || true
+          ls -la output/ || echo "Aucun artefact trouve"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -556,41 +499,56 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - *setup_node
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Build React Native
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "package.json" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
+          # Verifier metro.config.js
+          if [ ! -f "metro.config.js" ] && [ ! -f "metro.config.ts" ]; then
+            echo "ATTENTION: metro.config.js non trouve"
+          fi
+
           npm install
           cd android
           chmod +x gradlew
-          
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             mkdir -p app
-            cat > app/signing.gradle << 'GRADLE_EOF'
+            cat > app/signing.gradle << GRADLE_EOF
           android {
             signingConfigs {
               release {
-                storeFile file(System.getenv("KEYSTORE_PATH"))
-                storePassword System.getenv("STORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS")
-                keyPassword System.getenv("KEY_PASSWORD")
+                storeFile file("$KEYSTORE_FILE")
+                storePassword "${{ github.event.inputs.keystore_password }}"
+                keyAlias "${{ github.event.inputs.keystore_alias }}"
+                keyPassword "${{ github.event.inputs.keystore_password }}"
               }
             }
             buildTypes {
@@ -600,11 +558,9 @@ jobs:
             }
           }
           GRADLE_EOF
-            echo "apply from: 'signing.gradle'" >> app/build.gradle
-            export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
-            export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
-            export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
-            export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
+            if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
+              echo "apply from: 'signing.gradle'" >> app/build.gradle
+            fi
             ./gradlew assembleRelease
           else
             ./gradlew assembleDebug
@@ -643,36 +599,46 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Build Kotlin/Java
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "build.gradle" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
+          # FIX: chmod AVANT gradlew
           chmod +x gradlew
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             if ! grep -q "signingConfigs" app/build.gradle 2>/dev/null; then
-              cat > app/signing.gradle << 'GRADLE_EOF'
+              mkdir -p app
+              cat > app/signing.gradle << GRADLE_EOF
           android {
             signingConfigs {
               release {
-                storeFile file(System.getenv("KEYSTORE_PATH"))
-                storePassword System.getenv("STORE_PASSWORD")
-                keyAlias System.getenv("KEY_ALIAS")
-                keyPassword System.getenv("KEY_PASSWORD")
+                storeFile file("$KEYSTORE_FILE")
+                storePassword "${{ github.event.inputs.keystore_password }}"
+                keyAlias "${{ github.event.inputs.keystore_alias }}"
+                keyPassword "${{ github.event.inputs.keystore_password }}"
               }
             }
             buildTypes {
@@ -684,10 +650,6 @@ jobs:
           GRADLE_EOF
               echo "apply from: 'signing.gradle'" >> app/build.gradle
             fi
-            export KEYSTORE_PATH="$GITHUB_WORKSPACE/my-release-key.keystore"
-            export STORE_PASSWORD="${{ github.event.inputs.keystore_password }}"
-            export KEY_ALIAS="${{ github.event.inputs.keystore_alias }}"
-            export KEY_PASSWORD="${{ github.event.inputs.keystore_password }}"
             ./gradlew assembleRelease
           else
             ./gradlew assembleDebug
@@ -726,40 +688,57 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
           channel: 'stable'
 
+      - name: Verify Flutter
+        run: flutter doctor
+
       - name: Build Flutter
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/build/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
+          # Verifier pubspec.yaml
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "ERREUR: pubspec.yaml non trouve"
+            exit 1
+          fi
+
           flutter pub get
           FORMAT="${{ github.event.inputs.output_format }}"
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             mkdir -p android
             cat > android/key.properties << EOF
           storePassword=${{ github.event.inputs.keystore_password }}
           keyPassword=${{ github.event.inputs.keystore_password }}
           keyAlias=${{ github.event.inputs.keystore_alias }}
-          storeFile=$GITHUB_WORKSPACE/my-release-key.keystore
+          storeFile=$KEYSTORE_FILE
           EOF
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
               flutter build apk --release
@@ -809,49 +788,53 @@ jobs:
         with:
           python-version: '3.12'
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Build Python with Briefcase
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/__pycache__/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
           pip install briefcase
           briefcase create android
           briefcase build android
           briefcase package android -p apk --adhoc-sign
 
-      - name: Sign APK with real keystore
+      - name: Sign APK with keystore
         if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
         run: |
           set -e
-          cd src/
           APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
-          if [ -z "$APK_SIGNER" ]; then
-            echo "ERROR: apksigner introuvable"
-            exit 0
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
+            for apk in $(find . -name "*.apk"); do
+              "$APK_SIGNER" sign \
+                --ks "$KEYSTORE_FILE" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+            done
           fi
-          for apk in $(find . -name "*.apk"); do
-            "$APK_SIGNER" sign \
-              --ks "$GITHUB_WORKSPACE/my-release-key.keystore" \
-              --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
-              --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
-              --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
-              "$apk"
-          done
 
       - name: Collect artifacts
         run: |
@@ -890,9 +873,14 @@ jobs:
         with:
           dotnet-version: '8.0.x'
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Install MAUI workload
         run: dotnet workload install maui-android
@@ -901,44 +889,50 @@ jobs:
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "*.csproj" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/bin/*" \
             -not -path "*/obj/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
           CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+          if [ -z "$CSPROJ" ]; then
+            echo "ERREUR: Aucun fichier .csproj trouve"
+            exit 1
+          fi
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             dotnet publish "$CSPROJ" -f net8.0-android -c Release
           else
             dotnet build "$CSPROJ" -f net8.0-android -c Debug
           fi
 
-      - name: Sign APK with real keystore
+      - name: Sign APK with keystore
         if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
         run: |
           set -e
-          cd src/
           APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
-          if [ -z "$APK_SIGNER" ]; then
-            echo "ERROR: apksigner introuvable"
-            exit 0
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
+            for apk in $(find . -name "*.apk"); do
+              "$APK_SIGNER" sign \
+                --ks "$KEYSTORE_FILE" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+            done
           fi
-          for apk in $(find . -name "*.apk"); do
-            "$APK_SIGNER" sign \
-              --ks "$GITHUB_WORKSPACE/my-release-key.keystore" \
-              --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
-              --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
-              --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
-              "$apk"
-          done
 
       - name: Collect artifacts
         run: |
@@ -954,11 +948,12 @@ jobs:
           retention-days: 1
 
   # ============================================================
-  # JOB 9: BUILD OTHER (Go, Godot, Lua, Ruby, NativeScript)
+  # JOB 9: BUILD OTHER (Go, Godot, Lua, NativeScript)
+  # FIX: Ruby retire car RubyMotion necessite une licence
   # ============================================================
   build-other:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","ruby","nativescript"]'), github.event.inputs.project_type) }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","nativescript"]'), github.event.inputs.project_type) }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -973,21 +968,20 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
 
-      - *setup_java
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
 
-      - *setup_android_sdk
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
 
       - name: Setup Go
         if: ${{ github.event.inputs.project_type == 'go' }}
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
-
-      - name: Setup Ruby
-        if: ${{ github.event.inputs.project_type == 'ruby' }}
-        uses: ruby/setup-ruby@v1
-        with:
-          ruby-version: '3.3'
 
       - name: Setup Godot
         if: ${{ github.event.inputs.project_type == 'godot' }}
@@ -1027,20 +1021,16 @@ jobs:
           set -e
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
+          # FIX: Installer NDK avant gomobile init
+          sdkmanager "ndk;25.2.9519653" 2>/dev/null || true
+          export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/25.2.9519653"
           gomobile init
-
-      - name: Install RubyMotion
-        if: ${{ github.event.inputs.project_type == 'ruby' }}
-        run: |
-          set -e
-          sudo apt-get update && sudo apt-get install -y build-essential
-          gem install motion-game || true
 
       - name: Build project
         run: |
           set -e
           cd src/
-          
+
           case "${{ github.event.inputs.project_type }}" in
             go)
               PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
@@ -1052,6 +1042,18 @@ jobs:
               PROJECT_ROOT=$(find . -name "project.godot" -type f -exec dirname {} \; | head -1)
               [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
               cd "$PROJECT_ROOT"
+              # Verifier export_presets.cfg
+              if [ ! -f "export_presets.cfg" ]; then
+                echo "ATTENTION: export_presets.cfg non trouve, creation d'un preset par defaut"
+                cat > export_presets.cfg << 'EOF'
+          [preset.0]
+          name="Android"
+          platform="Android"
+          runnable=true
+          export_filter="all_resources"
+          android_architectures/arm64-v8a=true
+          EOF
+              fi
               godot --headless --export-release "Android" build.apk
               ;;
             lua)
@@ -1060,37 +1062,37 @@ jobs:
               cd "$PROJECT_ROOT"
               /opt/solar2d/solar2d.sh build android
               ;;
-            ruby)
-              PROJECT_ROOT="."
-              cd "$PROJECT_ROOT"
-              rake android:build || echo "Build RubyMotion echoue — licence requise."
-              ;;
             nativescript)
               PROJECT_ROOT=$(find . -name "package.json" -type f -exec dirname {} \; | head -1)
               [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
               cd "$PROJECT_ROOT"
               npm install
-              ns platform add android
-              if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -f "$GITHUB_WORKSPACE/my-release-key.keystore" ]; then
-                ns build android --release --key-store-path "$GITHUB_WORKSPACE/my-release-key.keystore" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}"
+              # FIX: Verifier si android existe deja
+              [ -d "android" ] || ns platform add android
+
+              KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+              if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+                ns build android --release --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}"
               else
                 ns build android --debug
               fi
               ;;
           esac
 
-      - name: Universal APK signing
+      - name: Sign APK with keystore
         if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
         run: |
           set -e
-          APK_SIGNER=$(find $ANDROID_SDK_ROOT -name "apksigner" -type f 2>/dev/null | head -1)
+          APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
           [ -z "$APK_SIGNER" ] && APK_SIGNER=$(find /usr -name "apksigner" -type f 2>/dev/null | head -1)
           [ -z "$APK_SIGNER" ] && APK_SIGNER=$(find /opt -name "apksigner" -type f 2>/dev/null | head -1)
-          
-          if [ -n "$APK_SIGNER" ]; then
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
             for apk in $(find . -name "*.apk" -not -path "./output/*"); do
               $APK_SIGNER sign \
-                --ks "$GITHUB_WORKSPACE/my-release-key.keystore" \
+                --ks "$KEYSTORE_FILE" \
                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
                 --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
                 --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
@@ -1099,7 +1101,7 @@ jobs:
           else
             for apk in $(find . -name "*.apk" -not -path "./output/*"); do
               jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-                -keystore "$GITHUB_WORKSPACE/my-release-key.keystore" \
+                -keystore "$KEYSTORE_FILE" \
                 -storepass "${{ github.event.inputs.keystore_password }}" \
                 "$apk" "${{ github.event.inputs.keystore_alias }}"
             done
@@ -1142,18 +1144,18 @@ jobs:
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/build/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
           flutter config --enable-windows-desktop
           flutter pub get
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
@@ -1205,20 +1207,25 @@ jobs:
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "*.csproj" -type f \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/bin/*" \
             -not -path "*/obj/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
           CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
+          if [ -z "$CSPROJ" ]; then
+            echo "ERREUR: Aucun fichier .csproj trouve"
+            exit 1
+          fi
+
           CONFIG="Debug"
           [ "${{ github.event.inputs.build_type }}" == "release" ] && CONFIG="Release"
           dotnet publish "$CSPROJ" -f net8.0-windows10.0.19041.0 -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64
@@ -1263,18 +1270,18 @@ jobs:
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" \
             -not -path "*/node_modules/*" \
             -not -path "*/.git/*" \
             -not -path "*/__pycache__/*" \
             -exec dirname {} \; | head -1)
-          
+
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
           pip install briefcase
           briefcase create windows app
           briefcase build windows app
@@ -1319,13 +1326,13 @@ jobs:
         run: |
           set -e
           cd src/
-          
+
           PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          
-          echo "✅ Projet trouvé dans : $PROJECT_ROOT"
+
+          echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
-          
+
           GOOS=windows GOARCH=amd64 go build -o app.exe .
 
       - name: Collect artifacts
@@ -1466,10 +1473,13 @@ jobs:
           EOF
           )
 
-          echo "Sending notification with state=$STATUS ..."
-          RESPONSE=$(curl -sf -X POST -H "Content-Type: application/json" \
-            -d "$JSON_PAYLOAD" \
-            "${{ github.event.inputs.callback_url }}") || echo "Callback notification failed"
+          # FIX: Retry logic
+          for i in 1 2 3; do
+            echo "Tentative $i..."
+            RESPONSE=$(curl -sf -X POST -H "Content-Type: application/json" \
+              -d "$JSON_PAYLOAD" \
+              "${{ github.event.inputs.callback_url }}") && break || sleep 5
+          done
 
           echo "Callback response: $RESPONSE"
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
