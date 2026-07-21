@@ -114,7 +114,7 @@ jobs:
           fi
 
       # ============================================================
-      # AUTO-DETECTION DU TYPE DE PROJET
+      # AUTO-DETECTION DU TYPE DE PROJET (CORRIGE)
       # ============================================================
       - name: Auto-detect project type
         id: detect-project
@@ -158,22 +158,24 @@ jobs:
             DETECTED="dotnet-maui"
             echo ".NET MAUI detecte (.csproj trouve)"
 
-          # --- 3. React Native ---
+          # --- 3. React Native (metro.config = RN specifique) ---
           elif [ -n "$(find_file "metro.config.js")" ] || [ -n "$(find_file "metro.config.ts")" ]; then
             DETECTED="react-native"
             echo "React Native detecte (metro.config trouve)"
 
-          # --- 4. Capacitor / Ionic ---
+          # --- 4. Capacitor / Ionic (DOIT avoir config OU dependance explicite) ---
+          # CORRECTION: on ne se base PLUS sur le dossier android/ seul
           elif [ -n "$(find_file "capacitor.config.ts")" ] || \
                [ -n "$(find_file "capacitor.config.json")" ] || \
                [ -n "$(find_file "capacitor.config.js")" ] || \
-               [ -d "$(find_dir "android")" ] && [ -n "$(find_file "package.json")" ] && \
-               (grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null || \
-                grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null); then
+               ( [ -n "$(find_file "package.json")" ] && \
+                 ( grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null || \
+                   grep -q "@capacitor/android" "$(find_file "package.json")" 2>/dev/null || \
+                   grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null ) ); then
             DETECTED="capacitor"
-            echo "Capacitor/Ionic detecte (config Capacitor ou dependance @capacitor/@ionic)"
+            echo "Capacitor/Ionic detecte (config ou dependance explicite)"
 
-          # --- 5. Kotlin / Java natif ---
+          # --- 5. Kotlin / Java natif (build.gradle MAIS PAS package.json) ---
           elif [ -n "$(find_file "build.gradle")" ] && [ -z "$(find_file "package.json")" ]; then
             DETECTED="kotlin"
             echo "Kotlin/Java natif detecte (build.gradle sans package.json)"
@@ -205,7 +207,7 @@ jobs:
             DETECTED="nativescript"
             echo "NativeScript detecte (dependance nativescript dans package.json)"
 
-          # --- 11. Projets Web (React, Vue, Svelte, SolidJS, Preact, etc.) ---
+          # --- 11. Projets Web (React, Vue, Svelte, Preact, SolidJS, etc.) ---
           elif [ -n "$(find_file "package.json")" ]; then
             PKG_JSON="$(find_file "package.json")"
             # Verifier les frameworks dans les dependances
@@ -218,9 +220,9 @@ jobs:
             elif grep -q '"svelte"' "$PKG_JSON" 2>/dev/null; then
               DETECTED="svelte"
               echo "Svelte detecte"
-            elif grep -q '"solid-js"' "$PKG_JSON" 2>/dev/null || grep -q '"preact"' "$PKG_JSON" 2>/dev/null; then
+            elif grep -q '"preact"' "$PKG_JSON" 2>/dev/null || grep -q '"solid-js"' "$PKG_JSON" 2>/dev/null; then
               DETECTED="web"
-              echo "Projet web detecte (SolidJS/Preact)"
+              echo "Projet web detecte (Preact/SolidJS)"
             else
               DETECTED="web"
               echo "Projet web generique detecte (package.json sans framework connu)"
@@ -235,7 +237,7 @@ jobs:
           else
             DETECTED="unknown"
             BUILD_SHOULD_RUN="false"
-            ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), setup.py/pyproject.toml (Python), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources."
+            ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue/preact), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), setup.py/pyproject.toml (Python), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources."
             echo "Aucun type de projet detecte"
           fi
 
@@ -398,11 +400,11 @@ jobs:
           exit 1
 
   # ============================================================
-  # JOB 2: BUILD WEB (Cordova)
+  # JOB 2: BUILD WEB (Cordova) - React, Vue, Preact, Svelte, etc.
   # ============================================================
   build-web:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue","svelte"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -550,7 +552,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 3: BUILD CAPACITOR
+  # JOB 3: BUILD CAPACITOR (CORRIGE - avec fallback robuste)
   # ============================================================
   build-capacitor:
     needs: prepare
@@ -613,10 +615,25 @@ jobs:
           echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
-          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -d "android" ]; then
-            echo "Pas un projet Capacitor identifiable"
-            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          # Verifier que c'est bien un projet Capacitor (config ou dependance)
+          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
+            echo "Pas de capacitor.config.* trouve - tentative d'init"
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "dist" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "build" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "www" 2>/dev/null || \
+            npx cap init "${{ github.event.inputs.app_name }}" \
+              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
+              --web-dir "." 2>/dev/null || {
+              echo "ERREUR: Impossible d'initialiser Capacitor"
+              echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
           fi
 
           echo "=== Installation des dependances ==="
@@ -627,13 +644,22 @@ jobs:
             npm run build
           fi
 
+          # Ajout de la plateforme Android avec fallback
           if [ ! -d "android" ]; then
             echo "=== Ajout de la plateforme Android ==="
-            npx cap add android
+            npx cap add android || {
+              echo "ERREUR: Impossible d'ajouter la plateforme Android avec Capacitor"
+              echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            }
           fi
 
           echo "=== Synchronisation Android ==="
-          npx cap sync android
+          npx cap sync android || {
+            echo "ERREUR: cap sync a echoue"
+            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
 
           if [ -d "android" ]; then
             cd android
