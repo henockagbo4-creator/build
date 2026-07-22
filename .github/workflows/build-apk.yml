@@ -1,3 +1,31 @@
+# ============================================================================
+# Build APK / AAB / EXE — pipeline multi-langages
+# ============================================================================
+# Structure :
+#   JOB 1  : prepare               — telecharge le zip, detecte le type de
+#                                     projet, prepare le keystore (Android)
+#   JOB 2  : build-web             — Cordova (web / react / vue / svelte)
+#   JOB 3  : build-capacitor       — Capacitor (angular / svelte / solidjs /
+#                                     preact / ionic / capacitor)
+#   JOB 4  : build-react-native    — React Native natif
+#   JOB 5  : build-kotlin-java     — Android natif (Kotlin / Java / KMP)
+#   JOB 6  : build-flutter         — Flutter (Android)
+#   JOB 7  : build-python          — Python / Briefcase (Android)
+#   JOB 8  : build-dotnet          — .NET MAUI / C# (Android)
+#   JOB 9  : build-other           — Go / Godot / Lua / NativeScript
+#   JOB 10 : build-windows-flutter — Flutter (Windows)
+#   JOB 11 : build-windows-dotnet  — .NET MAUI / C# (Windows)
+#   JOB 12 : build-windows-python  — Python / Briefcase (Windows)
+#   JOB 13 : build-windows-go      — Go, cross-compile depuis Linux
+#   JOB 14 : post-build            — collecte tous les artefacts, upload sur
+#                                     R2 et notifie le Worker (callback_url)
+#
+# Chaque job "build-*" ne se declenche que si prepare.outputs.detected_type
+# correspond a sa famille ET que prepare.outputs.build_should_run == 'true'.
+# post-build tourne toujours (if: always()) pour notifier meme en cas
+# d'echec d'un job de build.
+# ============================================================================
+
 name: Build APK
 
 on:
@@ -63,6 +91,12 @@ on:
         required: false
         type: string
 
+# Version Node commune a tous les jobs qui en ont besoin. Node 20 est en
+# fin de vie (EOL avril 2026) ; 24 est la LTS active actuelle recommandee.
+# Un seul endroit a changer ici plutot que dans chaque job.
+env:
+  NODE_VERSION: '24'
+
 jobs:
   # ============================================================
   # JOB 1: PREPARE (avec auto-detection du type de projet)
@@ -124,6 +158,7 @@ jobs:
 
           echo "=== Analyse de la structure du projet ==="
 
+          # Fonction utilitaire : chercher un fichier en excluant node_modules, .git, build, dist
           find_file() {
             find . -name "$1" -type f \
               -not -path "*/node_modules/*" \
@@ -135,29 +170,26 @@ jobs:
               2>/dev/null | head -1
           }
 
-          find_dir() {
-            find . -type d -name "$1" \
-              -not -path "*/node_modules/*" \
-              -not -path "*/.git/*" \
-              2>/dev/null | head -1
-          }
-
           DETECTED="unknown"
           BUILD_SHOULD_RUN="true"
           ERROR_MSG=""
 
+          # --- 1. Flutter (priorite haute, tres specifique) ---
           if [ -n "$(find_file "pubspec.yaml")" ]; then
             DETECTED="flutter"
             echo "Flutter detecte (pubspec.yaml trouve)"
 
+          # --- 2. .NET MAUI / C# ---
           elif [ -n "$(find_file "*.csproj")" ]; then
             DETECTED="dotnet-maui"
             echo ".NET MAUI detecte (.csproj trouve)"
 
+          # --- 3. React Native (metro.config = RN specifique) ---
           elif [ -n "$(find_file "metro.config.js")" ] || [ -n "$(find_file "metro.config.ts")" ]; then
             DETECTED="react-native"
             echo "React Native detecte (metro.config trouve)"
 
+          # --- 4. Capacitor / Ionic (DOIT avoir config OU dependance explicite) ---
           elif [ -n "$(find_file "capacitor.config.ts")" ] || \
                [ -n "$(find_file "capacitor.config.json")" ] || \
                [ -n "$(find_file "capacitor.config.js")" ] || \
@@ -168,32 +200,39 @@ jobs:
             DETECTED="capacitor"
             echo "Capacitor/Ionic detecte (config ou dependance explicite)"
 
+          # --- 5. Kotlin / Java natif (build.gradle MAIS PAS package.json) ---
           elif [ -n "$(find_file "build.gradle")" ] && [ -z "$(find_file "package.json")" ]; then
             DETECTED="kotlin"
             echo "Kotlin/Java natif detecte (build.gradle sans package.json)"
 
+          # --- 6. Go ---
           elif [ -n "$(find_file "go.mod")" ]; then
             DETECTED="go"
             echo "Go detecte (go.mod trouve)"
 
+          # --- 7. Python ---
           elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || \
                [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ]; then
             DETECTED="python"
             echo "Python detecte"
 
+          # --- 8. Godot ---
           elif [ -n "$(find_file "project.godot")" ]; then
             DETECTED="godot"
             echo "Godot detecte (project.godot trouve)"
 
+          # --- 9. Lua / Solar2D ---
           elif [ -n "$(find_file "build.settings")" ]; then
             DETECTED="lua"
             echo "Lua/Solar2D detecte (build.settings trouve)"
 
+          # --- 10. NativeScript ---
           elif [ -n "$(find_file "package.json")" ] && \
                grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
             DETECTED="nativescript"
             echo "NativeScript detecte (dependance nativescript dans package.json)"
 
+          # --- 11. Projets Web (React, Vue, Svelte, Preact, SolidJS, etc.) ---
           elif [ -n "$(find_file "package.json")" ]; then
             PKG_JSON="$(find_file "package.json")"
             if grep -q '"react"' "$PKG_JSON" 2>/dev/null && [ -z "$(find_file "metro.config.js")" ] && [ -z "$(find_file "metro.config.ts")" ]; then
@@ -213,10 +252,12 @@ jobs:
               echo "Projet web generique detecte (package.json sans framework connu)"
             fi
 
+          # --- 12. Statique (aucun fichier reconnu) ---
           elif [ -n "$(find_file "index.html")" ] || [ -n "$(find_file "*.html")" ]; then
             DETECTED="web"
             echo "Site statique detecte (HTML trouve)"
 
+          # --- Aucun projet identifiable ---
           else
             DETECTED="unknown"
             BUILD_SHOULD_RUN="false"
@@ -224,6 +265,8 @@ jobs:
             echo "Aucun type de projet detecte"
           fi
 
+          # Si le client a fourni un project_type explicite, on l'utilise comme override
+          # sauf s'il est en conflit flagrant (ex: il dit "flutter" mais pas de pubspec.yaml)
           CLIENT_TYPE="${{ github.event.inputs.project_type }}"
           if [ "$CLIENT_TYPE" != "" ] && [ "$CLIENT_TYPE" != "web" ]; then
             echo "Client a specifie: $CLIENT_TYPE"
@@ -235,13 +278,16 @@ jobs:
                   DETECTED="$CLIENT_TYPE"
                 fi
                 ;;
-              capacitor|angular|solidjs|preact|ionic)
-                if [ "$DETECTED" == "web" ] || [ "$DETECTED" == "react" ] || [ "$DETECTED" == "vue" ]; then
-                  DETECTED="capacitor"
-                  echo "Forcage Capacitor sur base du choix client ($CLIENT_TYPE)"
-                else
-                  DETECTED="$CLIENT_TYPE"
-                fi
+              capacitor|angular|svelte|solidjs|preact|ionic)
+                # Toujours forcer "capacitor" ici, quel que soit ce que
+                # l'auto-detection avait trouve : sinon un projet detecte
+                # comme "svelte" tout court resterait distinct de
+                # "capacitor" et pourrait matcher DEUX jobs de build a la
+                # fois. build-web ne liste plus "svelte" dans son "if", mais
+                # on force quand meme pour rester coherent : un seul job
+                # (build-capacitor) sait traiter cette famille.
+                DETECTED="capacitor"
+                echo "Forcage Capacitor sur base du choix client ($CLIENT_TYPE)"
                 ;;
               *)
                 DETECTED="$CLIENT_TYPE"
@@ -353,6 +399,9 @@ jobs:
             keystore-info.txt
           retention-days: 7
 
+      # ============================================================
+      # NOTIFICATION EARLY-EXIT si projet non detecte
+      # ============================================================
       - name: Notify error if project not detected
         if: ${{ steps.detect-project.outputs.build_should_run == 'false' }}
         run: |
@@ -376,11 +425,11 @@ jobs:
           exit 1
 
   # ============================================================
-  # JOB 2: BUILD WEB (Cordova) - React, Vue, Svelte, statique
+  # JOB 2: BUILD WEB (Cordova) - React, Vue, Svelte generique, Web statique
   # ============================================================
   build-web:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue","svelte"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -398,7 +447,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -408,22 +457,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-web-${{ runner.os }}-${{ github.event.inputs.build_id }}
-          restore-keys: gradle-web-${{ runner.os }}-
-
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-web-${{ runner.os }}-${{ hashFiles('src/**/package-lock.json') }}
-          restore-keys: npm-web-${{ runner.os }}-
 
       - name: Install Cordova
         run: npm install -g cordova
@@ -486,17 +519,24 @@ jobs:
           echo "=== Copie vers Cordova www/ ==="
           cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
 
-          cat > "$CORDOVA_DIR"/config.xml << 'EOF'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <widget xmlns="http://www.w3.org/ns/widgets" xmlns:cdv="http://cordova.apache.org/ns/1.0">
-            <preference name="android-minSdkVersion" value="24" />
-            <preference name="android-targetSdkVersion" value="34" />
-            <preference name="AndroidPersistentFileLocation" value="Compatibility" />
-          </widget>
-          EOF
+          echo "=== Ajout des preferences Android au config.xml genere ==="
+          # FIX IMPORTANT : on n'ecrase plus le config.xml genere par
+          # "cordova create" (il contient deja l'attribut id, l'attribut
+          # version et l'element <name> requis par cordova-android). Un
+          # widget sans id/name fait planter l'ajout de la plateforme avec
+          # "Cannot read properties of null (reading 'replace')", car les
+          # hooks internes de cordova-android lisent ces valeurs pour
+          # generer AndroidManifest.xml et strings.xml. On se contente
+          # d'INSERER nos preferences juste avant la fermeture </widget>.
+          sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="AndroidPersistentFileLocation" value="Compatibility" />\n</widget>#' "$CORDOVA_DIR"/config.xml
 
           cd "$CORDOVA_DIR"
-          cordova platform add android@14.0.1
+          cordova platform add android
+
+          if [ ! -d "platforms/android" ]; then
+            echo "ERREUR: la plateforme Android n'a pas ete ajoutee correctement (platforms/android absent apres 'cordova platform add android')."
+            exit 1
+          fi
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
@@ -544,11 +584,11 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 3: BUILD CAPACITOR
+  # JOB 3: BUILD CAPACITOR (avec fallback robuste)
   # ============================================================
   build-capacitor:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","solidjs","preact","ionic","capacitor"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","svelte","solidjs","preact","ionic","capacitor"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       is_capacitor: ${{ steps.build.outputs.is_capacitor }}
@@ -568,7 +608,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -578,22 +618,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-cap-${{ runner.os }}-${{ github.event.inputs.build_id }}
-          restore-keys: gradle-cap-${{ runner.os }}-
-
-      - name: Cache npm
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-cap-${{ runner.os }}-${{ hashFiles('src/**/package-lock.json') }}
-          restore-keys: npm-cap-${{ runner.os }}-
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
@@ -745,7 +769,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -755,15 +779,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-rn-${{ runner.os }}-${{ github.event.inputs.build_id }}
-          restore-keys: gradle-rn-${{ runner.os }}-
 
       - name: Build React Native
         run: |
@@ -861,15 +876,6 @@ jobs:
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-kj-${{ runner.os }}-${{ github.event.inputs.build_id }}
-          restore-keys: gradle-kj-${{ runner.os }}-
 
       - name: Build Kotlin/Java
         run: |
@@ -1281,7 +1287,7 @@ jobs:
         if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
+          node-version: ${{ env.NODE_VERSION }}
 
       - name: Install NativeScript CLI
         if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
@@ -1576,7 +1582,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 13: BUILD WINDOWS - Go (cross-compilation)
+  # JOB 13: BUILD WINDOWS - Go (cross-compilation depuis Linux)
   # ============================================================
   build-windows-go:
     needs: prepare
@@ -1732,28 +1738,32 @@ jobs:
             echo "status=error" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Notify callback URL
+      - name: Notify callback URL with download links
         id: upload
         run: |
           set -e
           BUILD_ID="${{ github.event.inputs.build_id }}"
           STATUS="${{ steps.build-status.outputs.status }}"
 
+          MESSAGE="Build $STATUS"
+          if [ "$STATUS" == "error" ]; then
+            MESSAGE="Le build a echoue : aucun fichier n'a ete produit. Verifie les logs du job de compilation."
+          fi
+
           JSON_PAYLOAD=$(cat <<EOF
           {
             "build_id": "$BUILD_ID",
             "state": "$STATUS",
-            "message": "Build $STATUS"
+            "message": "$MESSAGE"
           }
           EOF
           )
 
-          for i in 1 2 3; do
-            echo "Tentative $i..."
-            RESPONSE=$(curl -sf -X POST -H "Content-Type: application/json" \
-              -d "$JSON_PAYLOAD" \
-              "${{ github.event.inputs.callback_url }}") && break || sleep 5
-          done
+          echo "Sending notification..."
+          echo "$JSON_PAYLOAD"
 
-          echo "Callback response: $RESPONSE"
+          curl -sf -X POST -H "Content-Type: application/json" \
+            -d "$JSON_PAYLOAD" \
+            "${{ github.event.inputs.callback_url }}" || echo "Callback notification failed"
+
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
