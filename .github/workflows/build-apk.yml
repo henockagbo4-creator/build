@@ -553,7 +553,7 @@ jobs:
       # plateforme Android (cordova-res a besoin du config.xml final,
       # mais doit ecrire les resources avant "cordova platform add").
       # ============================================================
-      - name: Apply custom icon and splash (Cordova)
+      - name: Apply custom icon (Cordova)
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
@@ -561,10 +561,17 @@ jobs:
           echo "=== Telechargement de l'icone personnalisee ==="
           mkdir -p resources
           curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
-          cp resources/icon.png resources/splash.png
-          echo "=== Generation des ressources Android (cordova-res) ==="
+          # NOTE : on ne genere PAS de splash a partir de l'icone.
+          # cordova-res exige une image source d'au moins 1920x1920px pour
+          # le splash Android ; une icone uploadee (souvent 512x512 ou
+          # 648x648) est trop petite et fait echouer TOUTE la generation
+          # (icone incluse) si on la fournit comme source du splash. On se
+          # limite donc a l'icone, qui accepte des tailles plus modestes.
+          # Le splash Cordova par defaut (generique, pas Capacitor) reste
+          # affiche au demarrage, ce qui est acceptable.
+          echo "=== Generation de l'icone Android (cordova-res) ==="
           npm install -g cordova-res
-          cordova-res android --skip-config --copy
+          cordova-res android --skip-config --copy --type icon
 
       - name: Build Cordova platform and package
         run: |
@@ -730,7 +737,7 @@ jobs:
       # android/ doit exister) mais AVANT "cap sync android" (pour que
       # les resources generees soient bien copiees dans le projet natif).
       # ============================================================
-      - name: Apply custom icon and splash (Capacitor)
+      - name: Apply custom icon (Capacitor)
         if: ${{ github.event.inputs.icon_url != '' && steps.build.outputs.is_capacitor == 'true' }}
         run: |
           set -e
@@ -738,12 +745,16 @@ jobs:
           echo "=== Telechargement de l'icone personnalisee ==="
           mkdir -p resources
           curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
-          cp resources/icon.png resources/splash.png
-          echo "=== Generation icone + splash Android (@capacitor/assets) ==="
+          # NOTE : pas de splash genere a partir de l'icone (voir job
+          # build-web pour le detail). @capacitor/assets recommande une
+          # source bien plus grande pour le splash (2732x2732) qu'une
+          # simple icone uploadee ; on se limite donc a l'icone. Sans
+          # fichier resources/splash.png, capacitor-assets ignore
+          # simplement la generation du splash au lieu d'echouer.
+          echo "=== Generation de l'icone Android (@capacitor/assets) ==="
           npm install -g @capacitor/assets
           npx capacitor-assets generate --android \
-            --iconBackgroundColor '#ffffff' \
-            --splashBackgroundColor '#ffffff'
+            --iconBackgroundColor '#ffffff'
 
       # ============================================================
       # FALLBACK : si pas d'icone fournie, on reduit au moins la duree
