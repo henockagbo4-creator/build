@@ -24,6 +24,15 @@
 # correspond a sa famille ET que prepare.outputs.build_should_run == 'true'.
 # post-build tourne toujours (if: always()) pour notifier meme en cas
 # d'echec d'un job de build.
+#
+# CORRECTIF ICONE/SPLASH (ajout) :
+#   - nouvel input icon_url (optionnel)
+#   - job build-web (Cordova)      : etape "Apply custom icon and splash"
+#     via cordova-res, executee juste apres "cordova platform add android"
+#   - job build-capacitor          : etape "Apply custom icon and splash"
+#     via @capacitor/assets, executee juste avant "npx cap sync android"
+#     + fallback qui reduit le splash Capacitor par defaut a 0ms si aucune
+#     icone n'est fournie (evite d'afficher le logo Capacitor 2 secondes)
 # ============================================================================
 
 name: Build APK
@@ -66,6 +75,11 @@ on:
         required: false
         type: string
         default: 'android'
+      icon_url:
+        description: 'URL de l icone personnalisee (optionnel)'
+        required: false
+        type: string
+        default: ''
       keystore_mode:
         description: 'Mode keystore'
         required: true
@@ -530,7 +544,32 @@ jobs:
           # d'INSERER nos preferences juste avant la fermeture </widget>.
           sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="AndroidPersistentFileLocation" value="Compatibility" />\n</widget>#' "$CORDOVA_DIR"/config.xml
 
-          cd "$CORDOVA_DIR"
+          echo "SAVED_CORDOVA_DIR=$CORDOVA_DIR" >> "$GITHUB_ENV"
+          echo "SAVED_KEYSTORE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
+
+      # ============================================================
+      # CORRECTIF ICONE/SPLASH : genere icone + splash a partir de
+      # l'image fournie par l'utilisateur, AVANT l'ajout de la
+      # plateforme Android (cordova-res a besoin du config.xml final,
+      # mais doit ecrire les resources avant "cordova platform add").
+      # ============================================================
+      - name: Apply custom icon and splash (Cordova)
+        if: ${{ github.event.inputs.icon_url != '' }}
+        run: |
+          set -e
+          cd "$SAVED_CORDOVA_DIR"
+          echo "=== Telechargement de l'icone personnalisee ==="
+          mkdir -p resources
+          curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
+          cp resources/icon.png resources/splash.png
+          echo "=== Generation des ressources Android (cordova-res) ==="
+          npm install -g cordova-res
+          cordova-res android --skip-config --copy
+
+      - name: Build Cordova platform and package
+        run: |
+          set -e
+          cd "$SAVED_CORDOVA_DIR"
           cordova platform add android
 
           if [ ! -d "platforms/android" ]; then
@@ -622,7 +661,7 @@ jobs:
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
 
-      - name: Build Capacitor project
+      - name: Prepare Capacitor project (install, build frontend, add android)
         id: build
         run: |
           set -e
@@ -646,6 +685,7 @@ jobs:
 
           echo "Projet trouve dans : $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
+          echo "SAVED_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
             echo "Pas de capacitor.config.* trouve - tentative d'init"
@@ -684,10 +724,57 @@ jobs:
             }
           fi
 
+      # ============================================================
+      # CORRECTIF ICONE/SPLASH : genere icone + splash avec
+      # @capacitor/assets, APRES "cap add android" (le dossier
+      # android/ doit exister) mais AVANT "cap sync android" (pour que
+      # les resources generees soient bien copiees dans le projet natif).
+      # ============================================================
+      - name: Apply custom icon and splash (Capacitor)
+        if: ${{ github.event.inputs.icon_url != '' && steps.build.outputs.is_capacitor == 'true' }}
+        run: |
+          set -e
+          cd "$SAVED_PROJECT_ROOT"
+          echo "=== Telechargement de l'icone personnalisee ==="
+          mkdir -p resources
+          curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
+          cp resources/icon.png resources/splash.png
+          echo "=== Generation icone + splash Android (@capacitor/assets) ==="
+          npm install -g @capacitor/assets
+          npx capacitor-assets generate --android \
+            --iconBackgroundColor '#ffffff' \
+            --splashBackgroundColor '#ffffff'
+
+      # ============================================================
+      # FALLBACK : si pas d'icone fournie, on reduit au moins la duree
+      # d'affichage du splash Capacitor par defaut a 0ms pour eviter
+      # que le logo Capacitor reste visible plusieurs secondes.
+      # ============================================================
+      - name: Reduce default splash duration if no custom icon
+        if: ${{ github.event.inputs.icon_url == '' && steps.build.outputs.is_capacitor == 'true' }}
+        run: |
+          cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
+          if [ -f "capacitor.config.json" ]; then
+            node -e "
+              const fs = require('fs');
+              const cfg = JSON.parse(fs.readFileSync('capacitor.config.json'));
+              cfg.plugins = cfg.plugins || {};
+              cfg.plugins.SplashScreen = Object.assign({}, cfg.plugins.SplashScreen, { launchShowDuration: 0 });
+              fs.writeFileSync('capacitor.config.json', JSON.stringify(cfg, null, 2));
+              console.log('SplashScreen.launchShowDuration force a 0 dans capacitor.config.json');
+            " || echo "Impossible de patcher capacitor.config.json, on continue"
+          else
+            echo "Pas de capacitor.config.json (probablement .ts/.js) - patch ignore"
+          fi
+
+      - name: Sync and build Capacitor Android
+        run: |
+          set -e
+          cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
+
           echo "=== Synchronisation Android ==="
           npx cap sync android || {
             echo "ERREUR: cap sync a echoue"
-            echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
             exit 0
           }
 
