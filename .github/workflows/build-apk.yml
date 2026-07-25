@@ -544,7 +544,7 @@ jobs:
           # d'INSERER nos preferences juste avant la fermeture </widget>.
           sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="AndroidPersistentFileLocation" value="Compatibility" />\n</widget>#' "$CORDOVA_DIR"/config.xml
 
-          echo "SAVED_CORDOVA_DIR=$CORDOVA_DIR" >> "$GITHUB_ENV"
+          echo "SAVED_CORDOVA_DIR=$PWD/$CORDOVA_DIR" >> "$GITHUB_ENV"
           echo "SAVED_KEYSTORE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
       # ============================================================
