@@ -548,11 +548,26 @@ jobs:
           echo "SAVED_KEYSTORE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
       # ============================================================
-      # CORRECTIF ICONE/SPLASH : genere icone + splash a partir de
-      # l'image fournie par l'utilisateur, AVANT l'ajout de la
-      # plateforme Android (cordova-res a besoin du config.xml final,
-      # mais doit ecrire les resources avant "cordova platform add").
+      # ORDRE IMPORTANT : la plateforme Android doit exister AVANT de
+      # generer les icones. cordova-res --copy tente de copier les assets
+      # generes dans platforms/android/.../res/ ; si ce dossier n'existe
+      # pas encore, cordova-res se comporte de facon incoherente (cree un
+      # dossier "android/" errone a la racine du projet), ce qui fait
+      # ensuite planter "cordova platform add android" (qui interprete ce
+      # dossier comme un chemin local plutot que comme le nom de la
+      # plateforme a installer). On ajoute donc la plateforme d'abord.
       # ============================================================
+      - name: Add Cordova Android platform
+        run: |
+          set -e
+          cd "$SAVED_CORDOVA_DIR"
+          cordova platform add android
+
+          if [ ! -d "platforms/android" ]; then
+            echo "ERREUR: la plateforme Android n'a pas ete ajoutee correctement (platforms/android absent apres 'cordova platform add android')."
+            exit 1
+          fi
+
       - name: Apply custom icon (Cordova)
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
@@ -577,12 +592,6 @@ jobs:
         run: |
           set -e
           cd "$SAVED_CORDOVA_DIR"
-          cordova platform add android
-
-          if [ ! -d "platforms/android" ]; then
-            echo "ERREUR: la plateforme Android n'a pas ete ajoutee correctement (platforms/android absent apres 'cordova platform add android')."
-            exit 1
-          fi
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
