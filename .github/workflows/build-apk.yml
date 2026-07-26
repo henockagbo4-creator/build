@@ -542,7 +542,7 @@ jobs:
           # hooks internes de cordova-android lisent ces valeurs pour
           # generer AndroidManifest.xml et strings.xml. On se contente
           # d'INSERER nos preferences juste avant la fermeture </widget>.
-          sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="AndroidPersistentFileLocation" value="Compatibility" />\n</widget>#' "$CORDOVA_DIR"/config.xml
+          sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="AndroidPersistentFileLocation" value="Compatibility" />\n  <preference name="SplashScreenDelay" value="0" />\n  <preference name="AutoHideSplashScreen" value="true" />\n  <preference name="ShowSplashScreenSpinner" value="false" />\n  <preference name="FadeSplashScreen" value="false" />\n</widget>#' "$CORDOVA_DIR"/config.xml
 
           echo "SAVED_CORDOVA_DIR=$PWD/$CORDOVA_DIR" >> "$GITHUB_ENV"
           echo "SAVED_KEYSTORE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
@@ -586,7 +586,15 @@ jobs:
           # affiche au demarrage, ce qui est acceptable.
           echo "=== Generation de l'icone Android (cordova-res) ==="
           npm install -g cordova-res
-          cordova-res android --skip-config --copy --type icon
+          # IMPORTANT : pas de --skip-config ici. "cordova build" declenche
+          # en interne une etape "prepare" qui resynchronise les
+          # ressources de la plateforme a partir des declarations du
+          # config.xml. Si cordova-res ne declare pas l'icone dans
+          # config.xml (--skip-config), "prepare" ecrase silencieusement
+          # notre icone personnalisee par l'icone par defaut du template
+          # Cordova au moment du build. Laisser cordova-res editer
+          # config.xml est donc necessaire pour que l'icone survive.
+          cordova-res android --copy --type icon
 
       - name: Build Cordova platform and package
         run: |
@@ -766,12 +774,14 @@ jobs:
             --iconBackgroundColor '#ffffff'
 
       # ============================================================
-      # FALLBACK : si pas d'icone fournie, on reduit au moins la duree
-      # d'affichage du splash Capacitor par defaut a 0ms pour eviter
-      # que le logo Capacitor reste visible plusieurs secondes.
+      # Splash desactive systematiquement : on ne genere plus de splash
+      # personnalise (source trop petite pour les exigences de
+      # @capacitor/assets), donc plutot que de laisser le splash
+      # Capacitor par defaut (logo Capacitor visible ~2s), on force sa
+      # duree a 0ms dans tous les cas pour qu'il ne s'affiche jamais.
       # ============================================================
-      - name: Reduce default splash duration if no custom icon
-        if: ${{ github.event.inputs.icon_url == '' && steps.build.outputs.is_capacitor == 'true' }}
+      - name: Disable default splash screen
+        if: ${{ steps.build.outputs.is_capacitor == 'true' }}
         run: |
           cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
           if [ -f "capacitor.config.json" ]; then
