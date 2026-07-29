@@ -180,6 +180,63 @@ jobs:
           fi
 
       # ============================================================
+      # NETTOYAGE DES FICHIERS SOURCE (ajout)
+      # Corrige deux motifs recurrents observes sur des zips clients :
+      #   - extensions dupliquees (main.py.py, buildozer.spec.py...),
+      #     souvent produites par un export brut de cellules Colab/Jupyter
+      #   - ligne magique Colab/Jupyter (%%writefile, %%bash...) laissee
+      #     en tete de fichier, qui invalide le fichier pour l'outil cible
+      #     (ex: buildozer refuse un buildozer.spec dont la 1ere ligne
+      #     n'est pas une section [app])
+      # Le fix de casse (find_file -iname) couvre deja Package.json vs
+      # package.json ; cette etape se concentre sur ce qu'un simple match
+      # insensible a la casse ne peut pas resoudre.
+      # ============================================================
+      - name: Sanitize source files (duplicate extensions, notebook artifacts)
+        run: |
+          set -e
+          cd src/${{ steps.detect.outputs.source_dir }}
+
+          echo "=== Nettoyage des fichiers source ==="
+
+          # IMPORTANT : la suppression des lignes magiques doit se faire
+          # AVANT le renommage. Un fichier "buildozer.spec.py" est repere
+          # par le motif "*.py" ; une fois renomme en "buildozer.spec" il
+          # ne matche plus ce motif et la ligne magique resterait figee
+          # dedans si on inversait l'ordre.
+
+          # Suppression des lignes magiques Colab/Jupyter (%%writefile, %%bash...)
+          # en tete de fichier .py, qui rendent le fichier invalide pour l'outil cible
+          find . -type f -iname "*.py" \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+            if head -1 "$f" 2>/dev/null | grep -q '^%%'; then
+              echo "Suppression de la ligne magique Colab en tete de: $f"
+              sed -i '1{/^%%/d}' "$f"
+            fi
+          done
+
+          # main.py.py -> main.py / app.py.py -> app.py
+          find . -type f \( -iname "main.py.py" -o -iname "app.py.py" \) \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+            BASE=$(basename "$f" .py.py)
+            TARGET="$(dirname "$f")/${BASE}.py"
+            echo "Renommage (extension dupliquee): $f -> $TARGET"
+            mv "$f" "$TARGET"
+          done
+
+          # buildozer.spec.py -> buildozer.spec (autres marqueurs avec .py en trop)
+          for MARKER in buildozer.spec pubspec.yaml package.json capacitor.config.json go.mod; do
+            find . -type f -iname "${MARKER}.py" \
+              -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+              TARGET="$(dirname "$f")/${MARKER}"
+              echo "Renommage (extension dupliquee): $f -> $TARGET"
+              mv "$f" "$TARGET"
+            done
+          done
+
+          echo "=== Nettoyage termine ==="
+
+      # ============================================================
       # AUTO-DETECTION DU TYPE DE PROJET
       # ============================================================
       - name: Auto-detect project type
@@ -191,8 +248,13 @@ jobs:
           echo "=== Analyse de la structure du projet ==="
 
           # Fonction utilitaire : chercher un fichier en excluant node_modules, .git, build, dist
+          # CORRECTIF : -iname (insensible a la casse) au lieu de -name.
+          # Les runners GitHub Actions tournent sur Linux, ou la casse des
+          # noms de fichiers compte : "Package.json" ne matchait jamais
+          # "package.json", ce qui faisait echouer toute la detection pour
+          # les zips clients dont les fichiers etaient mal casses.
           find_file() {
-            find . -name "$1" -type f \
+            find . -iname "$1" -type f \
               -not -path "*/node_modules/*" \
               -not -path "*/.git/*" \
               -not -path "*/build/*" \
@@ -231,6 +293,33 @@ jobs:
                    grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null ) ); then
             DETECTED="capacitor"
             echo "Capacitor/Ionic detecte (config ou dependance explicite)"
+
+          # --- 4b. Expo (ajout) : distinguer bare workflow (supporte comme
+          # React Native, car dossier android/ deja genere) du managed
+          # workflow (PAS supporte : aucun job ne sait faire "expo
+          # prebuild". Le laisser tomber dans la detection web generique
+          # produirait un APK qui compile mais ne fonctionne pas, pire
+          # qu'une erreur claire). ---
+          elif [ -n "$(find_file "package.json")" ] && grep -q '"expo"' "$(find_file "package.json")" 2>/dev/null; then
+            PKG_DIR=$(dirname "$(find_file "package.json")")
+            if [ -d "$PKG_DIR/android" ] || [ -d "$PKG_DIR/ios" ]; then
+              DETECTED="react-native"
+              echo "Expo bare workflow detecte (dossier android/ ou ios/ present) - traite comme React Native"
+            else
+              DETECTED="unknown"
+              BUILD_SHOULD_RUN="false"
+              ERROR_CODE="expo_managed_not_supported"
+              HINT="Projet Expo en mode managed detecte (dependance expo dans package.json, sans dossier android/ ni ios/). Ce mode n'est pas encore supporte par le pipeline. Executez 'npx expo prebuild' avant d'exporter le projet, ou passez en bare workflow."
+              ERROR_MSG="Type de projet non supporte : Expo managed workflow. $HINT"
+              echo "Expo managed workflow detecte - non supporte"
+              echo "error_code=$ERROR_CODE" >> "$GITHUB_OUTPUT"
+              echo "error_hint=$HINT" >> "$GITHUB_OUTPUT"
+              {
+                echo "found_files<<FOUND_FILES_EOF"
+                find . -maxdepth 3 -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | sed 's|^\./||' | head -20
+                echo "FOUND_FILES_EOF"
+              } >> "$GITHUB_OUTPUT"
+            fi
 
           # --- 5. Kotlin / Java natif (build.gradle[.kts] MAIS PAS package.json) ---
           # CORRECTIF : Android Studio genere du Kotlin DSL (build.gradle.kts,
