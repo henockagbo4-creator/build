@@ -2,37 +2,62 @@
 # Build APK / AAB / EXE — pipeline multi-langages
 # ============================================================================
 # Structure :
-#   JOB 1  : prepare               — telecharge le zip, detecte le type de
-#                                     projet, prepare le keystore (Android)
-#   JOB 2  : build-web             — Cordova (web / react / vue / svelte)
-#   JOB 3  : build-capacitor       — Capacitor (angular / svelte / solidjs /
-#                                     preact / ionic / capacitor)
-#   JOB 4  : build-react-native    — React Native natif
-#   JOB 5  : build-kotlin-java     — Android natif (Kotlin / Java / KMP)
-#   JOB 6  : build-flutter         — Flutter (Android)
-#   JOB 7  : build-python          — Python / Briefcase (Android)
-#   JOB 8  : build-dotnet          — .NET MAUI / C# (Android)
-#   JOB 9  : build-other           — Go / Godot / Lua / NativeScript
-#   JOB 10 : build-windows-flutter — Flutter (Windows)
-#   JOB 11 : build-windows-dotnet  — .NET MAUI / C# (Windows)
-#   JOB 12 : build-windows-python  — Python / Briefcase (Windows)
-#   JOB 13 : build-windows-go      — Go, cross-compile depuis Linux
-#   JOB 14 : post-build            — collecte tous les artefacts, upload sur
-#                                     R2 et notifie le Worker (callback_url)
+#   JOB 1  : prepare                — telecharge le zip, detecte le type de
+#                                      projet, prepare le keystore (Android)
+#   JOB 2  : build-web              — Cordova (web / react / vue / svelte)
+#   JOB 3  : build-capacitor        — Capacitor (angular / svelte / solidjs /
+#                                      preact / ionic / capacitor)
+#   JOB 4  : build-react-native     — React Native natif
+#   JOB 5  : build-kotlin-java      — Android natif (Kotlin / Java / KMP)
+#   JOB 6  : build-flutter          — Flutter (Android)
+#   JOB 7  : build-python           — Python / Briefcase (Android)
+#   JOB 7B : build-python-buildozer — Python / Buildozer (Android)
+#   JOB 8  : build-dotnet           — .NET MAUI / C# (Android)
+#   JOB 9  : build-other            — Go / Godot / Lua / NativeScript
+#   JOB 10 : build-windows-flutter  — Flutter (Windows)
+#   JOB 11 : build-windows-dotnet   — .NET MAUI / C# (Windows)
+#   JOB 12 : build-windows-python   — Python / Briefcase (Windows)
+#   JOB 13 : build-windows-go       — Go, cross-compile depuis Linux
+#   JOB 14 : post-build             — collecte tous les artefacts, upload sur
+#                                      R2 et notifie le Worker (callback_url)
 #
 # Chaque job "build-*" ne se declenche que si prepare.outputs.detected_type
 # correspond a sa famille ET que prepare.outputs.build_should_run == 'true'.
 # post-build tourne toujours (if: always()) pour notifier meme en cas
 # d'echec d'un job de build.
 #
-# CORRECTIF ICONE/SPLASH (ajout) :
-#   - nouvel input icon_url (optionnel)
+# CORRECTIF ICONE/SPLASH (deja en place) :
+#   - input icon_url (optionnel)
 #   - job build-web (Cordova)      : etape "Apply custom icon and splash"
 #     via cordova-res, executee juste apres "cordova platform add android"
 #   - job build-capacitor          : etape "Apply custom icon and splash"
 #     via @capacitor/assets, executee juste avant "npx cap sync android"
 #     + fallback qui reduit le splash Capacitor par defaut a 0ms si aucune
 #     icone n'est fournie (evite d'afficher le logo Capacitor 2 secondes)
+#
+# CORRECTIFS DE CETTE REVISION :
+#   1. build-web (Cordova) : les projets React/Vue/web dont le build genere
+#      des chemins ABSOLUS ("/static/js/...") s'affichaient en ecran blanc
+#      une fois empaquetes, car une WebView Cordova charge les fichiers en
+#      file:// (un chemin qui commence par "/" pointe alors vers la racine
+#      du systeme de fichiers, pas vers www/). Deux filets de securite :
+#        a) PUBLIC_URL=. est exporte avant "npm run build" pour que les
+#           projets Create React App generent directement des chemins
+#           relatifs (corrige aussi le chargement des chunks lazy-loaded).
+#        b) Apres la copie dans www/, un post-traitement reecrit tout
+#           attribut href="/..." ou src="/..." de index.html en chemin
+#           relatif, en filet de securite pour les projets qui ignorent
+#           PUBLIC_URL (Vite, Vue CLI sans config, etc.).
+#   2. Ajout du support Buildozer (JOB 7B) : les projets Kivy structures
+#      autour d'un buildozer.spec (l'approche la plus repandue, differente
+#      de Briefcase) sont maintenant detectes et construits avec l'action
+#      communautaire ArtemSBulgakov/buildozer-action, au lieu de tomber en
+#      "type de projet non detecte".
+#   3. build-capacitor : l'etape "Sync and build Capacitor Android" tournait
+#      inconditionnellement meme quand la preparation du projet avait
+#      echoue (is_capacitor=false, SAVED_PROJECT_ROOT jamais defini) —
+#      elle est maintenant gardee par la meme condition que les autres
+#      etapes du job.
 # ============================================================================
 
 name: Build APK
@@ -224,29 +249,37 @@ jobs:
             DETECTED="go"
             echo "Go detecte (go.mod trouve)"
 
-          # --- 7. Python ---
+          # --- 7. Python / Buildozer (buildozer.spec = tres specifique,
+          #        verifie AVANT Briefcase pour ne pas confondre les deux ;
+          #        un projet Buildozer a quasi toujours un main.py a la
+          #        racine, qui matcherait aussi la regle Briefcase plus bas) ---
+          elif [ -n "$(find_file "buildozer.spec")" ]; then
+            DETECTED="python-buildozer"
+            echo "Python/Buildozer detecte (buildozer.spec trouve)"
+
+          # --- 8. Python / Briefcase ---
           elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || \
                [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ]; then
             DETECTED="python"
-            echo "Python detecte"
+            echo "Python/Briefcase detecte"
 
-          # --- 8. Godot ---
+          # --- 9. Godot ---
           elif [ -n "$(find_file "project.godot")" ]; then
             DETECTED="godot"
             echo "Godot detecte (project.godot trouve)"
 
-          # --- 9. Lua / Solar2D ---
+          # --- 10. Lua / Solar2D ---
           elif [ -n "$(find_file "build.settings")" ]; then
             DETECTED="lua"
             echo "Lua/Solar2D detecte (build.settings trouve)"
 
-          # --- 10. NativeScript ---
+          # --- 11. NativeScript ---
           elif [ -n "$(find_file "package.json")" ] && \
                grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
             DETECTED="nativescript"
             echo "NativeScript detecte (dependance nativescript dans package.json)"
 
-          # --- 11. Projets Web (React, Vue, Svelte, Preact, SolidJS, etc.) ---
+          # --- 12. Projets Web (React, Vue, Svelte, Preact, SolidJS, etc.) ---
           elif [ -n "$(find_file "package.json")" ]; then
             PKG_JSON="$(find_file "package.json")"
             if grep -q '"react"' "$PKG_JSON" 2>/dev/null && [ -z "$(find_file "metro.config.js")" ] && [ -z "$(find_file "metro.config.ts")" ]; then
@@ -266,7 +299,7 @@ jobs:
               echo "Projet web generique detecte (package.json sans framework connu)"
             fi
 
-          # --- 12. Statique (aucun fichier reconnu) ---
+          # --- 13. Statique (aucun fichier reconnu) ---
           elif [ -n "$(find_file "index.html")" ] || [ -n "$(find_file "*.html")" ]; then
             DETECTED="web"
             echo "Site statique detecte (HTML trouve)"
@@ -275,7 +308,7 @@ jobs:
           else
             DETECTED="unknown"
             BUILD_SHOULD_RUN="false"
-            ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue/preact), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), setup.py/pyproject.toml (Python), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources."
+            ERROR_MSG="Impossible de detecter le type de projet. Structure attendue : package.json (web/react/vue/preact), pubspec.yaml (Flutter), *.csproj (.NET), capacitor.config.* (Capacitor), build.gradle (Android natif), go.mod (Go), buildozer.spec (Python/Buildozer), setup.py/pyproject.toml (Python/Briefcase), project.godot (Godot), build.settings (Lua). Verifiez que votre zip contient les fichiers sources."
             echo "Aucun type de projet detecte"
           fi
 
@@ -302,6 +335,20 @@ jobs:
                 # (build-capacitor) sait traiter cette famille.
                 DETECTED="capacitor"
                 echo "Forcage Capacitor sur base du choix client ($CLIENT_TYPE)"
+                ;;
+              python)
+                # NE PAS ecraser aveuglement : le client dit "python" de
+                # facon generique, mais l'auto-detection a deja determine
+                # LEQUEL des deux outils (Briefcase ou Buildozer) est en
+                # jeu, en se basant sur la presence reelle de
+                # buildozer.spec ou pyproject.toml/setup.py/main.py. Les
+                # deux outils ont des jobs de build totalement differents
+                # (build-python vs build-python-buildozer) : ecraser ici
+                # romprait le routage. On ne garde le choix client que
+                # s'il correspond deja a une des deux variantes.
+                if [ "$DETECTED" != "python" ] && [ "$DETECTED" != "python-buildozer" ]; then
+                  echo "Client dit Python mais aucun fichier Python (Briefcase ou Buildozer) trouve - fallback sur detection"
+                fi
                 ;;
               *)
                 DETECTED="$CLIENT_TYPE"
@@ -502,7 +549,16 @@ jobs:
 
               if grep -q '"build"' package.json; then
                 echo "=== Build du projet ==="
-                npm run build
+                # CORRECTIF ECRAN BLANC : PUBLIC_URL=. force Create React
+                # App (et les projets qui respectent cette variable) a
+                # generer des chemins RELATIFS dans index.html et dans le
+                # webpack publicPath interne (donc aussi pour les chunks
+                # lazy-loaded). Sans ca, une WebView Cordova en file://
+                # ne retrouve pas des assets references en "/static/...".
+                # Les projets qui ignorent cette variable (Vite, Vue CLI
+                # sans config) sont rattrapes juste apres par le
+                # post-traitement de index.html.
+                PUBLIC_URL=. npm run build
               fi
             fi
           fi
@@ -532,6 +588,42 @@ jobs:
 
           echo "=== Copie vers Cordova www/ ==="
           cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
+
+          echo "=== Filet de securite : reecriture des chemins absolus ==="
+          # CORRECTIF ECRAN BLANC (suite) : meme avec PUBLIC_URL=. certains
+          # bundlers (Vite, Vue CLI sans "publicPath: './'" explicite)
+          # continuent de generer des href="/..." / src="/..." dans le
+          # HTML genere. On reecrit ces attributs en chemins relatifs pour
+          # TOUS les fichiers *.html trouves dans www/ (pas seulement
+          # index.html, au cas ou une app SPA en genere plusieurs).
+          # On laisse volontairement intacts :
+          #   - les URLs completes (http://, https://)
+          #   - les URLs protocol-relative (//cdn.example.com/...)
+          #   - les ancres et data URIs
+          python3 - "$CORDOVA_DIR/www" << 'PYEOF'
+          import re
+          import sys
+          from pathlib import Path
+
+          www_dir = Path(sys.argv[1])
+          # (href|src)="/xxx"  mais pas "//xxx" (protocol-relative) et pas
+          # une URL absolue deja qualifiee par un schema.
+          pattern = re.compile(r'(?P<attr>\b(?:href|src)\s*=\s*")/(?!/)')
+
+          changed_files = 0
+          for html_file in www_dir.rglob('*.html'):
+              try:
+                  text = html_file.read_text(encoding='utf-8')
+              except Exception:
+                  continue
+              new_text = pattern.sub(lambda m: m.group('attr'), text)
+              if new_text != text:
+                  html_file.write_text(new_text, encoding='utf-8')
+                  changed_files += 1
+                  print(f"Chemins absolus corriges dans : {html_file}")
+
+          print(f"=== {changed_files} fichier(s) HTML corrige(s) ===")
+          PYEOF
 
           echo "=== Ajout des preferences Android au config.xml genere ==="
           # FIX IMPORTANT : on n'ecrase plus le config.xml genere par
@@ -797,10 +889,22 @@ jobs:
             echo "Pas de capacitor.config.json (probablement .ts/.js) - patch ignore"
           fi
 
+      # ============================================================
+      # CORRECTIF : cette etape tournait auparavant SANS condition,
+      # meme quand la preparation du projet avait echoue plus haut
+      # (is_capacitor=false : pas de package.json trouve, init Capacitor
+      # ou "cap add android" en echec). Dans ce cas SAVED_PROJECT_ROOT
+      # n'est jamais defini par $GITHUB_ENV, et l'etape se retrouvait a
+      # executer "npx cap sync android" depuis un mauvais repertoire
+      # (le fallback "|| exit 0" masquait le probleme sans le signaler
+      # clairement). Desormais gardee par la meme condition que les
+      # etapes precedentes.
+      # ============================================================
       - name: Sync and build Capacitor Android
+        if: ${{ steps.build.outputs.is_capacitor == 'true' }}
         run: |
           set -e
-          cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
+          cd "$SAVED_PROJECT_ROOT"
 
           echo "=== Synchronisation Android ==="
           npx cap sync android || {
@@ -1154,7 +1258,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 7: BUILD PYTHON
+  # JOB 7: BUILD PYTHON (Briefcase)
   # ============================================================
   build-python:
     needs: prepare
@@ -1237,6 +1341,123 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-python-${{ github.event.inputs.build_id }}
+          path: output/*
+          retention-days: 1
+          if-no-files-found: warn
+
+  # ============================================================
+  # JOB 7B: BUILD PYTHON (Buildozer) — NOUVEAU
+  # ============================================================
+  # Buildozer est l'outil le plus repandu pour compiler du Kivy en APK
+  # (bien plus courant que Briefcase dans les tutoriels). Il gere lui-meme
+  # le telechargement de python-for-android, de l'NDK compatible et de
+  # toutes les dependances natives ; on s'appuie donc sur l'action
+  # communautaire ArtemSBulgakov/buildozer-action qui encapsule ce
+  # processus (mise en cache incluse) plutot que de le reimplementer a la
+  # main. Les premiers builds sont longs (telechargement du toolchain
+  # p4a) : le frontend en informe deja l'utilisateur pour Python.
+  # ============================================================
+  build-python-buildozer:
+    needs: prepare
+    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'python-buildozer' && needs.prepare.outputs.build_should_run == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download source
+        uses: actions/download-artifact@v4
+        with:
+          name: source-${{ github.event.inputs.build_id }}
+          path: src/
+
+      - name: Download keystore
+        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: keystore-${{ github.event.inputs.build_id }}
+
+      - name: Locate buildozer.spec directory
+        id: locate
+        run: |
+          set -e
+          cd src/
+          PROJECT_ROOT=$(find . -name "buildozer.spec" -type f \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" \
+            -exec dirname {} \; | head -1)
+
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+          echo "Projet trouve dans : src/$PROJECT_ROOT"
+          echo "project_root=src/$PROJECT_ROOT" >> "$GITHUB_OUTPUT"
+
+      - name: Force debug/release target in buildozer.spec
+        run: |
+          set -e
+          cd "${{ steps.locate.outputs.project_root }}"
+          # Buildozer ne differencie pas debug/release via une option de
+          # ligne de commande unique comme Briefcase ; assembleRelease se
+          # pilote via la commande "buildozer android release" plus bas.
+          # On s'assure juste ici que "android.accept_sdk_license" est
+          # active pour eviter un blocage interactif en CI.
+          if ! grep -q "^android.accept_sdk_license" buildozer.spec 2>/dev/null; then
+            echo "android.accept_sdk_license = True" >> buildozer.spec
+          fi
+
+      - name: Build with Buildozer (debug)
+        if: ${{ github.event.inputs.build_type != 'release' }}
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer-debug
+        with:
+          workdir: ${{ steps.locate.outputs.project_root }}
+          buildozer_version: stable
+          command: buildozer -v android debug
+
+      - name: Build with Buildozer (release, non signe)
+        if: ${{ github.event.inputs.build_type == 'release' }}
+        uses: ArtemSBulgakov/buildozer-action@v1
+        id: buildozer-release
+        with:
+          workdir: ${{ steps.locate.outputs.project_root }}
+          buildozer_version: stable
+          command: buildozer -v android release
+
+      - name: Sign APK with keystore (release)
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        run: |
+          set -e
+          # L'action buildozer ne configure pas de setup Java/Android SDK
+          # separe : elle embarque son propre conteneur avec p4a. On
+          # installe donc apksigner ici, a la volee, plutot que de
+          # dupliquer un setup-java/setup-android inutilise par ailleurs.
+          if ! command -v apksigner >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y apksigner || true
+          fi
+          APK_SIGNER=$(command -v apksigner || find / -name "apksigner" -type f 2>/dev/null | head -1)
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
+            for apk in $(find "$GITHUB_WORKSPACE/${{ steps.locate.outputs.project_root }}/bin" -name "*.apk" 2>/dev/null); do
+              "$APK_SIGNER" sign \
+                --ks "$KEYSTORE_FILE" \
+                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
+                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
+                "$apk"
+            done
+          else
+            echo "ATTENTION: apksigner ou keystore introuvable - l'APK release restera non signe"
+          fi
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output
+          find "$GITHUB_WORKSPACE/${{ steps.locate.outputs.project_root }}/bin" -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          echo "=== Fichiers dans output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "Aucun artefact trouve"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-python-buildozer-${{ github.event.inputs.build_id }}
           path: output/*
           retention-days: 1
           if-no-files-found: warn
@@ -1749,7 +1970,7 @@ jobs:
   # JOB 14: POST-BUILD - Upload to R2 & Notify
   # ============================================================
   post-build:
-    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
+    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-python-buildozer, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
     if: always()
     runs-on: ubuntu-latest
     outputs:
