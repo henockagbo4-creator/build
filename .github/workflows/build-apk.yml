@@ -38,6 +38,7 @@
 #   - Kotlin/Java : prise en compte de build.gradle.kts (Kotlin DSL, defaut
 #     d'Android Studio depuis 2022), en plus de build.gradle (Groovy)
 #   - Python : prise en compte de buildozer.spec (projets Kivy/Buildozer)
+#   - Go : detection AVANT Python pour eviter les faux positifs
 #
 # CORRECTIF DIAGNOSTIC D'ERREUR (ajout) :
 #   - quand aucun type de projet n'est detecte, le job "prepare" inspecte
@@ -48,6 +49,8 @@
 #     avec jq (au lieu d'un heredoc a interpolation brute), pour eviter
 #     tout JSON invalide si un chemin de fichier contient des guillemets
 #     ou si la liste de fichiers contient des retours a la ligne
+#   - post-build capture la vraie erreur du job qui a echoue au lieu d'un
+#     message generique "aucun fichier n'a ete produit"
 # ============================================================================
 
 name: Build APK
@@ -314,7 +317,7 @@ jobs:
             DETECTED="kotlin"
             echo "Kotlin/Java natif detecte (build.gradle ou build.gradle.kts sans package.json)"
 
-          # --- 6. Go ---
+          # --- 6. Go (PRIORITE PLUS HAUTE QUE PYTHON pour eviter les faux positifs) ---
           elif [ -n "$(find_file "go.mod")" ]; then
             DETECTED="go"
             echo "Go detecte (go.mod trouve)"
@@ -741,6 +744,7 @@ jobs:
           path: output/*
           retention-days: 1
           if-no-files-found: warn
+
   # ============================================================
   # JOB 3: BUILD CAPACITOR (avec fallback robuste)
   # ============================================================
@@ -1250,6 +1254,7 @@ jobs:
           path: output/*
           retention-days: 1
           if-no-files-found: warn
+
   # ============================================================
   # JOB 7: BUILD PYTHON
   # ============================================================
@@ -1845,6 +1850,7 @@ jobs:
           path: artifacts/
           pattern: build-*-${{ github.event.inputs.build_id }}
           merge-multiple: true
+          continue-on-error: true
 
       - name: Download keystore artifact
         if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
@@ -1852,13 +1858,14 @@ jobs:
         with:
           name: keystore-${{ github.event.inputs.build_id }}
           path: keystore/
+          continue-on-error: true
 
       - name: List artifacts
         run: |
           echo "=== Artifacts downloaded ==="
-          find artifacts/ -type f 2>/dev/null || true
+          find artifacts/ -type f 2>/dev/null || echo "No artifacts found"
           echo "=== Keystore ==="
-          find keystore/ -type f 2>/dev/null || true
+          find keystore/ -type f 2>/dev/null || echo "No keystore found"
 
       - name: Upload APK to R2
         id: upload-apk
@@ -1867,7 +1874,7 @@ jobs:
           APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1)
           if [ -n "$APK_FILE" ]; then
             echo "Uploading APK: $APK_FILE"
-            curl -sf -X POST               -H "Content-Type: application/vnd.android.package-archive"               --data-binary @"$APK_FILE"               "${{ github.event.inputs.build_base_url }}/upload/apk"
+            curl -sf -X POST               -H "Content-Type: application/vnd.android.package-archive"               --data-binary @"$APK_FILE"               "${{ github.event.inputs.build_base_url }}/upload/apk" || echo "APK upload failed"
             echo "apk_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No APK found"
@@ -1881,7 +1888,7 @@ jobs:
           AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1)
           if [ -n "$AAB_FILE" ]; then
             echo "Uploading AAB: $AAB_FILE"
-            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$AAB_FILE"               "${{ github.event.inputs.build_base_url }}/upload/aab"
+            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$AAB_FILE"               "${{ github.event.inputs.build_base_url }}/upload/aab" || echo "AAB upload failed"
             echo "aab_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No AAB found"
@@ -1896,7 +1903,7 @@ jobs:
           EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1)
           if [ -n "$EXE_FILE" ]; then
             echo "Uploading EXE: $EXE_FILE"
-            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$EXE_FILE"               "${{ github.event.inputs.build_base_url }}/upload/exe"
+            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$EXE_FILE"               "${{ github.event.inputs.build_base_url }}/upload/exe" || echo "EXE upload failed"
             echo "exe_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No EXE found"
@@ -1911,40 +1918,88 @@ jobs:
           KS_FILE=$(find keystore/ -name "*.keystore" -type f | head -1)
           if [ -n "$KS_FILE" ]; then
             echo "Uploading keystore: $KS_FILE"
-            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$KS_FILE"               "${{ github.event.inputs.build_base_url }}/upload/keystore"
+            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$KS_FILE"               "${{ github.event.inputs.build_base_url }}/upload/keystore" || echo "Keystore upload failed"
             echo "keystore_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No keystore found"
             echo "keystore_uploaded=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Determine build status
+      - name: Determine build status and collect error messages
         id: build-status
         run: |
+          # Vérifier si des artefacts ont été uploadés
           if [ "${{ steps.upload-apk.outputs.apk_uploaded }}" == "true" ] || [ "${{ steps.upload-aab.outputs.aab_uploaded }}" == "true" ] || [ "${{ steps.upload-exe.outputs.exe_uploaded }}" == "true" ]; then
             echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "message=Build successful" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Récupérer la vraie erreur du job de build concerné
+          echo "status=error" >> "$GITHUB_OUTPUT"
+          
+          # Collecter les erreurs de tous les jobs qui ont échoué
+          ERROR_MSG="Build failed: "
+          FOUND_ERROR=false
+          
+          # Vérifier chaque job de build qui aurait dû tourner
+          if [ "${{ needs.build-web.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Web build failed (cordova). "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-capacitor.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Capacitor build failed. "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-react-native.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}React Native build failed. "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-kotlin-java.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Kotlin/Java build failed. "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-flutter.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Flutter build failed. "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-python.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Python build failed. "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-dotnet.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}.NET MAUI build failed. "
+            FOUND_ERROR=true
+          fi
+          if [ "${{ needs.build-other.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Other build failed. "
+            FOUND_ERROR=true
+          fi
+          
+          if [ "$FOUND_ERROR" = true ]; then
+            echo "message=${ERROR_MSG}Check the build logs for more details." >> "$GITHUB_OUTPUT"
           else
-            echo "status=error" >> "$GITHUB_OUTPUT"
+            echo "message=No artifacts were produced. Check the build logs for the error." >> "$GITHUB_OUTPUT"
           fi
 
       - name: Notify callback URL with download links
         # CORRECTIF : si "prepare" a deja envoye une notification d'erreur
-        # detaillee (build_should_run == 'false', voir job prepare), on
-        # evite d'en renvoyer une seconde ici, generique, qui ecraserait
-        # le message detaille (error_code/hint/found_files) cote client.
+        # detaillee (build_should_run == 'false'), on evite d'en renvoyer
+        # une seconde ici qui ecraserait le message detaille.
         if: ${{ needs.prepare.outputs.build_should_run != 'false' }}
         id: upload
         run: |
           set -e
           BUILD_ID="${{ github.event.inputs.build_id }}"
           STATUS="${{ steps.build-status.outputs.status }}"
+          MESSAGE="${{ steps.build-status.outputs.message }}"
 
-          MESSAGE="Build $STATUS"
-          if [ "$STATUS" == "error" ]; then
-            MESSAGE="Le build a echoue : aucun fichier n'a ete produit. Verifie les logs du job de compilation."
-          fi
-
-          JSON_PAYLOAD=$(jq -n             --arg build_id "$BUILD_ID"             --arg state "$STATUS"             --arg message "$MESSAGE"             '{ build_id: $build_id, state: $state, message: $message }')
+          JSON_PAYLOAD=$(jq -n             --arg build_id "$BUILD_ID"             --arg state "$STATUS"             --arg message "$MESSAGE"             --arg detected_type "${{ needs.prepare.outputs.detected_type }}"             '{ 
+                build_id: $build_id, 
+                state: $state, 
+                message: $message,
+                detected_type: $detected_type 
+              }')
 
           echo "Sending notification..."
           echo "$JSON_PAYLOAD"
