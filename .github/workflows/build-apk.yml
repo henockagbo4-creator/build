@@ -207,8 +207,7 @@ jobs:
 
           # Suppression des lignes magiques Colab/Jupyter (%%writefile, %%bash...)
           # en tete de fichier .py, qui rendent le fichier invalide pour l'outil cible
-          find . -type f -iname "*.py" \
-            -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+          find . -type f -iname "*.py"             -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
             if head -1 "$f" 2>/dev/null | grep -q '^%%'; then
               echo "Suppression de la ligne magique Colab en tete de: $f"
               sed -i '1{/^%%/d}' "$f"
@@ -216,8 +215,7 @@ jobs:
           done
 
           # main.py.py -> main.py / app.py.py -> app.py
-          find . -type f \( -iname "main.py.py" -o -iname "app.py.py" \) \
-            -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+          find . -type f \( -iname "main.py.py" -o -iname "app.py.py" \)             -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
             BASE=$(basename "$f" .py.py)
             TARGET="$(dirname "$f")/${BASE}.py"
             echo "Renommage (extension dupliquee): $f -> $TARGET"
@@ -226,8 +224,7 @@ jobs:
 
           # buildozer.spec.py -> buildozer.spec (autres marqueurs avec .py en trop)
           for MARKER in buildozer.spec pubspec.yaml package.json capacitor.config.json go.mod; do
-            find . -type f -iname "${MARKER}.py" \
-              -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
+            find . -type f -iname "${MARKER}.py"               -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
               TARGET="$(dirname "$f")/${MARKER}"
               echo "Renommage (extension dupliquee): $f -> $TARGET"
               mv "$f" "$TARGET"
@@ -254,14 +251,7 @@ jobs:
           # "package.json", ce qui faisait echouer toute la detection pour
           # les zips clients dont les fichiers etaient mal casses.
           find_file() {
-            find . -iname "$1" -type f \
-              -not -path "*/node_modules/*" \
-              -not -path "*/.git/*" \
-              -not -path "*/build/*" \
-              -not -path "*/dist/*" \
-              -not -path "*/bin/*" \
-              -not -path "*/obj/*" \
-              2>/dev/null | head -1
+            find . -iname "$1" -type f               -not -path "*/node_modules/*"               -not -path "*/.git/*"               -not -path "*/build/*"               -not -path "*/dist/*"               -not -path "*/bin/*"               -not -path "*/obj/*"               2>/dev/null | head -1
           }
 
           DETECTED="unknown"
@@ -284,13 +274,7 @@ jobs:
             echo "React Native detecte (metro.config trouve)"
 
           # --- 4. Capacitor / Ionic (DOIT avoir config OU dependance explicite) ---
-          elif [ -n "$(find_file "capacitor.config.ts")" ] || \
-               [ -n "$(find_file "capacitor.config.json")" ] || \
-               [ -n "$(find_file "capacitor.config.js")" ] || \
-               ( [ -n "$(find_file "package.json")" ] && \
-                 ( grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null || \
-                   grep -q "@capacitor/android" "$(find_file "package.json")" 2>/dev/null || \
-                   grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null ) ); then
+          elif [ -n "$(find_file "capacitor.config.ts")" ] ||                [ -n "$(find_file "capacitor.config.json")" ] ||                [ -n "$(find_file "capacitor.config.js")" ] ||                ( [ -n "$(find_file "package.json")" ] &&                  ( grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null ||                    grep -q "@capacitor/android" "$(find_file "package.json")" 2>/dev/null ||                    grep -q "@ionic/core" "$(find_file "package.json")" 2>/dev/null ) ); then
             DETECTED="capacitor"
             echo "Capacitor/Ionic detecte (config ou dependance explicite)"
 
@@ -338,9 +322,7 @@ jobs:
           # --- 7. Python ---
           # CORRECTIF : ajout de buildozer.spec (projets Kivy/Buildozer dont
           # le script principal ne s'appelle ni main.py ni app.py).
-          elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || \
-               [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ] || \
-               [ -n "$(find_file "buildozer.spec")" ]; then
+          elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] ||                [ -n "$(find_file "main.py")" ] || [ -n "$(find_file "app.py")" ] ||                [ -n "$(find_file "buildozer.spec")" ]; then
             DETECTED="python"
             echo "Python detecte"
 
@@ -355,8 +337,7 @@ jobs:
             echo "Lua/Solar2D detecte (build.settings trouve)"
 
           # --- 10. NativeScript ---
-          elif [ -n "$(find_file "package.json")" ] && \
-               grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
+          elif [ -n "$(find_file "package.json")" ] &&                grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
             DETECTED="nativescript"
             echo "NativeScript detecte (dependance nativescript dans package.json)"
 
@@ -390,9 +371,7 @@ jobs:
             DETECTED="unknown"
             BUILD_SHOULD_RUN="false"
 
-            FOUND_FILES=$(find . -maxdepth 3 -type f \
-              -not -path "*/node_modules/*" -not -path "*/.git/*" \
-              -not -path "*/__MACOSX/*" | sed 's|^\./||' | head -20)
+            FOUND_FILES=$(find . -maxdepth 3 -type f               -not -path "*/node_modules/*" -not -path "*/.git/*"               -not -path "*/__MACOSX/*" | sed 's|^\./||' | head -20)
 
             ERROR_CODE="no_marker_found"
             HINT=""
@@ -469,10 +448,7 @@ jobs:
           set -e
           cd src/${{ steps.detect.outputs.source_dir }}
 
-          PROJECT_ROOT=$(find . -name "package.json" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "package.json" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
@@ -480,18 +456,7 @@ jobs:
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
             echo "Config Capacitor manquante - initialisation automatique..."
             npm install -g @capacitor/cli
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "dist" 2>/dev/null || \
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "build" 2>/dev/null || \
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "www" 2>/dev/null || \
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "." 2>/dev/null || true
+            npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "dist" 2>/dev/null ||             npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "build" 2>/dev/null ||             npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "www" 2>/dev/null ||             npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "." 2>/dev/null || true
             echo "Config Capacitor generee automatiquement"
           else
             echo "Config Capacitor existante"
@@ -512,14 +477,7 @@ jobs:
         run: |
           set -e
           KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
-          keytool -genkeypair -v \
-            -keystore "$KEYSTORE_NAME" \
-            -alias "${{ github.event.inputs.keystore_alias }}" \
-            -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \
-            -storetype PKCS12 \
-            -storepass "${{ github.event.inputs.keystore_password }}" \
-            -keypass "${{ github.event.inputs.keystore_password }}" \
-            -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI"
+          keytool -genkeypair -v             -keystore "$KEYSTORE_NAME"             -alias "${{ github.event.inputs.keystore_alias }}"             -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950             -storetype PKCS12             -storepass "${{ github.event.inputs.keystore_password }}"             -keypass "${{ github.event.inputs.keystore_password }}"             -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI"
 
           cat > keystore-info.txt << EOF
           Keystore genere pour le build ${{ github.event.inputs.build_id }}
@@ -570,13 +528,7 @@ jobs:
         if: ${{ steps.detect-project.outputs.build_should_run == 'false' }}
         run: |
           set -e
-          JSON_PAYLOAD=$(jq -n \
-            --arg build_id "${{ github.event.inputs.build_id }}" \
-            --arg message "${{ steps.detect-project.outputs.error_message }}" \
-            --arg error_code "${{ steps.detect-project.outputs.error_code }}" \
-            --arg hint "${{ steps.detect-project.outputs.error_hint }}" \
-            --arg found_files "${{ steps.detect-project.outputs.found_files }}" \
-            '{
+          JSON_PAYLOAD=$(jq -n             --arg build_id "${{ github.event.inputs.build_id }}"             --arg message "${{ steps.detect-project.outputs.error_message }}"             --arg error_code "${{ steps.detect-project.outputs.error_code }}"             --arg hint "${{ steps.detect-project.outputs.error_hint }}"             --arg found_files "${{ steps.detect-project.outputs.found_files }}"             '{
               build_id: $build_id,
               state: "error",
               detected_type: "unknown",
@@ -591,9 +543,7 @@ jobs:
 
           for i in 1 2 3; do
             echo "Tentative $i de notification d'erreur..."
-            curl -sf -X POST -H "Content-Type: application/json" \
-              -d "$JSON_PAYLOAD" \
-              "${{ github.event.inputs.callback_url }}" && break || sleep 5
+            curl -sf -X POST -H "Content-Type: application/json"               -d "$JSON_PAYLOAD"               "${{ github.event.inputs.callback_url }}" && break || sleep 5
           done
           echo "Build annule - type de projet non detecte"
           exit 1
@@ -603,7 +553,9 @@ jobs:
   # ============================================================
   build-web:
     needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
+    # CORRECTION : ajout de "svelte" pour que les projets Svelte sans
+    # Capacitor soient bien routes vers Cordova au lieu de ne matcher aucun job.
+    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue","svelte"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - name: Download source
@@ -640,12 +592,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "package.json" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/build/*" \
-            -not -path "*/dist/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "package.json" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/build/*"             -not -path "*/dist/*"             -exec dirname {} \; | head -1)
 
           IS_STATIC=false
           if [ -z "$PROJECT_ROOT" ]; then
@@ -705,7 +652,6 @@ jobs:
           sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="AndroidPersistentFileLocation" value="Compatibility" />\n  <preference name="SplashScreenDelay" value="0" />\n  <preference name="AutoHideSplashScreen" value="true" />\n  <preference name="ShowSplashScreenSpinner" value="false" />\n  <preference name="FadeSplashScreen" value="false" />\n</widget>#' "$CORDOVA_DIR"/config.xml
 
           echo "SAVED_CORDOVA_DIR=$PWD/$CORDOVA_DIR" >> "$GITHUB_ENV"
-          echo "SAVED_KEYSTORE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
       # ============================================================
       # ORDRE IMPORTANT : la plateforme Android doit exister AVANT de
@@ -767,20 +713,10 @@ jobs:
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             echo "=== Build RELEASE ==="
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              cordova build android --release -- \
-                --packageType=apk \
-                --keystore="$KEYSTORE_FILE" \
-                --storePassword="${{ github.event.inputs.keystore_password }}" \
-                --alias="${{ github.event.inputs.keystore_alias }}" \
-                --password="${{ github.event.inputs.keystore_password }}"
+              cordova build android --release --                 --packageType=apk                 --keystore="$KEYSTORE_FILE"                 --storePassword="${{ github.event.inputs.keystore_password }}"                 --alias="${{ github.event.inputs.keystore_alias }}"                 --password="${{ github.event.inputs.keystore_password }}"
             fi
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              cordova build android --release -- \
-                --packageType=bundle \
-                --keystore="$KEYSTORE_FILE" \
-                --storePassword="${{ github.event.inputs.keystore_password }}" \
-                --alias="${{ github.event.inputs.keystore_alias }}" \
-                --password="${{ github.event.inputs.keystore_password }}"
+              cordova build android --release --                 --packageType=bundle                 --keystore="$KEYSTORE_FILE"                 --storePassword="${{ github.event.inputs.keystore_password }}"                 --alias="${{ github.event.inputs.keystore_alias }}"                 --password="${{ github.event.inputs.keystore_password }}"
             fi
           else
             echo "=== Build DEBUG ==="
@@ -805,7 +741,6 @@ jobs:
           path: output/*
           retention-days: 1
           if-no-files-found: warn
-
   # ============================================================
   # JOB 3: BUILD CAPACITOR (avec fallback robuste)
   # ============================================================
@@ -854,12 +789,7 @@ jobs:
           echo "=== Recherche du projet ==="
           cd src/
 
-          PROJECT_ROOT=$(find . -name "package.json" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/build/*" \
-            -not -path "*/dist/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "package.json" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/build/*"             -not -path "*/dist/*"             -exec dirname {} \; | head -1)
 
           if [ -z "$PROJECT_ROOT" ]; then
             echo "Pas de package.json trouve"
@@ -873,18 +803,7 @@ jobs:
 
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
             echo "Pas de capacitor.config.* trouve - tentative d'init"
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "dist" 2>/dev/null || \
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "build" 2>/dev/null || \
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "www" 2>/dev/null || \
-            npx cap init "${{ github.event.inputs.app_name }}" \
-              "${{ github.event.inputs.package_id || 'com.philtech.app' }}" \
-              --web-dir "." 2>/dev/null || {
+            npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "dist" 2>/dev/null ||             npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "build" 2>/dev/null ||             npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "www" 2>/dev/null ||             npx cap init "${{ github.event.inputs.app_name }}"               "${{ github.event.inputs.package_id || 'com.philtech.app' }}"               --web-dir "." 2>/dev/null || {
               echo "ERREUR: Impossible d'initialiser Capacitor"
               echo "is_capacitor=false" >> "$GITHUB_OUTPUT"
               exit 0
@@ -930,8 +849,7 @@ jobs:
           # simplement la generation du splash au lieu d'echouer.
           echo "=== Generation de l'icone Android (@capacitor/assets) ==="
           npm install -g @capacitor/assets
-          npx capacitor-assets generate --android \
-            --iconBackgroundColor '#ffffff'
+          npx capacitor-assets generate --android             --iconBackgroundColor '#ffffff'
 
       # ============================================================
       # Splash desactive systematiquement : on ne genere plus de splash
@@ -973,6 +891,7 @@ jobs:
             chmod +x gradlew
 
             KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+            FORMAT="${{ github.event.inputs.output_format }}"
 
             if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
               echo "=== Build RELEASE ==="
@@ -1000,7 +919,15 @@ jobs:
                 echo "apply from: 'signing.gradle'" >> app/build.gradle
               fi
 
-              ./gradlew assembleRelease
+              # CORRECTIF : respecter output_format (apk/aab/both) au lieu
+              # de ne generer que l'APK. assembleRelease -> APK,
+              # bundleRelease -> AAB (App Bundle).
+              if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+                ./gradlew assembleRelease
+              fi
+              if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+                ./gradlew bundleRelease
+              fi
             else
               echo "=== Build DEBUG ==="
               ./gradlew assembleDebug
@@ -1062,10 +989,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "package.json" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "package.json" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1081,6 +1005,7 @@ jobs:
           chmod +x gradlew
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          FORMAT="${{ github.event.inputs.output_format }}"
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             mkdir -p app
@@ -1104,7 +1029,13 @@ jobs:
             if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
               echo "apply from: 'signing.gradle'" >> app/build.gradle
             fi
-            ./gradlew assembleRelease
+            # CORRECTIF : respecter output_format (apk/aab/both)
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew assembleRelease
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew bundleRelease
+            fi
           else
             ./gradlew assembleDebug
           fi
@@ -1162,10 +1093,7 @@ jobs:
           # CORRECTIF : cherche aussi build.gradle.kts (Kotlin DSL) et pas
           # seulement build.gradle (Groovy), pour rester coherent avec la
           # detection du job prepare.
-          PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1175,6 +1103,7 @@ jobs:
           chmod +x gradlew
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          FORMAT="${{ github.event.inputs.output_format }}"
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             if ! grep -q "signingConfigs" app/build.gradle 2>/dev/null && ! grep -q "signingConfigs" app/build.gradle.kts 2>/dev/null; then
@@ -1202,7 +1131,13 @@ jobs:
                 echo "apply(from = \"signing.gradle\")" >> app/build.gradle.kts
               fi
             fi
-            ./gradlew assembleRelease
+            # CORRECTIF : respecter output_format (apk/aab/both)
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew assembleRelease
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew bundleRelease
+            fi
           else
             ./gradlew assembleDebug
           fi
@@ -1265,11 +1200,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/build/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/build/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1319,7 +1250,6 @@ jobs:
           path: output/*
           retention-days: 1
           if-no-files-found: warn
-
   # ============================================================
   # JOB 7: BUILD PYTHON
   # ============================================================
@@ -1362,11 +1292,7 @@ jobs:
           # CORRECTIF : ajout de buildozer.spec dans la recherche du
           # dossier racine du projet, pour rester coherent avec la
           # detection du job prepare.
-          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" -o -name "buildozer.spec" \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/__pycache__/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" -o -name "buildozer.spec"             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/__pycache__/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1376,7 +1302,10 @@ jobs:
           pip install briefcase
           briefcase create android
           briefcase build android
-          briefcase package android -p apk --adhoc-sign
+          # CORRECTION : suppression de l'option -p apk invalide avec
+          # --adhoc-sign. Briefcase n'accepte pas ces deux options
+          # combinees. --adhoc-sign suffit pour generer un APK non signe.
+          briefcase package android --adhoc-sign
 
       - name: Sign APK with keystore
         if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
@@ -1387,12 +1316,7 @@ jobs:
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
             for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do
-              "$APK_SIGNER" sign \
-                --ks "$KEYSTORE_FILE" \
-                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
-                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
-                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
-                "$apk"
+              "$APK_SIGNER" sign                 --ks "$KEYSTORE_FILE"                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}"                 --key-pass pass:"${{ github.event.inputs.keystore_password }}"                 --ks-key-alias "${{ github.event.inputs.keystore_alias }}"                 "$apk"
             done
           fi
 
@@ -1453,12 +1377,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "*.csproj" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/bin/*" \
-            -not -path "*/obj/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "*.csproj" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/bin/*"             -not -path "*/obj/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1488,12 +1407,7 @@ jobs:
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
             for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk"); do
-              "$APK_SIGNER" sign \
-                --ks "$KEYSTORE_FILE" \
-                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
-                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
-                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
-                "$apk"
+              "$APK_SIGNER" sign                 --ks "$KEYSTORE_FILE"                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}"                 --key-pass pass:"${{ github.event.inputs.keystore_password }}"                 --ks-key-alias "${{ github.event.inputs.keystore_alias }}"                 "$apk"
             done
           fi
 
@@ -1553,11 +1467,19 @@ jobs:
         run: |
           set -e
           GODOT_VERSION="4.2.2"
-          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
+          # CORRECTION : ajout de verification d'erreur apres wget pour
+          # eviter un echec silencieux si le serveur est indisponible.
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" || {
+            echo "ERREUR: telechargement Godot engine impossible"
+            exit 1
+          }
           unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
           mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
           chmod +x /usr/local/bin/godot
-          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" || {
+            echo "ERREUR: telechargement templates Godot impossible"
+            exit 1
+          }
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
           unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
@@ -1653,19 +1575,11 @@ jobs:
 
           if [ -n "$APK_SIGNER" ] && [ -n "$KEYSTORE_FILE" ]; then
             for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do
-              $APK_SIGNER sign \
-                --ks "$KEYSTORE_FILE" \
-                --ks-pass pass:"${{ github.event.inputs.keystore_password }}" \
-                --key-pass pass:"${{ github.event.inputs.keystore_password }}" \
-                --ks-key-alias "${{ github.event.inputs.keystore_alias }}" \
-                "$apk"
+              $APK_SIGNER sign                 --ks "$KEYSTORE_FILE"                 --ks-pass pass:"${{ github.event.inputs.keystore_password }}"                 --key-pass pass:"${{ github.event.inputs.keystore_password }}"                 --ks-key-alias "${{ github.event.inputs.keystore_alias }}"                 "$apk"
             done
           else
             for apk in $(find $GITHUB_WORKSPACE/src/ -name "*.apk" -not -path "*/output/*"); do
-              jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256 \
-                -keystore "$KEYSTORE_FILE" \
-                -storepass "${{ github.event.inputs.keystore_password }}" \
-                "$apk" "${{ github.event.inputs.keystore_alias }}"
+              jarsigner -verbose -sigalg SHA256withRSA -digestalg SHA-256                 -keystore "$KEYSTORE_FILE"                 -storepass "${{ github.event.inputs.keystore_password }}"                 "$apk" "${{ github.event.inputs.keystore_alias }}"
             done
           fi
 
@@ -1710,11 +1624,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/build/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/build/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1773,12 +1683,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "*.csproj" -type f \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/bin/*" \
-            -not -path "*/obj/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "*.csproj" -type f             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/bin/*"             -not -path "*/obj/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1836,11 +1741,7 @@ jobs:
           set -e
           cd src/
 
-          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" \
-            -not -path "*/node_modules/*" \
-            -not -path "*/.git/*" \
-            -not -path "*/__pycache__/*" \
-            -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml"             -not -path "*/node_modules/*"             -not -path "*/.git/*"             -not -path "*/__pycache__/*"             -exec dirname {} \; | head -1)
 
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
 
@@ -1953,10 +1854,7 @@ jobs:
           APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1)
           if [ -n "$APK_FILE" ]; then
             echo "Uploading APK: $APK_FILE"
-            curl -sf -X POST \
-              -H "Content-Type: application/vnd.android.package-archive" \
-              --data-binary @"$APK_FILE" \
-              "${{ github.event.inputs.build_base_url }}/upload/apk"
+            curl -sf -X POST               -H "Content-Type: application/vnd.android.package-archive"               --data-binary @"$APK_FILE"               "${{ github.event.inputs.build_base_url }}/upload/apk"
             echo "apk_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No APK found"
@@ -1970,10 +1868,7 @@ jobs:
           AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1)
           if [ -n "$AAB_FILE" ]; then
             echo "Uploading AAB: $AAB_FILE"
-            curl -sf -X POST \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$AAB_FILE" \
-              "${{ github.event.inputs.build_base_url }}/upload/aab"
+            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$AAB_FILE"               "${{ github.event.inputs.build_base_url }}/upload/aab"
             echo "aab_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No AAB found"
@@ -1988,10 +1883,7 @@ jobs:
           EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1)
           if [ -n "$EXE_FILE" ]; then
             echo "Uploading EXE: $EXE_FILE"
-            curl -sf -X POST \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$EXE_FILE" \
-              "${{ github.event.inputs.build_base_url }}/upload/exe"
+            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$EXE_FILE"               "${{ github.event.inputs.build_base_url }}/upload/exe"
             echo "exe_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No EXE found"
@@ -2006,10 +1898,7 @@ jobs:
           KS_FILE=$(find keystore/ -name "*.keystore" -type f | head -1)
           if [ -n "$KS_FILE" ]; then
             echo "Uploading keystore: $KS_FILE"
-            curl -sf -X POST \
-              -H "Content-Type: application/octet-stream" \
-              --data-binary @"$KS_FILE" \
-              "${{ github.event.inputs.build_base_url }}/upload/keystore"
+            curl -sf -X POST               -H "Content-Type: application/octet-stream"               --data-binary @"$KS_FILE"               "${{ github.event.inputs.build_base_url }}/upload/keystore"
             echo "keystore_uploaded=true" >> "$GITHUB_OUTPUT"
           else
             echo "No keystore found"
@@ -2026,6 +1915,11 @@ jobs:
           fi
 
       - name: Notify callback URL with download links
+        # CORRECTIF : si "prepare" a deja envoye une notification d'erreur
+        # detaillee (build_should_run == 'false', voir job prepare), on
+        # evite d'en renvoyer une seconde ici, generique, qui ecraserait
+        # le message detaille (error_code/hint/found_files) cote client.
+        if: ${{ needs.prepare.outputs.build_should_run != 'false' }}
         id: upload
         run: |
           set -e
@@ -2037,17 +1931,11 @@ jobs:
             MESSAGE="Le build a echoue : aucun fichier n'a ete produit. Verifie les logs du job de compilation."
           fi
 
-          JSON_PAYLOAD=$(jq -n \
-            --arg build_id "$BUILD_ID" \
-            --arg state "$STATUS" \
-            --arg message "$MESSAGE" \
-            '{ build_id: $build_id, state: $state, message: $message }')
+          JSON_PAYLOAD=$(jq -n             --arg build_id "$BUILD_ID"             --arg state "$STATUS"             --arg message "$MESSAGE"             '{ build_id: $build_id, state: $state, message: $message }')
 
           echo "Sending notification..."
           echo "$JSON_PAYLOAD"
 
-          curl -sf -X POST -H "Content-Type: application/json" \
-            -d "$JSON_PAYLOAD" \
-            "${{ github.event.inputs.callback_url }}" || echo "Callback notification failed"
+          curl -sf -X POST -H "Content-Type: application/json"             -d "$JSON_PAYLOAD"             "${{ github.event.inputs.callback_url }}" || echo "Callback notification failed"
 
           echo "status=$STATUS" >> "$GITHUB_OUTPUT"
