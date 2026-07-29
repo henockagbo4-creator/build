@@ -1509,6 +1509,15 @@ jobs:
           go install golang.org/x/mobile/cmd/gomobile@latest
           go install golang.org/x/mobile/cmd/gobind@latest
           sdkmanager "ndk;25.2.9519653" 2>/dev/null || true
+          # CORRECTIF : "export" ne survit pas au-dela de cette etape sur
+          # GitHub Actions (chaque step tourne dans un nouveau shell).
+          # Il faut passer par $GITHUB_ENV pour que l'etape "Build project"
+          # (qui appelle gomobile build) recoive bien cette variable au
+          # lieu de retomber sur le NDK par defaut installe par
+          # android-actions/setup-android (NDK 27+, qui ne supporte plus
+          # les API < 21 et fait donc echouer gomobile avec son API cible
+          # par defaut de 16).
+          echo "ANDROID_NDK_HOME=$ANDROID_SDK_ROOT/ndk/25.2.9519653" >> "$GITHUB_ENV"
           export ANDROID_NDK_HOME="$ANDROID_SDK_ROOT/ndk/25.2.9519653"
           gomobile init
 
@@ -1522,7 +1531,11 @@ jobs:
               PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
               [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
               cd "$PROJECT_ROOT"
-              gomobile build -target=android -o app.apk .
+              # CORRECTIF : sans -androidapi, gomobile cible l'API 16 par
+              # defaut, ce que les NDK recents (r23+) ne supportent plus
+              # (minimum 19, 21 pour les plus recents). On fixe une API
+              # compatible avec le NDK 25.2.9519653 installe ci-dessus.
+              gomobile build -target=android -androidapi 21 -o app.apk .
               ;;
             godot)
               PROJECT_ROOT=$(find . -name "project.godot" -type f -exec dirname {} \; | head -1)
