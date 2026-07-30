@@ -410,7 +410,7 @@ jobs:
           fi
 
           PKG_ID="${{ github.event.inputs.package_id }}"
-          [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
+          [ -z "$PKG_ID" ] && PKG_ID="com.philtech.mobile"
 
           CORDOVA_DIR="cordova-project-${{ github.event.inputs.build_id }}"
           cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
@@ -1699,8 +1699,15 @@ jobs:
               npm install --save-dev "@nativescript/webpack@5.0.0"
               cat > webpack.config.js << 'EOF'
           const webpack = require("@nativescript/webpack");
+          const pkg = require("./package.json");
           module.exports = (env) => {
             webpack.init(env);
+            // A Svelte Native project otherwise falls back to the generic JS
+            // preset, which tries to bundle its web server (sirv/totalist).
+            const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+            if (deps.svelte || deps["svelte-native"] || deps["@nativescript/svelte"]) {
+              webpack.useConfig("svelte");
+            }
             webpack.mergeWebpack({
               stats: { all: false, errors: true, errorDetails: true, warnings: false }
             });
