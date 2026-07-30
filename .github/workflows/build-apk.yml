@@ -1677,6 +1677,29 @@ jobs:
           cd "$PROJECT_ROOT"
 
           npm ci --prefer-offline || npm install
+
+          # NativeScript 6+ builds through Webpack. Older/incomplete source
+          # archives often omit this generated file; recreate it before the
+          # Android platform is prepared.
+          if [ ! -f "webpack.config.js" ]; then
+            if [ -x "node_modules/.bin/update-ns-webpack" ]; then
+              npx update-ns-webpack --configs --deps
+            else
+              npm install --save-dev @nativescript/webpack
+              cat > webpack.config.js << 'EOF'
+          const webpack = require("@nativescript/webpack");
+          module.exports = (env) => {
+            webpack.init(env);
+            return webpack.resolveConfig();
+          };
+          EOF
+            fi
+          fi
+          if [ ! -f "webpack.config.js" ]; then
+            echo "ERREUR: webpack.config.js n'a pas pu etre genere."
+            exit 1
+          fi
+
           if [ ! -d "android" ]; then
             npx nativescript platform add android || ns platform add android || true
           fi
