@@ -1707,14 +1707,14 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            if ! npx nativescript build android --release --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}" 2>ns_error.log; then
+            if ! npx nativescript build android --release --env.commonjs --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}" 2>ns_error.log; then
               ERROR_MSG=$(cat ns_error.log | head -20)
               echo "error_message=ERREUR NativeScript: $ERROR_MSG" >> "$GITHUB_OUTPUT"
               cat ns_error.log
               exit 1
             fi
           else
-            if ! npx nativescript build android --debug 2>ns_error.log; then
+            if ! npx nativescript build android --debug --env.commonjs 2>ns_error.log; then
               ERROR_MSG=$(cat ns_error.log | head -20)
               echo "error_message=ERREUR NativeScript: $ERROR_MSG" >> "$GITHUB_OUTPUT"
               cat ns_error.log
