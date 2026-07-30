@@ -834,10 +834,36 @@ jobs:
           echo "GRADLE_PROJECT_ROOT=$PWD/$PROJECT_ROOT" >> "$GITHUB_ENV"
           cd "$PROJECT_ROOT"
 
-          for ROOT_FILE in build.gradle build.gradle.kts; do
-            if [ -f "$ROOT_FILE" ] && grep -q "com.android.tools.build:gradle" "$ROOT_FILE" 2>/dev/null; then
-              echo "Conflit buildscript/plugins detecte dans $ROOT_FILE - nettoyage automatique..."
-              python3 - "$ROOT_FILE" << 'PYEOF'
+          # Liste partagee de tous les fichiers Gradle du projet (racine ET
+          # tous les sous-modules, ex: app/), racine/settings en priorite.
+          PRIORITY_FILES=""
+          for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
+            [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
+          done
+          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sed 's|^\./||' | sort)
+          ALL_GRADLE_FILES="$PRIORITY_FILES"
+          for f in $OTHER_FILES; do
+            case " $PRIORITY_FILES " in
+              *" $f "*) ;;
+              *) ALL_GRADLE_FILES="$ALL_GRADLE_FILES $f" ;;
+            esac
+          done
+
+          # ------------------------------------------------------------
+          # FIX 1 : retire tout bloc buildscript{} legacy contenant
+          # "com.android.tools.build:gradle", dans TOUS les fichiers
+          # build.gradle(.kts) du projet - racine ET sous-modules (ex:
+          # app/build.gradle.kts). Un vieux tutoriel peut placer ce bloc
+          # n'importe ou, pas seulement a la racine.
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            if [ -f "$GRADLE_FILE" ] && grep -q "com.android.tools.build:gradle" "$GRADLE_FILE" 2>/dev/null; then
+              echo "Conflit buildscript/plugins detecte dans $GRADLE_FILE - nettoyage automatique..."
+              python3 - "$GRADLE_FILE" << 'PYEOF'
           import sys
           path = sys.argv[1]
           with open(path) as f:
@@ -867,32 +893,17 @@ jobs:
           done
 
           # ============================================================
-          # AUTO-FIX 2 : version de plugin declaree en double (une fois a
-          # la racine / settings.gradle, une autre fois avec un numero de
-          # version explicite dans un sous-module comme app/). C'est la
-          # cause exacte de "Error resolving plugin [...] the plugin is
-          # already on the classpath with an unknown version" quand
-          # l'auto-fix du buildscript legacy ne s'applique pas (le
-          # conflit vient ici de deux blocs plugins{} modernes, pas d'un
-          # buildscript{} legacy). On ne garde le numero de version que
-          # sur la toute premiere declaration trouvee (settings.gradle*
+          # FIX 2 : version de plugin declaree en double (une fois a la
+          # racine / settings.gradle, une autre fois avec un numero de
+          # version explicite dans un sous-module comme app/). C'est
+          # l'autre cause possible de "Error resolving plugin [...] the
+          # plugin is already on the classpath with an unknown version"
+          # quand le conflit vient de deux blocs plugins{} modernes, pas
+          # d'un buildscript{} legacy. On ne garde le numero de version
+          # que sur la toute premiere declaration trouvee (settings.gradle*
           # puis build.gradle* racine en priorite) et on le retire des
           # declarations suivantes du meme plugin id.
           # ============================================================
-          PRIORITY_FILES=""
-          for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
-            [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
-          done
-          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
-            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sort)
-          ALL_GRADLE_FILES="$PRIORITY_FILES"
-          for f in $OTHER_FILES; do
-            case " $PRIORITY_FILES " in
-              *" $f "*) ;;
-              *) ALL_GRADLE_FILES="$ALL_GRADLE_FILES $f" ;;
-            esac
-          done
-
           if [ -n "$ALL_GRADLE_FILES" ]; then
             python3 - $ALL_GRADLE_FILES << 'PYEOF'
           import re
