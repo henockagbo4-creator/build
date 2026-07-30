@@ -1687,10 +1687,16 @@ jobs:
           # archives often omit this generated file; recreate it before the
           # Android platform is prepared.
           if [ ! -f "webpack.config.js" ]; then
-            if [ -x "node_modules/.bin/update-ns-webpack" ]; then
+            # NativeScript 6 and earlier use tns-core-modules and require the
+            # legacy Webpack integration. Mixing it with @nativescript/webpack
+            # causes the repeated "fileExists of undefined" errors.
+            if [ -d "node_modules/tns-core-modules" ]; then
+              npm install --save-dev "nativescript-dev-webpack@~1.5.0"
+              npx update-ns-webpack --configs --deps
+            elif [ -x "node_modules/.bin/update-ns-webpack" ]; then
               npx update-ns-webpack --configs --deps
             else
-              npm install --save-dev @nativescript/webpack
+              npm install --save-dev "@nativescript/webpack@~5.0.0"
               cat > webpack.config.js << 'EOF'
           const webpack = require("@nativescript/webpack");
           module.exports = (env) => {
@@ -1708,6 +1714,14 @@ jobs:
             exit 1
           fi
 
+          if [ -d "node_modules/tns-core-modules" ]; then
+            NS_CLI_MAJOR=$(node -p "require('tns-core-modules/package.json').version.split('.')[0]")
+            echo "NativeScript legacy core major: $NS_CLI_MAJOR"
+            ns() { npx --yes "nativescript@${NS_CLI_MAJOR}" "$@"; }
+          else
+            echo "NativeScript modern core: $(node -p "require('@nativescript/core/package.json').version" 2>/dev/null || echo unknown)"
+            ns() { npx nativescript "$@"; }
+          fi
           report_ns_failure() {
             local log_file="$1"
             echo "=== Premieres erreurs NativeScript/Webpack ==="
@@ -1717,7 +1731,7 @@ jobs:
           }
 
           if [ ! -d "android" ]; then
-            if ! npx nativescript platform add android --env.commonjs > ns_platform.log 2>&1; then
+            if ! ns platform add android --env.commonjs > ns_platform.log 2>&1; then
               report_ns_failure ns_platform.log
               exit 1
             fi
@@ -1726,14 +1740,14 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            if ! npx nativescript build android --release --env.commonjs --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}" 2>ns_error.log; then
+            if ! ns build android --release --env.commonjs --key-store-path "$KEYSTORE_FILE" --key-store-password "${{ github.event.inputs.keystore_password }}" --key-store-alias "${{ github.event.inputs.keystore_alias }}" --key-store-alias-password "${{ github.event.inputs.keystore_password }}" 2>ns_error.log; then
               ERROR_MSG=$(cat ns_error.log | head -20)
               echo "error_message=ERREUR NativeScript: $ERROR_MSG" >> "$GITHUB_OUTPUT"
               cat ns_error.log
               exit 1
             fi
           else
-            if ! npx nativescript build android --debug --env.commonjs > ns_build.log 2>&1; then
+            if ! ns build android --debug --env.commonjs > ns_build.log 2>&1; then
               report_ns_failure ns_build.log
               exit 1
             fi
