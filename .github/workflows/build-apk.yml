@@ -1677,7 +1677,11 @@ jobs:
           cd "$PROJECT_ROOT"
 
           echo "CI_NATIVE_SCRIPT_FIX=ns-compat-v3"
-          npm ci --prefer-offline || npm install
+          if [ -f "package-lock.json" ] || [ -f "npm-shrinkwrap.json" ]; then
+            npm ci --prefer-offline
+          else
+            npm install --prefer-offline
+          fi
 
           # NativeScript 6+ builds through Webpack. Older/incomplete source
           # archives often omit this generated file; recreate it before the
