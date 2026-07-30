@@ -1696,7 +1696,7 @@ jobs:
             elif [ -x "node_modules/.bin/update-ns-webpack" ]; then
               npx update-ns-webpack --configs --deps
             else
-              npm install --save-dev "@nativescript/webpack@~5.0.0"
+              npm install --save-dev "@nativescript/webpack@5.0.0"
               cat > webpack.config.js << 'EOF'
           const webpack = require("@nativescript/webpack");
           module.exports = (env) => {
@@ -1719,8 +1719,11 @@ jobs:
             echo "NativeScript legacy core major: $NS_CLI_MAJOR"
             ns() { npx --yes "nativescript@${NS_CLI_MAJOR}" "$@"; }
           else
-            echo "NativeScript modern core: $(node -p "require('@nativescript/core/package.json').version" 2>/dev/null || echo unknown)"
-            ns() { npx nativescript "$@"; }
+            NS_CLI_MAJOR=$(node -p "require('@nativescript/core/package.json').version.split('.')[0]")
+            echo "NativeScript modern core major: $NS_CLI_MAJOR"
+            # The CLI must share the framework major version; using the latest
+            # CLI (v9) against core 8 produces the fileExists error.
+            ns() { npx --yes "nativescript@${NS_CLI_MAJOR}" "$@"; }
           fi
           report_ns_failure() {
             local log_file="$1"
