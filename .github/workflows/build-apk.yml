@@ -1269,6 +1269,16 @@ jobs:
             fi
           fi
 
+          # Briefcase 0.4 reads the project configuration from this exact
+          # section. A [project] licence alone is overridden when this section
+          # exists, so make the required PEP 639 SPDX value explicit here.
+          if [ -f "pyproject.toml" ]; then
+            sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
+            if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
+              sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
+            fi
+          fi
+
           if [ ! -f "pyproject.toml" ]; then
             echo "pyproject.toml manquant - creation..."
             cat > pyproject.toml << 'EOF'
@@ -1284,6 +1294,7 @@ jobs:
           requires-python = ">=3.10"
 
           [tool.briefcase]
+          license = "LicenseRef-Proprietary"
           project_name = "App"
           bundle = "com.philtech"
           version = "0.1.0"
@@ -1898,6 +1909,16 @@ jobs:
             fi
           fi
 
+          # Briefcase 0.4 reads the project configuration from this exact
+          # section. A [project] licence alone is overridden when this section
+          # exists, so make the required PEP 639 SPDX value explicit here.
+          if [ -f "pyproject.toml" ]; then
+            sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
+            if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
+              sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
+            fi
+          fi
+
           if [ ! -f "pyproject.toml" ]; then
             cat > pyproject.toml << 'EOF'
           [build-system]
@@ -1912,6 +1933,7 @@ jobs:
           requires-python = ">=3.10"
 
           [tool.briefcase]
+          license = "LicenseRef-Proprietary"
           project_name = "App"
           bundle = "com.philtech"
           version = "0.1.0"
