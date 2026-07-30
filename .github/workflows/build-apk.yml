@@ -15,6 +15,18 @@
 #   4. Restauration des diagnostics error_code / error_hint quand le type
 #      de projet n'est pas detecte (avaient disparu dans la version cache).
 #   5. Retrait de l'etape "Sanitize source files" (code mort/risque).
+#   6. build-kotlin-java: detection de la vraie racine Gradle basee sur
+#      settings.gradle(.kts) au lieu de n'importe quel build.gradle (qui
+#      pouvait pointer vers app/ par erreur).
+#   7. build-kotlin-java: generation du wrapper gradlew independante de la
+#      commande systeme "gradle" (fallback par telechargement direct des
+#      fichiers officiels), avec message d'erreur clair en cas d'echec au
+#      lieu de laisser "./gradlew: No such file or directory" remonter.
+#   8. build-kotlin-java: auto-fix d'un second cas de conflit de plugin -
+#      version dupliquee entre la racine/settings.gradle et un sous-module
+#      (ex: app/build.gradle.kts), cause de "Error resolving plugin [...]
+#      already on the classpath with an unknown version" meme quand aucun
+#      buildscript{} legacy n'est present.
 # ============================================================================
 
 name: Build APK
@@ -853,6 +865,83 @@ jobs:
           PYEOF
             fi
           done
+
+          # ============================================================
+          # AUTO-FIX 2 : version de plugin declaree en double (une fois a
+          # la racine / settings.gradle, une autre fois avec un numero de
+          # version explicite dans un sous-module comme app/). C'est la
+          # cause exacte de "Error resolving plugin [...] the plugin is
+          # already on the classpath with an unknown version" quand
+          # l'auto-fix du buildscript legacy ne s'applique pas (le
+          # conflit vient ici de deux blocs plugins{} modernes, pas d'un
+          # buildscript{} legacy). On ne garde le numero de version que
+          # sur la toute premiere declaration trouvee (settings.gradle*
+          # puis build.gradle* racine en priorite) et on le retire des
+          # declarations suivantes du meme plugin id.
+          # ============================================================
+          PRIORITY_FILES=""
+          for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
+            [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
+          done
+          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sort)
+          ALL_GRADLE_FILES="$PRIORITY_FILES"
+          for f in $OTHER_FILES; do
+            case " $PRIORITY_FILES " in
+              *" $f "*) ;;
+              *) ALL_GRADLE_FILES="$ALL_GRADLE_FILES $f" ;;
+            esac
+          done
+
+          if [ -n "$ALL_GRADLE_FILES" ]; then
+            python3 - $ALL_GRADLE_FILES << 'PYEOF'
+          import re
+          import sys
+
+          files = sys.argv[1:]
+
+          pattern = re.compile(
+              r'id\s*\(\s*(?P<q1>["\'])(?P<id1>[\w.\-]+)(?P=q1)\s*\)\s*version\s*(?P<q1v>["\'])(?P<ver1>[^"\']+)(?P=q1v)'
+              r'|'
+              r'id\s+(?P<q2>["\'])(?P<id2>[\w.\-]+)(?P=q2)\s+version\s+(?P<q2v>["\'])(?P<ver2>[^"\']+)(?P=q2v)'
+          )
+
+          seen_ids = set()
+          changed_files = []
+
+          for path in files:
+              try:
+                  with open(path) as f:
+                      content = f.read()
+              except OSError:
+                  continue
+
+              def repl(m):
+                  if m.group('id1') is not None:
+                      pid = m.group('id1')
+                      if pid in seen_ids:
+                          return f'id("{pid}")'
+                      seen_ids.add(pid)
+                      return m.group(0)
+                  else:
+                      pid = m.group('id2')
+                      quote = m.group('q2')
+                      if pid in seen_ids:
+                          return f'id {quote}{pid}{quote}'
+                      seen_ids.add(pid)
+                      return m.group(0)
+
+              new_content = pattern.sub(repl, content)
+              if new_content != content:
+                  with open(path, 'w') as f:
+                      f.write(new_content)
+                  changed_files.append(path)
+
+          if changed_files:
+              print(f"Versions de plugin dupliquees retirees dans : {', '.join(changed_files)}")
+          PYEOF
+          fi
+
 
       - name: Build Kotlin/Java
         id: build
