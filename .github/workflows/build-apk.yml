@@ -1,14 +1,20 @@
 # ============================================================================
-# Build APK / AAB / EXE — pipeline multi-langages (VERSION CACHEE)
+# Build APK / AAB / EXE — pipeline multi-langages (VERSION CACHEE + CORRIGEE)
 # ============================================================================
-# AJOUTS :
-#   1. Cache Flutter pub-cache + .dart_tool
-#   2. Cache Gradle (caches + wrapper)
-#   3. Cache Node modules (npm)
-#   4. Cache Python pip
-#   5. Cache Go modules
-#   6. Cache .NET NuGet
-#   7. flutter build --no-pub quand deja en cache
+# NOUVEAUX CORRECTIFS DE CETTE VERSION :
+#   1. build-kotlin-java: auto-fix du conflit "buildscript{classpath} vs
+#      plugins{} DSL" pour com.android.application (erreur tres frequente
+#      chez les clients qui copient de vieux tutoriels). Le bloc
+#      buildscript{} legacy contenant "com.android.tools.build:gradle" est
+#      detecte et retire automatiquement avant le build.
+#   2. build-kotlin-java: capture du message d'erreur Gradle reel (section
+#      "What went wrong") et remontee jusqu'au callback client, au lieu du
+#      message generique "Kotlin/Java build failed".
+#   3. FIX: find avec -o sans parentheses dans build-python et
+#      build-windows-python (cassait le calcul de PROJECT_ROOT).
+#   4. Restauration des diagnostics error_code / error_hint quand le type
+#      de projet n'est pas detecte (avaient disparu dans la version cache).
+#   5. Retrait de l'etape "Sanitize source files" (code mort/risque).
 # ============================================================================
 
 name: Build APK
@@ -101,7 +107,6 @@ jobs:
       error_message: ${{ steps.detect-project.outputs.error_message }}
       error_code: ${{ steps.detect-project.outputs.error_code }}
       error_hint: ${{ steps.detect-project.outputs.error_hint }}
-      found_files: ${{ steps.detect-project.outputs.found_files }}
     steps:
       - name: Download source zip
         id: download
@@ -133,22 +138,9 @@ jobs:
             echo "src_path=src" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Sanitize source files
-        run: |
-          set -e
-          cd src/${{ steps.detect.outputs.source_dir }}
-          find . -type f -iname "*.py" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
-            if head -1 "$f" 2>/dev/null | grep -q '^%%'; then
-              sed -i '1{/^%%/d}' "$f"
-            fi
-          done
-          for MARKER in buildozer.spec pubspec.yaml package.json capacitor.config.json go.mod; do
-            find . -type f -iname "${MARKER}.py" -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | while read -r f; do
-              TARGET="$(dirname "$f")/${MARKER}"
-              mv "$f" "$TARGET"
-            done
-          done
-
+      # ============================================================
+      # DÉTECTION + diagnostic detaille si "unknown"
+      # ============================================================
       - name: Auto-detect project type
         id: detect-project
         run: |
@@ -169,6 +161,8 @@ jobs:
           DETECTED="unknown"
           BUILD_SHOULD_RUN="true"
           ERROR_MSG=""
+          ERROR_CODE=""
+          ERROR_HINT=""
 
           if [ -n "$(find_file "pubspec.yaml")" ]; then
             DETECTED="flutter"
@@ -190,7 +184,9 @@ jobs:
             else
               DETECTED="unknown"
               BUILD_SHOULD_RUN="false"
-              ERROR_MSG="Expo managed workflow non supporte - executez 'npx expo prebuild'"
+              ERROR_CODE="expo_managed_unsupported"
+              ERROR_HINT="Lancez 'npx expo prebuild' localement avant de renvoyer votre projet, pour generer les dossiers android/ (et ios/)."
+              ERROR_MSG="Expo managed workflow non supporte. $ERROR_HINT"
               echo "Expo managed non supporte"
             fi
           elif { [ -n "$(find_file "build.gradle")" ] || [ -n "$(find_file "build.gradle.kts")" ]; } && [ -z "$(find_file "package.json")" ]; then
@@ -229,8 +225,20 @@ jobs:
           else
             DETECTED="unknown"
             BUILD_SHOULD_RUN="false"
-            ERROR_MSG="Aucun type de projet detecte"
-            echo "Type inconnu"
+            ERROR_CODE="project_type_not_detected"
+
+            if [ -n "$(find_file "*.py")" ]; then
+              ERROR_HINT="Des fichiers .py ont ete trouves, mais aucun n'est nomme main.py, app.py, ni accompagne d'un pyproject.toml ou buildozer.spec. Renommez votre script principal en main.py ou ajoutez un buildozer.spec."
+            elif [ -n "$(find_file "*.kt")" ] || [ -n "$(find_file "*.java")" ]; then
+              ERROR_HINT="Des fichiers Kotlin/Java ont ete trouves, mais aucun build.gradle ou build.gradle.kts n'est present. Verifiez que le projet Android Studio complet (avec settings.gradle) est bien inclus dans le zip."
+            elif [ -n "$(find_file "*.js")" ] || [ -n "$(find_file "*.ts")" ]; then
+              ERROR_HINT="Des fichiers JS/TS ont ete trouves, mais aucun package.json n'est present a la racine. Assurez-vous que package.json est bien inclus dans le zip."
+            else
+              ERROR_HINT="Aucun marqueur de projet reconnu (package.json, pubspec.yaml, build.gradle, *.csproj, go.mod, main.py, project.godot...) n'a ete trouve."
+            fi
+
+            ERROR_MSG="Impossible de detecter le type de projet. $ERROR_HINT"
+            echo "Type inconnu: $ERROR_HINT"
           fi
 
           CLIENT_TYPE="${{ github.event.inputs.project_type }}"
@@ -242,6 +250,8 @@ jobs:
           echo "detected_type=$DETECTED" >> "$GITHUB_OUTPUT"
           echo "build_should_run=$BUILD_SHOULD_RUN" >> "$GITHUB_OUTPUT"
           echo "error_message=$ERROR_MSG" >> "$GITHUB_OUTPUT"
+          echo "error_code=$ERROR_CODE" >> "$GITHUB_OUTPUT"
+          echo "error_hint=$ERROR_HINT" >> "$GITHUB_OUTPUT"
           echo "=== TYPE FINAL: $DETECTED ==="
 
       - name: Setup Java
@@ -736,12 +746,14 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA
+  # JOB 5: BUILD KOTLIN / JAVA — AVEC AUTO-FIX GRADLE + REMONTEE ERREUR
   # ============================================================
   build-kotlin-java:
     needs: prepare
     if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      error_message: ${{ steps.build.outputs.error_message || '' }}
     steps:
       - name: Download source
         uses: actions/download-artifact@v4
@@ -774,9 +786,57 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      - name: Build Kotlin/Java
+      # ============================================================
+      # AUTO-FIX : conflit "buildscript{classpath} legacy" vs "plugins{}"
+      # DSL moderne pour com.android.application (et les autres plugins
+      # Android Gradle courants). Tres frequent chez les clients qui
+      # copient de vieux tutoriels Android Studio pre-2021.
+      # ============================================================
+      - name: Auto-fix legacy buildscript/plugins DSL conflict
         run: |
           set -e
+          cd src/
+          PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*" -exec dirname {} \; | head -1)
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+          cd "$PROJECT_ROOT"
+
+          for ROOT_FILE in build.gradle build.gradle.kts; do
+            if [ -f "$ROOT_FILE" ] && grep -q "com.android.tools.build:gradle" "$ROOT_FILE" 2>/dev/null; then
+              echo "Conflit buildscript/plugins detecte dans $ROOT_FILE - nettoyage automatique..."
+              python3 - "$ROOT_FILE" << 'PYEOF'
+          import sys
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          idx = content.find('buildscript')
+          if idx != -1:
+              brace_start = content.find('{', idx)
+              if brace_start != -1:
+                  depth = 0
+                  i = brace_start
+                  while i < len(content):
+                      if content[i] == '{':
+                          depth += 1
+                      elif content[i] == '}':
+                          depth -= 1
+                          if depth == 0:
+                              break
+                      i += 1
+                  end = i + 1
+                  content = content[:idx] + content[end:]
+                  with open(path, 'w') as f:
+                      f.write(content)
+                  print(f"Bloc buildscript retire de {path}")
+          PYEOF
+            fi
+          done
+
+      - name: Build Kotlin/Java
+        id: build
+        run: |
+          set -e
+          set -o pipefail
           cd src/
           PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
@@ -786,11 +846,21 @@ jobs:
             echo "gradlew manquant - creation..."
             gradle wrapper 2>/dev/null || true
           fi
-
           chmod +x gradlew 2>/dev/null || true
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
+
+          run_gradle() {
+            TASK="$1"
+            if ! ./gradlew "$TASK" 2>&1 | tee /tmp/gradle_output.log; then
+              ERROR_MSG=$(grep -A 8 "What went wrong" /tmp/gradle_output.log | head -25)
+              [ -z "$ERROR_MSG" ] && ERROR_MSG=$(tail -30 /tmp/gradle_output.log)
+              ERROR_MSG=$(echo "$ERROR_MSG" | tr '\n' ' ' | tr -d '\r')
+              echo "error_message=Gradle build failed: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+              return 1
+            fi
+          }
 
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             if ! grep -q "signingConfigs" app/build.gradle 2>/dev/null && ! grep -q "signingConfigs" app/build.gradle.kts 2>/dev/null; then
@@ -819,14 +889,16 @@ jobs:
               fi
             fi
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew assembleRelease
+              run_gradle assembleRelease || exit 1
             fi
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew bundleRelease
+              run_gradle bundleRelease || exit 1
             fi
           else
-            ./gradlew assembleDebug
+            run_gradle assembleDebug || exit 1
           fi
+
+          echo "error_message=success" >> "$GITHUB_OUTPUT"
 
       - name: Collect artifacts
         run: |
@@ -843,7 +915,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 6: BUILD FLUTTER (CORRIGE + CACHE)
+  # JOB 6: BUILD FLUTTER
   # ============================================================
   build-flutter:
     needs: prepare
@@ -965,7 +1037,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 7: BUILD PYTHON (CORRIGE + CACHE)
+  # JOB 7: BUILD PYTHON — FIX find (parentheses autour des -o)
   # ============================================================
   build-python:
     needs: prepare
@@ -1010,7 +1082,7 @@ jobs:
         run: |
           set -e
           cd src/
-          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" -o -name "buildozer.spec" -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . \( -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" -o -name "buildozer.spec" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
 
@@ -1080,7 +1152,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 8: BUILD .NET MAUI (CACHE)
+  # JOB 8: BUILD .NET MAUI
   # ============================================================
   build-dotnet:
     needs: prepare
@@ -1183,7 +1255,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript) — CORRIGE
+  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript)
   # ============================================================
   build-other:
     needs: prepare
@@ -1456,7 +1528,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 10: BUILD WINDOWS - Flutter (CORRIGE + CACHE)
+  # JOB 10: BUILD WINDOWS - Flutter
   # ============================================================
   build-windows-flutter:
     needs: prepare
@@ -1530,7 +1602,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 11: BUILD WINDOWS - .NET MAUI (CACHE)
+  # JOB 11: BUILD WINDOWS - .NET MAUI
   # ============================================================
   build-windows-dotnet:
     needs: prepare
@@ -1593,7 +1665,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 12: BUILD WINDOWS - Python (CACHE)
+  # JOB 12: BUILD WINDOWS - Python — FIX find (parentheses)
   # ============================================================
   build-windows-python:
     needs: prepare
@@ -1624,7 +1696,7 @@ jobs:
         run: |
           set -e
           cd src/
-          PROJECT_ROOT=$(find . -name "setup.py" -o -name "pyproject.toml" -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
+          PROJECT_ROOT=$(find . \( -name "setup.py" -o -name "pyproject.toml" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
 
@@ -1672,7 +1744,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 13: BUILD WINDOWS - Go (CACHE)
+  # JOB 13: BUILD WINDOWS - Go
   # ============================================================
   build-windows-go:
     needs: prepare
@@ -1734,7 +1806,8 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 14: POST-BUILD
+  # JOB 14: POST-BUILD — remonte le message d'erreur precis de
+  # build-kotlin-java (et build-other) au lieu du generique
   # ============================================================
   post-build:
     needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
@@ -1824,7 +1897,12 @@ jobs:
             ERROR_MSG="${ERROR_MSG}React Native build failed. "
           fi
           if [ "${{ needs.build-kotlin-java.result }}" == "failure" ]; then
-            ERROR_MSG="${ERROR_MSG}Kotlin/Java build failed. "
+            KOTLIN_ERROR="${{ needs.build-kotlin-java.outputs.error_message }}"
+            if [ -n "$KOTLIN_ERROR" ] && [ "$KOTLIN_ERROR" != "success" ]; then
+              ERROR_MSG="${ERROR_MSG}Kotlin/Java build failed: ${KOTLIN_ERROR} "
+            else
+              ERROR_MSG="${ERROR_MSG}Kotlin/Java build failed. "
+            fi
           fi
           if [ "${{ needs.build-flutter.result }}" == "failure" ]; then
             ERROR_MSG="${ERROR_MSG}Flutter build failed. "
@@ -1854,7 +1932,12 @@ jobs:
         id: upload
         run: |
           set -e
-          JSON_PAYLOAD=$(jq -n               --arg build_id "${{ github.event.inputs.build_id }}"               --arg state "${{ steps.build-status.outputs.status }}"               --arg message "${{ steps.build-status.outputs.message }}"               --arg detected_type "${{ needs.prepare.outputs.detected_type }}"               '{
+          JSON_PAYLOAD=$(jq -n \
+              --arg build_id "${{ github.event.inputs.build_id }}" \
+              --arg state "${{ steps.build-status.outputs.status }}" \
+              --arg message "${{ steps.build-status.outputs.message }}" \
+              --arg detected_type "${{ needs.prepare.outputs.detected_type }}" \
+              '{
                 build_id: $build_id,
                 state: $state,
                 message: $message,
