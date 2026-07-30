@@ -791,13 +791,35 @@ jobs:
       # DSL moderne pour com.android.application (et les autres plugins
       # Android Gradle courants). Tres frequent chez les clients qui
       # copient de vieux tutoriels Android Studio pre-2021.
+      #
+      # Cette etape calcule aussi la VRAIE racine du projet Gradle (celle
+      # qui contient settings.gradle / settings.gradle.kts, et non pas
+      # n'importe quel build.gradle qui pourrait se trouver dans app/) et
+      # l'exporte dans GITHUB_ENV pour que l'etape de build utilise
+      # exactement le meme dossier.
       # ============================================================
       - name: Auto-fix legacy buildscript/plugins DSL conflict
         run: |
           set -e
           cd src/
-          PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+
+          find_project_root() {
+            local root
+            root=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
+              -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" \
+              -exec dirname {} \; | head -1)
+            if [ -z "$root" ]; then
+              root=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f \
+                -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*" \
+                -exec dirname {} \; | head -1)
+            fi
+            [ -z "$root" ] && root="."
+            echo "$root"
+          }
+
+          PROJECT_ROOT=$(find_project_root)
+          echo "Racine du projet Gradle detectee : $PROJECT_ROOT"
+          echo "GRADLE_PROJECT_ROOT=$PWD/$PROJECT_ROOT" >> "$GITHUB_ENV"
           cd "$PROJECT_ROOT"
 
           for ROOT_FILE in build.gradle build.gradle.kts; do
@@ -837,16 +859,69 @@ jobs:
         run: |
           set -e
           set -o pipefail
-          cd src/
-          PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
+          cd "$GRADLE_PROJECT_ROOT"
+
+          # ------------------------------------------------------------
+          # Generation robuste du wrapper Gradle, independante de la
+          # commande systeme "gradle" (qui peut etre absente du PATH du
+          # runner, ce qui faisait echouer silencieusement l'ancienne
+          # version a cause du "2>/dev/null || true").
+          # ------------------------------------------------------------
+          generate_gradle_wrapper() {
+            local wrapper_props="gradle/wrapper/gradle-wrapper.properties"
+            local gradle_version="8.9"
+
+            if [ -f "$wrapper_props" ]; then
+              local existing_ver
+              existing_ver=$(grep -o 'gradle-[0-9][0-9.]*-\(bin\|all\)\.zip' "$wrapper_props" | head -1 | grep -o '[0-9][0-9.]*')
+              [ -n "$existing_ver" ] && gradle_version="$existing_ver"
+            fi
+
+            echo "gradlew manquant - generation du wrapper (Gradle $gradle_version)..."
+
+            # Chemin 1 : commande "gradle" systeme, si disponible sur le runner.
+            if command -v gradle >/dev/null 2>&1; then
+              gradle wrapper --gradle-version "$gradle_version" || true
+            fi
+
+            # Chemin 2 (fallback) : telechargement direct des fichiers
+            # officiels du wrapper depuis le depot GitHub de Gradle. Ne
+            # depend d'aucun binaire "gradle" local.
+            if [ ! -s "gradlew" ]; then
+              echo "Fallback : telechargement direct des fichiers wrapper officiels..."
+              mkdir -p gradle/wrapper
+              for TAG in "v${gradle_version}.0" "v${gradle_version}"; do
+                if curl -fsSL -o gradlew "https://raw.githubusercontent.com/gradle/gradle/${TAG}/gradlew" && [ -s gradlew ]; then
+                  curl -fsSL -o gradlew.bat "https://raw.githubusercontent.com/gradle/gradle/${TAG}/gradlew.bat" || true
+                  curl -fsSL -o gradle/wrapper/gradle-wrapper.jar "https://raw.githubusercontent.com/gradle/gradle/${TAG}/gradle/wrapper/gradle-wrapper.jar" || true
+                  break
+                fi
+              done
+
+              if [ ! -f "$wrapper_props" ]; then
+                cat > "$wrapper_props" << PROPS_EOF
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          PROPS_EOF
+              fi
+            fi
+
+            chmod +x gradlew 2>/dev/null || true
+
+            [ -s "gradlew" ]
+          }
 
           if [ ! -f "gradlew" ]; then
-            echo "gradlew manquant - creation..."
-            gradle wrapper 2>/dev/null || true
+            if ! generate_gradle_wrapper; then
+              echo "error_message=Impossible de generer le fichier gradlew (wrapper Gradle). Ni la commande systeme, ni le telechargement de secours n'ont fonctionne. Verifiez que votre projet est bien la racine Android Studio complete (avec settings.gradle) ou incluez directement le dossier gradle/wrapper/ et le fichier gradlew dans votre zip source." >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          else
+            chmod +x gradlew 2>/dev/null || true
           fi
-          chmod +x gradlew 2>/dev/null || true
 
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
