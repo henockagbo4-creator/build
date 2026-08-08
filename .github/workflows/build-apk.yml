@@ -1,32 +1,38 @@
 # ============================================================================
-# Build APK / AAB / EXE — pipeline multi-langages (VERSION CACHEE + CORRIGEE)
+# Build APK / AAB / EXE — pipeline multi-langages
 # ============================================================================
-# NOUVEAUX CORRECTIFS DE CETTE VERSION :
-#   1. build-kotlin-java: auto-fix du conflit "buildscript{classpath} vs
-#      plugins{} DSL" pour com.android.application (erreur tres frequente
-#      chez les clients qui copient de vieux tutoriels). Le bloc
-#      buildscript{} legacy contenant "com.android.tools.build:gradle" est
-#      detecte et retire automatiquement avant le build.
-#   2. build-kotlin-java: capture du message d'erreur Gradle reel (section
-#      "What went wrong") et remontee jusqu'au callback client, au lieu du
-#      message generique "Kotlin/Java build failed".
-#   3. FIX: find avec -o sans parentheses dans build-python et
-#      build-windows-python (cassait le calcul de PROJECT_ROOT).
-#   4. Restauration des diagnostics error_code / error_hint quand le type
-#      de projet n'est pas detecte (avaient disparu dans la version cache).
-#   5. Retrait de l'etape "Sanitize source files" (code mort/risque).
-#   6. build-kotlin-java: detection de la vraie racine Gradle basee sur
-#      settings.gradle(.kts) au lieu de n'importe quel build.gradle (qui
-#      pouvait pointer vers app/ par erreur).
-#   7. build-kotlin-java: generation du wrapper gradlew independante de la
-#      commande systeme "gradle" (fallback par telechargement direct des
-#      fichiers officiels), avec message d'erreur clair en cas d'echec au
-#      lieu de laisser "./gradlew: No such file or directory" remonter.
-#   8. build-kotlin-java: auto-fix d'un second cas de conflit de plugin -
-#      version dupliquee entre la racine/settings.gradle et un sous-module
-#      (ex: app/build.gradle.kts), cause de "Error resolving plugin [...]
-#      already on the classpath with an unknown version" meme quand aucun
-#      buildscript{} legacy n'est present.
+# MODIFICATIONS DE CETTE VERSION (auto-fix compileSdk + messages clairs) :
+#   1. build-kotlin-java: NOUVEAU FIX 3 - auto-fix de la syntaxe DSL AGP
+#      recente "compileSdk { version = release(N) { minorApiLevel = M } }"
+#      (non supportee par la version d'AGP du runner) -> simplifiee en
+#      "compileSdk = N". Meme traitement etendu a targetSdk et minSdk qui
+#      utilisent la meme syntaxe experimentale.
+#   2. build-kotlin-java: toutes les corrections automatiques (FIX 1, 2, 3)
+#      sont desormais journalisees dans un fichier fixes.log, en langage
+#      clair, au lieu d'etre appliquees silencieusement.
+#   3. build-kotlin-java: l'etape de build lit fixes.log et l'expose via
+#      l'output "fixes_applied" du job.
+#   4. post-build: agrege fixes_applied et l'ajoute au payload JSON envoye
+#      au callback client sous la cle "warnings", meme en cas de succes -
+#      l'utilisateur sait toujours ce qui a ete corrige dans son projet.
+# ============================================================================
+#
+# CORRECTIFS PRECEDENTS (deja en place) :
+#   - build-kotlin-java: auto-fix du conflit "buildscript{classpath} vs
+#     plugins{} DSL" pour com.android.application.
+#   - build-kotlin-java: capture du message d'erreur Gradle reel (section
+#     "What went wrong") et remontee jusqu'au callback client.
+#   - FIX: find avec -o sans parentheses dans build-python et
+#     build-windows-python (cassait le calcul de PROJECT_ROOT).
+#   - Restauration des diagnostics error_code / error_hint quand le type
+#     de projet n'est pas detecte.
+#   - Retrait de l'etape "Sanitize source files" (code mort/risque).
+#   - build-kotlin-java: detection de la vraie racine Gradle basee sur
+#     settings.gradle(.kts).
+#   - build-kotlin-java: generation du wrapper gradlew independante de la
+#     commande systeme "gradle" (fallback par telechargement direct).
+#   - build-kotlin-java: auto-fix d'un second cas de conflit de plugin -
+#     version dupliquee entre la racine/settings.gradle et un sous-module.
 # ============================================================================
 
 name: Build APK
@@ -758,7 +764,8 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA — AVEC AUTO-FIX GRADLE + REMONTEE ERREUR
+  # JOB 5: BUILD KOTLIN / JAVA — AVEC AUTO-FIX GRADLE + REMONTEE
+  # ERREUR + JOURNALISATION DES CORRECTIONS (fixes_applied)
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -766,6 +773,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       error_message: ${{ steps.build.outputs.error_message || '' }}
+      fixes_applied: ${{ steps.build.outputs.fixes_applied || '' }}
     steps:
       - name: Download source
         uses: actions/download-artifact@v4
@@ -800,15 +808,10 @@ jobs:
 
       # ============================================================
       # AUTO-FIX : conflit "buildscript{classpath} legacy" vs "plugins{}"
-      # DSL moderne pour com.android.application (et les autres plugins
-      # Android Gradle courants). Tres frequent chez les clients qui
-      # copient de vieux tutoriels Android Studio pre-2021.
-      #
-      # Cette etape calcule aussi la VRAIE racine du projet Gradle (celle
-      # qui contient settings.gradle / settings.gradle.kts, et non pas
-      # n'importe quel build.gradle qui pourrait se trouver dans app/) et
-      # l'exporte dans GITHUB_ENV pour que l'etape de build utilise
-      # exactement le meme dossier.
+      # DSL moderne, versions de plugin dupliquees, ET (NOUVEAU) syntaxe
+      # DSL AGP recente non supportee pour compileSdk/targetSdk/minSdk.
+      # Chaque correction est journalisee en langage clair dans fixes.log,
+      # a la racine du workspace, pour etre remontee a l'utilisateur.
       # ============================================================
       - name: Auto-fix legacy buildscript/plugins DSL conflict
         run: |
@@ -834,8 +837,12 @@ jobs:
           echo "GRADLE_PROJECT_ROOT=$PWD/$PROJECT_ROOT" >> "$GITHUB_ENV"
           cd "$PROJECT_ROOT"
 
-          # Liste partagee de tous les fichiers Gradle du projet (racine ET
-          # tous les sous-modules, ex: app/), racine/settings en priorite.
+          # Fichier qui accumule les corrections appliquees, en langage
+          # clair, une par ligne. Lu par l'etape de build pour etre
+          # remonte a l'utilisateur via l'output fixes_applied.
+          FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
+          touch "$FIXES_LOG"
+
           PRIORITY_FILES=""
           for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
             [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
@@ -853,9 +860,7 @@ jobs:
           # ------------------------------------------------------------
           # FIX 1 : retire tout bloc buildscript{} legacy contenant
           # "com.android.tools.build:gradle", dans TOUS les fichiers
-          # build.gradle(.kts) du projet - racine ET sous-modules (ex:
-          # app/build.gradle.kts). Un vieux tutoriel peut placer ce bloc
-          # n'importe ou, pas seulement a la racine.
+          # build.gradle(.kts) du projet - racine ET sous-modules.
           # ------------------------------------------------------------
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
@@ -863,9 +868,9 @@ jobs:
             esac
             if [ -f "$GRADLE_FILE" ] && grep -q "com.android.tools.build:gradle" "$GRADLE_FILE" 2>/dev/null; then
               echo "Conflit buildscript/plugins detecte dans $GRADLE_FILE - nettoyage automatique..."
-              python3 - "$GRADLE_FILE" << 'PYEOF'
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
           import sys
-          path = sys.argv[1]
+          path, fixes_log = sys.argv[1], sys.argv[2]
           with open(path) as f:
               content = f.read()
 
@@ -887,29 +892,24 @@ jobs:
                   content = content[:idx] + content[end:]
                   with open(path, 'w') as f:
                       f.write(content)
-                  print(f"Bloc buildscript retire de {path}")
+                  with open(fixes_log, 'a') as log:
+                      log.write(f"Bloc buildscript{{}} obsolete retire de {path} (conflit avec la syntaxe plugins{{}} moderne)\n")
           PYEOF
             fi
           done
 
-          # ============================================================
-          # FIX 2 : version de plugin declaree en double (une fois a la
-          # racine / settings.gradle, une autre fois avec un numero de
-          # version explicite dans un sous-module comme app/). C'est
-          # l'autre cause possible de "Error resolving plugin [...] the
-          # plugin is already on the classpath with an unknown version"
-          # quand le conflit vient de deux blocs plugins{} modernes, pas
-          # d'un buildscript{} legacy. On ne garde le numero de version
-          # que sur la toute premiere declaration trouvee (settings.gradle*
-          # puis build.gradle* racine en priorite) et on le retire des
-          # declarations suivantes du meme plugin id.
-          # ============================================================
+          # ------------------------------------------------------------
+          # FIX 2 : version de plugin declaree en double (racine +
+          # sous-module). On ne garde le numero de version que sur la
+          # premiere declaration trouvee et on le retire des suivantes.
+          # ------------------------------------------------------------
           if [ -n "$ALL_GRADLE_FILES" ]; then
-            python3 - $ALL_GRADLE_FILES << 'PYEOF'
+            python3 - "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
           import re
           import sys
 
-          files = sys.argv[1:]
+          fixes_log = sys.argv[1]
+          files = sys.argv[2:]
 
           pattern = re.compile(
               r'id\s*\(\s*(?P<q1>["\'])(?P<id1>[\w.\-]+)(?P=q1)\s*\)\s*version\s*(?P<q1v>["\'])(?P<ver1>[^"\']+)(?P=q1v)'
@@ -949,10 +949,58 @@ jobs:
                   changed_files.append(path)
 
           if changed_files:
-              print(f"Versions de plugin dupliquees retirees dans : {', '.join(changed_files)}")
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Version de plugin dupliquee retiree dans : {', '.join(changed_files)}\n")
           PYEOF
           fi
 
+          # ------------------------------------------------------------
+          # FIX 3 (NOUVEAU) : syntaxe "compileSdk { version = release(N)
+          # { minorApiLevel = M } } " — DSL AGP recente/experimentale non
+          # supportee par la version d'AGP du runner. Remplacee par la
+          # forme classique "compileSdk = N", equivalente dans l'immense
+          # majorite des cas (minorApiLevel concerne uniquement des
+          # previews AGP tres recentes et est ignore sans consequence).
+          # Le meme traitement est applique a targetSdk et minSdk, qui
+          # utilisent la meme syntaxe experimentale.
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            if [ -f "$GRADLE_FILE" ] && grep -qE '(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(' "$GRADLE_FILE" 2>/dev/null; then
+              echo "Syntaxe DSL Sdk { version = release(...) } detectee dans $GRADLE_FILE - simplification..."
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+          path, fixes_log = sys.argv[1], sys.argv[2]
+
+          with open(path) as f:
+              content = f.read()
+
+          # Capture le nom du champ (compileSdk/targetSdk/minSdk) et le
+          # numero de SDK dans release(N) ; le contenu du bloc interne
+          # optionnel { minorApiLevel = ... } est ignore et retire.
+          pattern = re.compile(
+              r'(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(\s*(\d+)\s*\)\s*(\{[^}]*\})?\s*\}'
+          )
+
+          matches = []
+          def repl(m):
+              matches.append((m.group(1), m.group(2)))
+              return f'{m.group(1)} = {m.group(2)}'
+
+          new_content = pattern.sub(repl, content)
+
+          if matches:
+              with open(path, 'w') as f:
+                  f.write(new_content)
+              details = ", ".join(f"{field} {{ version = release({ver}) {{...}} }} -> {field} = {ver}" for field, ver in matches)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Syntaxe DSL Sdk simplifiee dans {path} ({details})\n")
+          PYEOF
+            fi
+          done
 
       - name: Build Kotlin/Java
         id: build
@@ -963,9 +1011,7 @@ jobs:
 
           # ------------------------------------------------------------
           # Generation robuste du wrapper Gradle, independante de la
-          # commande systeme "gradle" (qui peut etre absente du PATH du
-          # runner, ce qui faisait echouer silencieusement l'ancienne
-          # version a cause du "2>/dev/null || true").
+          # commande systeme "gradle".
           # ------------------------------------------------------------
           generate_gradle_wrapper() {
             local wrapper_props="gradle/wrapper/gradle-wrapper.properties"
@@ -979,14 +1025,10 @@ jobs:
 
             echo "gradlew manquant - generation du wrapper (Gradle $gradle_version)..."
 
-            # Chemin 1 : commande "gradle" systeme, si disponible sur le runner.
             if command -v gradle >/dev/null 2>&1; then
               gradle wrapper --gradle-version "$gradle_version" || true
             fi
 
-            # Chemin 2 (fallback) : telechargement direct des fichiers
-            # officiels du wrapper depuis le depot GitHub de Gradle. Ne
-            # depend d'aucun binaire "gradle" local.
             if [ ! -s "gradlew" ]; then
               echo "Fallback : telechargement direct des fichiers wrapper officiels..."
               mkdir -p gradle/wrapper
@@ -1074,6 +1116,17 @@ jobs:
           fi
 
           echo "error_message=success" >> "$GITHUB_OUTPUT"
+
+          # Remonte les corrections automatiques appliquees (fixes.log
+          # peut ne pas exister s'il n'y en a eu aucune).
+          FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
+          if [ -f "$FIXES_LOG" ] && [ -s "$FIXES_LOG" ]; then
+            {
+              echo "fixes_applied<<FIXES_EOF"
+              cat "$FIXES_LOG"
+              echo "FIXES_EOF"
+            } >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Collect artifacts
         run: |
@@ -1261,7 +1314,6 @@ jobs:
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
 
-          # Fix the invalid legacy PEP 639 licence value that causes Briefcase to fail.
           if [ -f "pyproject.toml" ]; then
             sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
             if ! awk '/^\[project\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
@@ -1269,9 +1321,6 @@ jobs:
             fi
           fi
 
-          # Briefcase 0.4 reads the project configuration from this exact
-          # section. A [project] licence alone is overridden when this section
-          # exists, so make the required PEP 639 SPDX value explicit here.
           if [ -f "pyproject.toml" ]; then
             sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
             if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
@@ -1320,7 +1369,6 @@ jobs:
           python -m pip install --upgrade briefcase
           briefcase create android
           briefcase build android
-          # A user keystore is never generated, downloaded, or published in debug.
           if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
             briefcase package android
           else
@@ -1683,13 +1731,7 @@ jobs:
             npm install --prefer-offline
           fi
 
-          # NativeScript 6+ builds through Webpack. Older/incomplete source
-          # archives often omit this generated file; recreate it before the
-          # Android platform is prepared.
           if [ ! -f "webpack.config.js" ]; then
-            # NativeScript 6 and earlier use tns-core-modules and require the
-            # legacy Webpack integration. Mixing it with @nativescript/webpack
-            # causes the repeated "fileExists of undefined" errors.
             if [ -d "node_modules/tns-core-modules" ]; then
               npm install --save-dev "nativescript-dev-webpack@~1.5.0"
               npx update-ns-webpack --configs --deps
@@ -1702,8 +1744,6 @@ jobs:
           const pkg = require("./package.json");
           module.exports = (env) => {
             webpack.init(env);
-            // A Svelte Native project otherwise falls back to the generic JS
-            // preset, which tries to bundle its web server (sirv/totalist).
             const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
             if (deps.svelte || deps["svelte-native"] || deps["@nativescript/svelte"]) {
               webpack.useConfig("svelte");
@@ -1728,8 +1768,6 @@ jobs:
           else
             NS_CLI_MAJOR=$(node -p "require('@nativescript/core/package.json').version.split('.')[0]")
             echo "NativeScript modern core major: $NS_CLI_MAJOR"
-            # The CLI must share the framework major version; using the latest
-            # CLI (v9) against core 8 produces the fileExists error.
             ns() { npx --yes "nativescript@${NS_CLI_MAJOR}" "$@"; }
           fi
           report_ns_failure() {
@@ -1965,7 +2003,6 @@ jobs:
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
 
-          # Fix the invalid legacy PEP 639 licence value that causes Briefcase to fail.
           if [ -f "pyproject.toml" ]; then
             sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
             if ! awk '/^\[project\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
@@ -1973,9 +2010,6 @@ jobs:
             fi
           fi
 
-          # Briefcase 0.4 reads the project configuration from this exact
-          # section. A [project] licence alone is overridden when this section
-          # exists, so make the required PEP 639 SPDX value explicit here.
           if [ -f "pyproject.toml" ]; then
             sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
             if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
@@ -2093,7 +2127,10 @@ jobs:
 
   # ============================================================
   # JOB 14: POST-BUILD — remonte le message d'erreur precis de
-  # build-kotlin-java (et build-other) au lieu du generique
+  # build-kotlin-java (et build-other) au lieu du generique, ET
+  # (NOUVEAU) remonte les corrections automatiques appliquees
+  # (fixes_applied) au callback client sous la cle "warnings",
+  # meme en cas de succes.
   # ============================================================
   post-build:
     needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
@@ -2163,6 +2200,15 @@ jobs:
       - name: Determine build status and collect error messages
         id: build-status
         run: |
+          FIXES_MSG=""
+          KOTLIN_FIXES="${{ needs.build-kotlin-java.outputs.fixes_applied }}"
+          [ -n "$KOTLIN_FIXES" ] && FIXES_MSG="${FIXES_MSG}${KOTLIN_FIXES}"
+          {
+            echo "fixes_applied<<FIXES_EOF"
+            echo "$FIXES_MSG"
+            echo "FIXES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
           if [ "${{ steps.upload-apk.outputs.apk_uploaded }}" == "true" ] || [ "${{ steps.upload-aab.outputs.aab_uploaded }}" == "true" ] || [ "${{ steps.upload-exe.outputs.exe_uploaded }}" == "true" ]; then
             echo "status=success" >> "$GITHUB_OUTPUT"
             echo "message=Build successful" >> "$GITHUB_OUTPUT"
@@ -2218,16 +2264,20 @@ jobs:
         id: upload
         run: |
           set -eu
+          FIXES_JSON=$(printf '%s' "${{ steps.build-status.outputs.fixes_applied }}" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+
           JSON_PAYLOAD=$(jq -n \
               --arg build_id "${{ github.event.inputs.build_id }}" \
               --arg state "${{ steps.build-status.outputs.status }}" \
               --arg message "${{ steps.build-status.outputs.message }}" \
               --arg detected_type "${{ needs.prepare.outputs.detected_type }}" \
+              --argjson warnings "$FIXES_JSON" \
               '{
                 build_id: $build_id,
                 state: $state,
                 message: $message,
-                detected_type: $detected_type
+                detected_type: $detected_type,
+                warnings: $warnings
               }')
 
           echo "Sending notification:"
