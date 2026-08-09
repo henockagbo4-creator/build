@@ -1,38 +1,29 @@
 # ============================================================================
 # Build APK / AAB / EXE — pipeline multi-langages
 # ============================================================================
-# MODIFICATIONS DE CETTE VERSION (auto-fix compileSdk + messages clairs) :
-#   1. build-kotlin-java: NOUVEAU FIX 3 - auto-fix de la syntaxe DSL AGP
-#      recente "compileSdk { version = release(N) { minorApiLevel = M } }"
-#      (non supportee par la version d'AGP du runner) -> simplifiee en
-#      "compileSdk = N". Meme traitement etendu a targetSdk et minSdk qui
-#      utilisent la meme syntaxe experimentale.
-#   2. build-kotlin-java: toutes les corrections automatiques (FIX 1, 2, 3)
-#      sont desormais journalisees dans un fichier fixes.log, en langage
-#      clair, au lieu d'etre appliquees silencieusement.
-#   3. build-kotlin-java: l'etape de build lit fixes.log et l'expose via
-#      l'output "fixes_applied" du job.
-#   4. post-build: agrege fixes_applied et l'ajoute au payload JSON envoye
-#      au callback client sous la cle "warnings", meme en cas de succes -
-#      l'utilisateur sait toujours ce qui a ete corrige dans son projet.
-# ============================================================================
+# VERSION AVEC TOLERANCE MAXIMALE DE STRUCTURE (fallback par extension,
+# Buildozer/PyInstaller prioritaires pour Python, esbuild pour JS brut,
+# scaffold Gradle complet pour Kotlin/Java, icone forcee, Expo managed
+# auto-regenere au lieu de bloquer).
 #
-# CORRECTIFS PRECEDENTS (deja en place) :
-#   - build-kotlin-java: auto-fix du conflit "buildscript{classpath} vs
-#     plugins{} DSL" pour com.android.application.
-#   - build-kotlin-java: capture du message d'erreur Gradle reel (section
-#     "What went wrong") et remontee jusqu'au callback client.
-#   - FIX: find avec -o sans parentheses dans build-python et
-#     build-windows-python (cassait le calcul de PROJECT_ROOT).
-#   - Restauration des diagnostics error_code / error_hint quand le type
-#     de projet n'est pas detecte.
-#   - Retrait de l'etape "Sanitize source files" (code mort/risque).
-#   - build-kotlin-java: detection de la vraie racine Gradle basee sur
-#     settings.gradle(.kts).
-#   - build-kotlin-java: generation du wrapper gradlew independante de la
-#     commande systeme "gradle" (fallback par telechargement direct).
-#   - build-kotlin-java: auto-fix d'un second cas de conflit de plugin -
-#     version dupliquee entre la racine/settings.gradle et un sous-module.
+# RESUME DES CHANGEMENTS DE CETTE VERSION :
+#   1. Detection (job prepare) :
+#      - Expo managed workflow n'est plus bloque : classe en react-native,
+#        le prebuild se fait dans build-react-native (deja code).
+#      - Fallback par extension si aucun marqueur de structure trouve :
+#        *.py -> python, *.kt/*.java -> kotlin, *.js/*.ts/*.jsx/*.tsx -> web.
+#        Le build ne bloque plus, chaque job sait scaffolder ce qui manque.
+#   2. build-web : bundling esbuild zero-config si JSX/TS/imports detectes
+#      sans package.json. Icone forcee par ImageMagick apres cordova-res.
+#   3. build-capacitor : icone forcee par ImageMagick apres capacitor-assets.
+#   4. build-kotlin-java : scaffold Gradle complet (settings.gradle,
+#      build.gradle racine, app/build.gradle, AndroidManifest minimal) si
+#      aucun build.gradle trouve. Fix memoire org.gradle.jvmargs=2048m.
+#   5. build-python (Android) : Buildozer par defaut (tolerant, juste besoin
+#      d'un .py), Briefcase seulement si pyproject.toml a une config
+#      [tool.briefcase] complexe (plusieurs apps ou requires etendus).
+#   6. build-windows-python : PyInstaller par defaut, Briefcase seulement
+#      si config Windows Briefcase complexe detectee.
 # ============================================================================
 
 name: Build APK
@@ -157,7 +148,9 @@ jobs:
           fi
 
       # ============================================================
-      # DÉTECTION + diagnostic detaille si "unknown"
+      # DETECTION + FALLBACK PAR EXTENSION (tolerance maximale) +
+      # Expo managed n'est plus bloquant (auto-regenere dans le job
+      # build-react-native via "npx expo prebuild").
       # ============================================================
       - name: Auto-detect project type
         id: detect-project
@@ -176,11 +169,23 @@ jobs:
               2>/dev/null | head -1
           }
 
+          count_files() {
+            find . -iname "$1" -type f \
+              -not -path "*/node_modules/*" \
+              -not -path "*/.git/*" \
+              -not -path "*/build/*" \
+              -not -path "*/dist/*" \
+              -not -path "*/bin/*" \
+              -not -path "*/obj/*" \
+              2>/dev/null | wc -l
+          }
+
           DETECTED="unknown"
           BUILD_SHOULD_RUN="true"
           ERROR_MSG=""
           ERROR_CODE=""
           ERROR_HINT=""
+          FALLBACK_USED="false"
 
           if [ -n "$(find_file "pubspec.yaml")" ]; then
             DETECTED="flutter"
@@ -195,18 +200,11 @@ jobs:
             DETECTED="capacitor"
             echo "Capacitor detecte"
           elif [ -n "$(find_file "package.json")" ] && grep -q '"expo"' "$(find_file "package.json")" 2>/dev/null; then
-            PKG_DIR=$(dirname "$(find_file "package.json")")
-            if [ -d "$PKG_DIR/android" ] || [ -d "$PKG_DIR/ios" ]; then
-              DETECTED="react-native"
-              echo "Expo bare workflow detecte"
-            else
-              DETECTED="unknown"
-              BUILD_SHOULD_RUN="false"
-              ERROR_CODE="expo_managed_unsupported"
-              ERROR_HINT="Lancez 'npx expo prebuild' localement avant de renvoyer votre projet, pour generer les dossiers android/ (et ios/)."
-              ERROR_MSG="Expo managed workflow non supporte. $ERROR_HINT"
-              echo "Expo managed non supporte"
-            fi
+            # NOUVEAU : Expo managed n'est plus bloquant. On classe direct en
+            # react-native ; le job build-react-native detecte l'absence du
+            # dossier android/ et lance "npx expo prebuild" automatiquement.
+            DETECTED="react-native"
+            echo "Expo detecte (managed ou bare) - le prebuild sera fait automatiquement si besoin"
           elif { [ -n "$(find_file "build.gradle")" ] || [ -n "$(find_file "build.gradle.kts")" ]; } && [ -z "$(find_file "package.json")" ]; then
             DETECTED="kotlin"
             echo "Kotlin/Java detecte"
@@ -241,22 +239,39 @@ jobs:
             DETECTED="web"
             echo "Site statique detecte"
           else
-            DETECTED="unknown"
-            BUILD_SHOULD_RUN="false"
-            ERROR_CODE="project_type_not_detected"
+            # ============================================================
+            # FALLBACK PAR EXTENSION — dernier recours avant de bloquer.
+            # Les clients ne respectent pas toujours la structure attendue
+            # (pas de main.py nomme comme tel, pas de build.gradle a la
+            # racine, pas de package.json...). On devine par extension et
+            # on laisse le job de build correspondant scaffolder ce qui
+            # manque, plutot que de bloquer immediatement.
+            # ============================================================
+            PY_COUNT=$(count_files "*.py")
+            KT_JAVA_COUNT=$(( $(count_files "*.kt") + $(count_files "*.java") ))
+            JS_TS_COUNT=$(( $(count_files "*.js") + $(count_files "*.ts") + $(count_files "*.jsx") + $(count_files "*.tsx") ))
+            HTML_COUNT=$(count_files "*.html")
 
-            if [ -n "$(find_file "*.py")" ]; then
-              ERROR_HINT="Des fichiers .py ont ete trouves, mais aucun n'est nomme main.py, app.py, ni accompagne d'un pyproject.toml ou buildozer.spec. Renommez votre script principal en main.py ou ajoutez un buildozer.spec."
-            elif [ -n "$(find_file "*.kt")" ] || [ -n "$(find_file "*.java")" ]; then
-              ERROR_HINT="Des fichiers Kotlin/Java ont ete trouves, mais aucun build.gradle ou build.gradle.kts n'est present. Verifiez que le projet Android Studio complet (avec settings.gradle) est bien inclus dans le zip."
-            elif [ -n "$(find_file "*.js")" ] || [ -n "$(find_file "*.ts")" ]; then
-              ERROR_HINT="Des fichiers JS/TS ont ete trouves, mais aucun package.json n'est present a la racine. Assurez-vous que package.json est bien inclus dans le zip."
+            if [ "$PY_COUNT" -gt 0 ]; then
+              DETECTED="python"
+              FALLBACK_USED="true"
+              echo "Fallback par extension : $PY_COUNT fichier(s) .py trouve(s) sans structure standard -> python"
+            elif [ "$KT_JAVA_COUNT" -gt 0 ]; then
+              DETECTED="kotlin"
+              FALLBACK_USED="true"
+              echo "Fallback par extension : $KT_JAVA_COUNT fichier(s) .kt/.java trouve(s) sans build.gradle -> kotlin (scaffold Gradle sera genere)"
+            elif [ "$JS_TS_COUNT" -gt 0 ] || [ "$HTML_COUNT" -gt 0 ]; then
+              DETECTED="web"
+              FALLBACK_USED="true"
+              echo "Fallback par extension : fichiers JS/TS/HTML trouves sans package.json -> web (bundling esbuild si necessaire)"
             else
-              ERROR_HINT="Aucun marqueur de projet reconnu (package.json, pubspec.yaml, build.gradle, *.csproj, go.mod, main.py, project.godot...) n'a ete trouve."
+              DETECTED="unknown"
+              BUILD_SHOULD_RUN="false"
+              ERROR_CODE="project_type_not_detected"
+              ERROR_HINT="Aucun marqueur de projet reconnu (package.json, pubspec.yaml, build.gradle, *.csproj, go.mod, *.py, *.kt, *.java, *.js, *.ts, project.godot...) n'a ete trouve dans le zip."
+              ERROR_MSG="Impossible de detecter le type de projet. $ERROR_HINT"
+              echo "Type inconnu, meme apres fallback par extension : $ERROR_HINT"
             fi
-
-            ERROR_MSG="Impossible de detecter le type de projet. $ERROR_HINT"
-            echo "Type inconnu: $ERROR_HINT"
           fi
 
           CLIENT_TYPE="${{ github.event.inputs.project_type }}"
@@ -270,7 +285,7 @@ jobs:
           echo "error_message=$ERROR_MSG" >> "$GITHUB_OUTPUT"
           echo "error_code=$ERROR_CODE" >> "$GITHUB_OUTPUT"
           echo "error_hint=$ERROR_HINT" >> "$GITHUB_OUTPUT"
-          echo "=== TYPE FINAL: $DETECTED ==="
+          echo "=== TYPE FINAL: $DETECTED (fallback_utilise=$FALLBACK_USED) ==="
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -346,7 +361,8 @@ jobs:
           exit 1
 
   # ============================================================
-  # JOB 2: BUILD WEB (Cordova)
+  # JOB 2: BUILD WEB (Cordova) — avec bundling esbuild zero-config
+  # et icone forcee
   # ============================================================
   build-web:
     needs: prepare
@@ -400,15 +416,87 @@ jobs:
       - name: Install Cordova
         run: npm install -g cordova
 
-      - name: Build web project
+      # ============================================================
+      # NOUVEAU : bundling esbuild zero-config. Si on trouve du JS/TS/
+      # JSX/TSX sans package.json (donc jamais transpile), ou avec un
+      # package.json mais sans build reussi, on bundle nous-memes avec
+      # esbuild avant de filer le resultat a Cordova. Ca evite le
+      # "build reussi mais app cassee / ecran blanc".
+      # ============================================================
+      - name: Bundle raw JS/JSX/TS with esbuild if no build output
+        id: esbuild
         run: |
           set -e
           cd src/
           PROJECT_ROOT=$(find . -name "package.json" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
+          echo "ESBUILD_ROOT=$PWD" >> "$GITHUB_ENV"
 
-          if [ -f "package.json" ]; then
+          # On bundle si : (a) pas de package.json du tout, OU (b) un
+          # package.json existe mais sans script "build" (donc rien ne
+          # transpile le JSX/TS/imports).
+          NEEDS_BUNDLE="false"
+          if [ ! -f "package.json" ]; then
+            if find . -maxdepth 3 -type f \( -iname "*.jsx" -o -iname "*.tsx" \) -not -path "*/node_modules/*" | grep -q .; then
+              NEEDS_BUNDLE="true"
+            elif find . -maxdepth 3 -type f \( -iname "*.js" -o -iname "*.ts" \) -not -path "*/node_modules/*" | xargs grep -lE '^\s*(import |export |require\()' 2>/dev/null | grep -q .; then
+              NEEDS_BUNDLE="true"
+            fi
+          elif ! grep -q '"build"' package.json 2>/dev/null; then
+            if find . -maxdepth 3 -type f \( -iname "*.jsx" -o -iname "*.tsx" \) -not -path "*/node_modules/*" | grep -q .; then
+              NEEDS_BUNDLE="true"
+            fi
+          fi
+
+          if [ "$NEEDS_BUNDLE" == "true" ]; then
+            echo "JSX/TS/imports detectes sans transpilation - bundling esbuild zero-config..."
+            npm install -g esbuild
+
+            ENTRY=""
+            for candidate in index.js index.jsx index.ts index.tsx src/index.js src/index.jsx src/index.ts src/index.tsx src/main.js src/main.jsx src/main.ts src/main.tsx App.jsx App.tsx; do
+              if [ -f "$candidate" ]; then
+                ENTRY="$candidate"
+                break
+              fi
+            done
+            if [ -z "$ENTRY" ]; then
+              ENTRY=$(find . -maxdepth 3 -type f \( -iname "*.jsx" -o -iname "*.tsx" -o -iname "*.js" -o -iname "*.ts" \) -not -path "*/node_modules/*" | head -1)
+            fi
+
+            if [ -n "$ENTRY" ]; then
+              echo "Point d'entree detecte : $ENTRY"
+              mkdir -p .esbuild-out
+              esbuild "$ENTRY" --bundle --outfile=.esbuild-out/bundle.js --loader:.js=jsx --loader:.jsx=jsx --loader:.ts=ts --loader:.tsx=tsx --define:process.env.NODE_ENV='"production"' || {
+                echo "esbuild a echoue - le build continuera avec les fichiers bruts (risque d'ecran blanc)."
+                echo "esbuild_used=false" >> "$GITHUB_OUTPUT"
+              }
+              if [ -f ".esbuild-out/bundle.js" ]; then
+                cat > .esbuild-out/index.html << 'HTML_EOF'
+          <!DOCTYPE html>
+          <html>
+          <head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"></head>
+          <body><div id="root"></div><div id="app"></div><script src="bundle.js"></script></body>
+          </html>
+          HTML_EOF
+                echo "ESBUILD_OUTPUT_DIR=$PWD/.esbuild-out" >> "$GITHUB_ENV"
+                echo "esbuild_used=true" >> "$GITHUB_OUTPUT"
+                echo "Bundle genere avec succes : .esbuild-out/bundle.js + index.html"
+              fi
+            else
+              echo "Aucun point d'entree JS/TS trouve - rien a bundler."
+              echo "esbuild_used=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "esbuild_used=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build web project
+        run: |
+          set -e
+          cd "$ESBUILD_ROOT"
+
+          if [ -f "package.json" ] && [ -z "${ESBUILD_OUTPUT_DIR:-}" ]; then
             npm ci --prefer-offline || npm install
             if grep -q '"build"' package.json; then
               npm run build
@@ -422,9 +510,14 @@ jobs:
           cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
           rm -rf "$CORDOVA_DIR"/www/*
 
+          # Priorite : sortie esbuild > dist/ > build/ > racine
           COPY_FROM="."
-          if [ -d "dist" ]; then COPY_FROM="dist"
-          elif [ -d "build" ]; then COPY_FROM="build"
+          if [ -n "${ESBUILD_OUTPUT_DIR:-}" ] && [ -d "$ESBUILD_OUTPUT_DIR" ]; then
+            COPY_FROM="$ESBUILD_OUTPUT_DIR"
+          elif [ -d "dist" ]; then
+            COPY_FROM="dist"
+          elif [ -d "build" ]; then
+            COPY_FROM="build"
           fi
 
           cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
@@ -439,6 +532,11 @@ jobs:
           cd "$SAVED_CORDOVA_DIR"
           cordova platform add android
 
+      # ============================================================
+      # ICONE FORCEE : cordova-res en premiere tentative, puis fallback
+      # force par ImageMagick dans tous les mipmap-*, quel que soit le
+      # resultat de cordova-res.
+      # ============================================================
       - name: Apply custom icon (Cordova)
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
@@ -446,8 +544,36 @@ jobs:
           cd "$SAVED_CORDOVA_DIR"
           mkdir -p resources
           curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
+
           npm install -g cordova-res
-          cordova-res android --copy --type icon
+          cordova-res android --copy --type icon || echo "cordova-res a echoue, fallback force ci-dessous"
+
+          RES_DIR=""
+          for candidate in \
+            "platforms/android/app/src/main/res" \
+            "platforms/android/res" \
+            "app/src/main/res"; do
+            if [ -d "$candidate" ]; then
+              RES_DIR="$candidate"
+              break
+            fi
+          done
+
+          if [ -z "$RES_DIR" ]; then
+            echo "ATTENTION: dossier res/ Android introuvable, icone personnalisee non appliquee."
+          else
+            echo "Application forcee de l'icone dans : $RES_DIR"
+            declare -A SIZES=( ["mipmap-mdpi"]=48 ["mipmap-hdpi"]=72 ["mipmap-xhdpi"]=96 ["mipmap-xxhdpi"]=144 ["mipmap-xxxhdpi"]=192 )
+            for dir in "${!SIZES[@]}"; do
+              SIZE="${SIZES[$dir]}"
+              mkdir -p "$RES_DIR/$dir"
+              convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher.png"
+              convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_round.png"
+              [ -f "$RES_DIR/$dir/ic_launcher_foreground.png" ] && \
+                convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_foreground.png"
+            done
+            echo "Icone personnalisee forcee avec succes dans toutes les densites."
+          fi
 
       - name: Build Cordova
         run: |
@@ -482,7 +608,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 3: BUILD CAPACITOR
+  # JOB 3: BUILD CAPACITOR — avec icone forcee
   # ============================================================
   build-capacitor:
     needs: prepare
@@ -563,11 +689,32 @@ jobs:
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
-          cd "$SAVED_PROJECT_ROOT"
+          cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
           mkdir -p resources
           curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
+
           npm install -g @capacitor/assets
-          npx capacitor-assets generate --android --iconBackgroundColor '#ffffff' || true
+          npx capacitor-assets generate --android --iconBackgroundColor '#ffffff' \
+            || echo "capacitor-assets a echoue, fallback force ci-dessous"
+
+          RES_DIR=""
+          [ -d "android/app/src/main/res" ] && RES_DIR="android/app/src/main/res"
+
+          if [ -z "$RES_DIR" ]; then
+            echo "ATTENTION: dossier res/ Android introuvable, icone personnalisee non appliquee."
+          else
+            echo "Application forcee de l'icone dans : $RES_DIR"
+            declare -A SIZES=( ["mipmap-mdpi"]=48 ["mipmap-hdpi"]=72 ["mipmap-xhdpi"]=96 ["mipmap-xxhdpi"]=144 ["mipmap-xxxhdpi"]=192 )
+            for dir in "${!SIZES[@]}"; do
+              SIZE="${SIZES[$dir]}"
+              mkdir -p "$RES_DIR/$dir"
+              convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher.png"
+              convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_round.png"
+              [ -f "$RES_DIR/$dir/ic_launcher_foreground.png" ] && \
+                convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_foreground.png"
+            done
+            echo "Icone personnalisee forcee avec succes dans toutes les densites."
+          fi
 
       - name: Disable default splash screen
         run: |
@@ -642,7 +789,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 4: BUILD REACT NATIVE
+  # JOB 4: BUILD REACT NATIVE (inchange - gere deja Expo prebuild)
   # ============================================================
   build-react-native:
     needs: prepare
@@ -764,8 +911,9 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA — AVEC AUTO-FIX GRADLE + REMONTEE
-  # ERREUR + JOURNALISATION DES CORRECTIONS (fixes_applied)
+  # JOB 5: BUILD KOTLIN / JAVA — scaffold Gradle complet si absent
+  # + fix memoire org.gradle.jvmargs + auto-fix DSL AGP + journal
+  # des corrections (fixes_applied)
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -807,18 +955,177 @@ jobs:
             gradle-${{ runner.os }}-
 
       # ============================================================
-      # AUTO-FIX : conflit "buildscript{classpath} legacy" vs "plugins{}"
-      # DSL moderne, versions de plugin dupliquees, ET (NOUVEAU) syntaxe
-      # DSL AGP recente non supportee pour compileSdk/targetSdk/minSdk.
-      # Chaque correction est journalisee en langage clair dans fixes.log,
-      # a la racine du workspace, pour etre remontee a l'utilisateur.
+      # NOUVEAU (FIX4) : scaffold Gradle complet si aucun build.gradle
+      # n'est trouve du tout (cas des clients qui envoient juste des
+      # fichiers .kt/.java bruts, sans projet Android Studio). On genere
+      # une structure minimale mais complete : settings.gradle,
+      # build.gradle racine, app/build.gradle, AndroidManifest.xml, et on
+      # deplace les sources trouvees dans app/src/main/java (ou kotlin).
       # ============================================================
-      - name: Auto-fix legacy buildscript/plugins DSL conflict
+      - name: Scaffold Gradle project if build.gradle missing
+        id: scaffold
+        run: |
+          set -e
+          cd src/
+          EXISTING_GRADLE=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | head -1)
+
+          FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
+          touch "$FIXES_LOG"
+
+          if [ -z "$EXISTING_GRADLE" ]; then
+            echo "Aucun build.gradle trouve - generation d'un scaffold Android Studio complet..."
+            PROJECT_ROOT="scaffolded-android-${{ github.event.inputs.build_id }}"
+            mkdir -p "$PROJECT_ROOT/app/src/main/java" "$PROJECT_ROOT/app/src/main/kotlin" "$PROJECT_ROOT/app/src/main/res/values"
+
+            PKG_ID="${{ github.event.inputs.package_id }}"
+            [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
+            PKG_PATH=$(echo "$PKG_ID" | tr '.' '/')
+
+            # Deplace les .kt/.java trouves dans l'arborescence source vers
+            # le bon dossier package, en preservant les fichiers.
+            HAS_KOTLIN="false"
+            mkdir -p "$PROJECT_ROOT/app/src/main/java/$PKG_PATH" "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH"
+            while IFS= read -r f; do
+              case "$f" in
+                *.kt) cp "$f" "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH/"; HAS_KOTLIN="true" ;;
+                *.java) cp "$f" "$PROJECT_ROOT/app/src/main/java/$PKG_PATH/" ;;
+              esac
+            done < <(find . -type f \( -name "*.kt" -o -name "*.java" \) -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/$PROJECT_ROOT/*")
+
+            # S'assure qu'au moins une Activity minimale existe.
+            if [ "$HAS_KOTLIN" == "true" ]; then
+              if ! grep -rl "class.*Activity" "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH/" >/dev/null 2>&1; then
+                cat > "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH/MainActivity.kt" << KT_EOF
+          package $PKG_ID
+
+          import android.app.Activity
+          import android.os.Bundle
+
+          class MainActivity : Activity() {
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+              }
+          }
+          KT_EOF
+              fi
+              SRC_SET="kotlin"
+            else
+              if ! grep -rl "class.*Activity" "$PROJECT_ROOT/app/src/main/java/$PKG_PATH/" >/dev/null 2>&1; then
+                cat > "$PROJECT_ROOT/app/src/main/java/$PKG_PATH/MainActivity.java" << JAVA_EOF
+          package $PKG_ID;
+
+          import android.app.Activity;
+          import android.os.Bundle;
+
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+              }
+          }
+          JAVA_EOF
+              fi
+              SRC_SET="java"
+            fi
+
+            cat > "$PROJECT_ROOT/app/src/main/AndroidManifest.xml" << MANIFEST_EOF
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+              <application
+                  android:label="${{ github.event.inputs.app_name }}"
+                  android:allowBackup="true">
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          MANIFEST_EOF
+
+            cat > "$PROJECT_ROOT/app/src/main/res/values/strings.xml" << STRINGS_EOF
+          <resources>
+              <string name="app_name">${{ github.event.inputs.app_name }}</string>
+          </resources>
+          STRINGS_EOF
+
+            cat > "$PROJECT_ROOT/settings.gradle" << SETTINGS_EOF
+          rootProject.name = "app"
+          include(":app")
+          SETTINGS_EOF
+
+            cat > "$PROJECT_ROOT/build.gradle" << ROOT_GRADLE_EOF
+          buildscript {
+              repositories { google(); mavenCentral() }
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
+          ROOT_GRADLE_EOF
+
+            KOTLIN_PLUGIN=""
+            [ "$SRC_SET" == "kotlin" ] && KOTLIN_PLUGIN='    id("org.jetbrains.kotlin.android") version "1.9.24"'
+
+            cat > "$PROJECT_ROOT/app/build.gradle" << APP_GRADLE_EOF
+          plugins {
+              id("com.android.application") version "8.5.0"
+          $KOTLIN_PLUGIN
+          }
+
+          android {
+              namespace "$PKG_ID"
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "$PKG_ID"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          APP_GRADLE_EOF
+
+            echo "Scaffold Gradle genere avec succes ($SRC_SET) dans $PROJECT_ROOT/"
+            echo "$GITHUB_WORKSPACE/src/$PROJECT_ROOT genere : projet Android Studio minimal cree automatiquement (aucun build.gradle fourni par le client)." >> "$FIXES_LOG"
+            echo "SCAFFOLDED=true" >> "$GITHUB_ENV"
+            echo "GRADLE_PROJECT_ROOT_OVERRIDE=$PWD/$PROJECT_ROOT" >> "$GITHUB_ENV"
+          else
+            echo "build.gradle trouve, pas de scaffold necessaire."
+            echo "SCAFFOLDED=false" >> "$GITHUB_ENV"
+          fi
+
+      # ============================================================
+      # AUTO-FIX : conflit "buildscript{classpath} legacy" vs "plugins{}"
+      # DSL moderne, versions de plugin dupliquees, syntaxe DSL AGP
+      # recente non supportee pour compileSdk/targetSdk/minSdk, ET
+      # (NOUVEAU FIX5) memoire Gradle insuffisante -> ajout automatique
+      # de org.gradle.jvmargs dans gradle.properties.
+      # ============================================================
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory
         run: |
           set -e
           cd src/
 
           find_project_root() {
+            if [ -n "${GRADLE_PROJECT_ROOT_OVERRIDE:-}" ]; then
+              echo "$GRADLE_PROJECT_ROOT_OVERRIDE"
+              return
+            fi
             local root
             root=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
               -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" \
@@ -833,15 +1140,36 @@ jobs:
           }
 
           PROJECT_ROOT=$(find_project_root)
-          echo "Racine du projet Gradle detectee : $PROJECT_ROOT"
-          echo "GRADLE_PROJECT_ROOT=$PWD/$PROJECT_ROOT" >> "$GITHUB_ENV"
           cd "$PROJECT_ROOT"
+          # On stocke toujours un chemin ABSOLU (via $PWD apres le cd), pour
+          # que l'etape de build suivante n'ait pas a deviner si le chemin
+          # est relatif a src/ (cas normal) ou deja absolu (cas scaffold).
+          echo "Racine du projet Gradle detectee : $PWD"
+          echo "GRADLE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
-          # Fichier qui accumule les corrections appliquees, en langage
-          # clair, une par ligne. Lu par l'etape de build pour etre
-          # remonte a l'utilisateur via l'output fixes_applied.
           FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
           touch "$FIXES_LOG"
+
+          # ------------------------------------------------------------
+          # FIX5 (NOUVEAU) : memoire Gradle insuffisante -> cause frequente
+          # de builds qui timeout ou crashent silencieusement sur des
+          # runners standard. On force org.gradle.jvmargs si absent ou
+          # trop bas.
+          # ------------------------------------------------------------
+          if [ -f "gradle.properties" ]; then
+            if grep -q "org.gradle.jvmargs" gradle.properties; then
+              sed -i -E 's/org\.gradle\.jvmargs\s*=.*/org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m/' gradle.properties
+            else
+              echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m" >> gradle.properties
+            fi
+          else
+            cat > gradle.properties << PROPS_EOF
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          PROPS_EOF
+          fi
+          echo "Memoire Gradle fixee a -Xmx2048m dans gradle.properties (evite les crashs OOM silencieux)." >> "$FIXES_LOG"
 
           PRIORITY_FILES=""
           for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
@@ -857,11 +1185,8 @@ jobs:
             esac
           done
 
-          # ------------------------------------------------------------
           # FIX 1 : retire tout bloc buildscript{} legacy contenant
-          # "com.android.tools.build:gradle", dans TOUS les fichiers
-          # build.gradle(.kts) du projet - racine ET sous-modules.
-          # ------------------------------------------------------------
+          # "com.android.tools.build:gradle".
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
               *settings.gradle*) continue ;;
@@ -898,11 +1223,7 @@ jobs:
             fi
           done
 
-          # ------------------------------------------------------------
-          # FIX 2 : version de plugin declaree en double (racine +
-          # sous-module). On ne garde le numero de version que sur la
-          # premiere declaration trouvee et on le retire des suivantes.
-          # ------------------------------------------------------------
+          # FIX 2 : version de plugin declaree en double.
           if [ -n "$ALL_GRADLE_FILES" ]; then
             python3 - "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
           import re
@@ -954,16 +1275,7 @@ jobs:
           PYEOF
           fi
 
-          # ------------------------------------------------------------
-          # FIX 3 (NOUVEAU) : syntaxe "compileSdk { version = release(N)
-          # { minorApiLevel = M } } " — DSL AGP recente/experimentale non
-          # supportee par la version d'AGP du runner. Remplacee par la
-          # forme classique "compileSdk = N", equivalente dans l'immense
-          # majorite des cas (minorApiLevel concerne uniquement des
-          # previews AGP tres recentes et est ignore sans consequence).
-          # Le meme traitement est applique a targetSdk et minSdk, qui
-          # utilisent la meme syntaxe experimentale.
-          # ------------------------------------------------------------
+          # FIX 3 : syntaxe DSL AGP recente "compileSdk { version = release(N) {...} }"
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
               *settings.gradle*) continue ;;
@@ -978,9 +1290,6 @@ jobs:
           with open(path) as f:
               content = f.read()
 
-          # Capture le nom du champ (compileSdk/targetSdk/minSdk) et le
-          # numero de SDK dans release(N) ; le contenu du bloc interne
-          # optionnel { minorApiLevel = ... } est ignore et retire.
           pattern = re.compile(
               r'(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(\s*(\d+)\s*\)\s*(\{[^}]*\})?\s*\}'
           )
@@ -1009,10 +1318,6 @@ jobs:
           set -o pipefail
           cd "$GRADLE_PROJECT_ROOT"
 
-          # ------------------------------------------------------------
-          # Generation robuste du wrapper Gradle, independante de la
-          # commande systeme "gradle".
-          # ------------------------------------------------------------
           generate_gradle_wrapper() {
             local wrapper_props="gradle/wrapper/gradle-wrapper.properties"
             local gradle_version="8.9"
@@ -1058,7 +1363,7 @@ jobs:
 
           if [ ! -f "gradlew" ]; then
             if ! generate_gradle_wrapper; then
-              echo "error_message=Impossible de generer le fichier gradlew (wrapper Gradle). Ni la commande systeme, ni le telechargement de secours n'ont fonctionne. Verifiez que votre projet est bien la racine Android Studio complete (avec settings.gradle) ou incluez directement le dossier gradle/wrapper/ et le fichier gradlew dans votre zip source." >> "$GITHUB_OUTPUT"
+              echo "error_message=Impossible de generer le fichier gradlew (wrapper Gradle). Ni la commande systeme, ni le telechargement de secours n'ont fonctionne." >> "$GITHUB_OUTPUT"
               exit 1
             fi
           else
@@ -1117,8 +1422,6 @@ jobs:
 
           echo "error_message=success" >> "$GITHUB_OUTPUT"
 
-          # Remonte les corrections automatiques appliquees (fixes.log
-          # peut ne pas exister s'il n'y en a eu aucune).
           FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
           if [ -f "$FIXES_LOG" ] && [ -s "$FIXES_LOG" ]; then
             {
@@ -1143,7 +1446,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 6: BUILD FLUTTER
+  # JOB 6: BUILD FLUTTER (inchange)
   # ============================================================
   build-flutter:
     needs: prepare
@@ -1265,12 +1568,19 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 7: BUILD PYTHON — FIX find (parentheses autour des -o)
+  # JOB 7: BUILD PYTHON (Android) — Buildozer par defaut (tolerant,
+  # accepte n'importe quel .py), Briefcase seulement si le client a
+  # deja une config [tool.briefcase] complexe (plusieurs apps ou
+  # liste de requires etendue -> signe un vrai projet Briefcase
+  # volontaire qu'on ne veut pas casser).
   # ============================================================
   build-python:
     needs: prepare
     if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      error_message: ${{ steps.build-buildozer.outputs.error_message || steps.build-briefcase.outputs.error_message || '' }}
+      tool_used: ${{ steps.decide.outputs.tool }}
     steps:
       - name: Download source
         uses: actions/download-artifact@v4
@@ -1287,15 +1597,17 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
-      - name: Cache pip
+      - name: Cache pip / buildozer
         uses: actions/cache@v4
         with:
-          path: ~/.cache/pip
-          key: pip-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml') }}
+          path: |
+            ~/.cache/pip
+            ~/.buildozer
+          key: pip-buildozer-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml', '**/buildozer.spec') }}
           restore-keys: |
-            pip-${{ runner.os }}-
+            pip-buildozer-${{ runner.os }}-
 
       - name: Setup Java
         uses: actions/setup-java@v4
@@ -1306,57 +1618,176 @@ jobs:
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
 
-      - name: Build Python with Briefcase
+      - name: Install native build dependencies (Buildozer)
         run: |
-          set -eu
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev \
+            cmake libffi-dev libssl-dev unzip
+
+      # ============================================================
+      # DECISION : Buildozer par defaut. Briefcase seulement si une
+      # config [tool.briefcase] deja etoffee est trouvee (plusieurs
+      # apps declares, ou une liste "requires" de plus de 3 paquets),
+      # ce qui indique un projet Briefcase construit intentionnellement
+      # qu'on ne veut pas court-circuiter.
+      # ============================================================
+      - name: Decide Buildozer vs Briefcase
+        id: decide
+        run: |
+          set -e
           cd src/
           PROJECT_ROOT=$(find . \( -name "setup.py" -o -name "pyproject.toml" -o -name "app.py" -o -name "main.py" -o -name "buildozer.spec" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT=$(find . -name "*.py" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
+          echo "PYTHON_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
-          if [ -f "pyproject.toml" ]; then
-            sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
-            if ! awk '/^\[project\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
-              sed -i '/^\[project\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
+          TOOL="buildozer"
+
+          if [ -f "buildozer.spec" ]; then
+            TOOL="buildozer"
+            echo "buildozer.spec present -> Buildozer"
+          elif [ -f "pyproject.toml" ] && grep -q "\[tool.briefcase\]" pyproject.toml 2>/dev/null; then
+            APP_SECTIONS=$(grep -c "^\[tool\.briefcase\.app\." pyproject.toml 2>/dev/null || echo 0)
+            REQUIRES_COUNT=$(awk '/^\[tool\.briefcase/{inside=1} /^\[/{if(!/tool\.briefcase/) inside=0} inside && /requires\s*=/{print}' pyproject.toml 2>/dev/null | grep -o '"[^"]*"' | wc -l)
+            if [ "$APP_SECTIONS" -gt 1 ] || [ "$REQUIRES_COUNT" -gt 3 ]; then
+              TOOL="briefcase"
+              echo "Config [tool.briefcase] etoffee detectee (apps=$APP_SECTIONS, requires=$REQUIRES_COUNT) -> Briefcase"
+            else
+              echo "pyproject.toml minimal avec [tool.briefcase] mais peu de config -> Buildozer (plus tolerant)"
             fi
+          else
+            echo "Aucune config Briefcase existante -> Buildozer par defaut"
           fi
 
-          if [ -f "pyproject.toml" ]; then
-            sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
-            if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
-              sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
-            fi
+          echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
+          echo "=== OUTIL CHOISI: $TOOL ==="
+
+      # ============================================================
+      # BUILDOZER — chemin par defaut. Genere buildozer.spec si absent,
+      # a partir de n'importe quel .py trouve (main.py, app.py, ou le
+      # premier fichier .py rencontre).
+      # ============================================================
+      - name: Build with Buildozer
+        id: build-buildozer
+        if: ${{ steps.decide.outputs.tool == 'buildozer' }}
+        run: |
+          set -eu
+          cd "$PYTHON_PROJECT_ROOT"
+
+          ENTRY=""
+          for candidate in main.py app.py; do
+            [ -f "$candidate" ] && ENTRY="$candidate" && break
+          done
+          if [ -z "$ENTRY" ]; then
+            ENTRY=$(find . -maxdepth 2 -name "*.py" -type f | head -1)
+          fi
+          if [ -z "$ENTRY" ]; then
+            echo "Aucun fichier .py trouve - creation d'un main.py minimal..."
+            cat > main.py << 'PYEOF'
+          def main():
+              print("Hello from Python!")
+          if __name__ == "__main__":
+              main()
+          PYEOF
+            ENTRY="main.py"
           fi
 
-          if [ ! -f "pyproject.toml" ]; then
-            echo "pyproject.toml manquant - creation..."
-            cat > pyproject.toml << 'EOF'
-          [build-system]
-          requires = ["setuptools>=61.0"]
-          build-backend = "setuptools.build_meta"
+          # Si l'entree n'est pas nommee main.py, buildozer.spec pointera
+          # vers elle via "source.include_exts" / on la copie en main.py
+          # pour rester dans la convention Buildozer standard.
+          if [ "$ENTRY" != "main.py" ]; then
+            cp "$ENTRY" main.py
+          fi
 
-          [project]
-          name = "app"
-          version = "0.1.0"
-          description = "Auto-generated app"
-          license = "LicenseRef-Proprietary"
-          requires-python = ">=3.10"
+          # Detection de Kivy (sinon requirement python3 seul, qui marche
+          # pour n'importe quel script pur, meme sans UI graphique Kivy).
+          REQUIREMENTS="python3"
+          if grep -rl "^import kivy\|^from kivy" . --include="*.py" >/dev/null 2>&1; then
+            REQUIREMENTS="python3,kivy"
+            echo "Kivy detecte dans les sources"
+          fi
 
-          [tool.briefcase]
-          license = "LicenseRef-Proprietary"
-          project_name = "App"
-          bundle = "com.philtech"
-          version = "0.1.0"
+          if [ ! -f "buildozer.spec" ]; then
+            echo "buildozer.spec manquant - generation automatique..."
+            PKG_ID="${{ github.event.inputs.package_id }}"
+            [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
+            PKG_DOMAIN=$(echo "$PKG_ID" | rev | cut -d. -f2- | rev)
+            PKG_NAME=$(echo "$PKG_ID" | rev | cut -d. -f1 | rev)
+            [ -z "$PKG_DOMAIN" ] && PKG_DOMAIN="com.philtech"
+            [ -z "$PKG_NAME" ] && PKG_NAME="app"
 
-          [tool.briefcase.app.app]
-          formal_name = "App"
-          description = "Auto-generated app"
-          sources = ["."]
-          EOF
+            cat > buildozer.spec << SPEC_EOF
+          [app]
+          title = ${{ github.event.inputs.app_name }}
+          package.name = $PKG_NAME
+          package.domain = $PKG_DOMAIN
+          source.dir = .
+          source.include_exts = py,png,jpg,kv,atlas,json,ttf
+          version = 1.0
+          requirements = $REQUIREMENTS
+          orientation = portrait
+          fullscreen = 0
+          android.permissions = INTERNET
+          android.api = 34
+          android.minapi = 24
+          android.archs = arm64-v8a
+          android.allow_backup = True
+
+          [buildozer]
+          log_level = 2
+          warn_on_root = 0
+          SPEC_EOF
+          fi
+
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+
+          pip install --upgrade pip
+          pip install --upgrade buildozer cython
+
+          set +e
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            export P4A_RELEASE_KEYSTORE="$KEYSTORE_FILE"
+            export P4A_RELEASE_KEYSTORE_PASSWD="${{ github.event.inputs.keystore_password }}"
+            export P4A_RELEASE_KEYALIAS="${{ github.event.inputs.keystore_alias }}"
+            export P4A_RELEASE_KEYALIAS_PASSWD="${{ github.event.inputs.keystore_password }}"
+            yes | buildozer -v android release 2>&1 | tee /tmp/buildozer.log
+          else
+            yes | buildozer -v android debug 2>&1 | tee /tmp/buildozer.log
+          fi
+          BUILDOZER_EXIT=$?
+          set -e
+
+          if [ "$BUILDOZER_EXIT" -ne 0 ]; then
+            ERROR_MSG=$(tail -40 /tmp/buildozer.log | tr '\n' ' ' | tr -d '\r')
+            echo "error_message=Buildozer build failed: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+            echo "buildozer_failed=true" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "error_message=success" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # BRIEFCASE — seulement pour les projets deja construits pour
+      # Briefcase de facon deliberee (voir "Decide" ci-dessus).
+      # ============================================================
+      - name: Build with Briefcase
+        id: build-briefcase
+        if: ${{ steps.decide.outputs.tool == 'briefcase' }}
+        run: |
+          set -eu
+          cd "$PYTHON_PROJECT_ROOT"
+
+          sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
+          if ! awk '/^\[project\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
+            sed -i '/^\[project\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
+          fi
+          if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
+            sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
           fi
 
           if [ ! -f "main.py" ] && [ ! -f "app.py" ]; then
-            echo "main.py manquant - creation..."
             cat > main.py << 'EOF'
           def main():
               print("Hello from Python!")
@@ -1365,18 +1796,29 @@ jobs:
           EOF
           fi
 
-          python -m pip install --upgrade pip
-          python -m pip install --upgrade briefcase
-          briefcase create android
-          briefcase build android
-          if [ "${{ github.event.inputs.build_type }}" = "release" ]; then
-            briefcase package android
+          pip install --upgrade pip
+          pip install --upgrade briefcase
+
+          set +e
+          briefcase create android 2>&1 | tee /tmp/briefcase.log
+          briefcase build android 2>&1 | tee -a /tmp/briefcase.log
+          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
+            briefcase package android 2>&1 | tee -a /tmp/briefcase.log
           else
-            briefcase package android --adhoc-sign
+            briefcase package android --adhoc-sign 2>&1 | tee -a /tmp/briefcase.log
           fi
+          BRIEFCASE_EXIT=$?
+          set -e
+
+          if [ "$BRIEFCASE_EXIT" -ne 0 ]; then
+            ERROR_MSG=$(tail -40 /tmp/briefcase.log | tr '\n' ' ' | tr -d '\r')
+            echo "error_message=Briefcase build failed: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "error_message=success" >> "$GITHUB_OUTPUT"
 
       - name: Sign APK with keystore
-        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' }}
+        if: ${{ github.event.inputs.build_type == 'release' && needs.prepare.outputs.has_keystore == 'true' && steps.decide.outputs.tool == 'briefcase' }}
         run: |
           set -e
           APK_SIGNER=$(find "$ANDROID_SDK_ROOT" -name "apksigner" -type f 2>/dev/null | head -1)
@@ -1401,7 +1843,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 8: BUILD .NET MAUI
+  # JOB 8: BUILD .NET MAUI (inchange)
   # ============================================================
   build-dotnet:
     needs: prepare
@@ -1504,7 +1946,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript)
+  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript) — inchange
   # ============================================================
   build-other:
     needs: prepare
@@ -1831,7 +2273,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 10: BUILD WINDOWS - Flutter
+  # JOB 10: BUILD WINDOWS - Flutter (inchange)
   # ============================================================
   build-windows-flutter:
     needs: prepare
@@ -1905,7 +2347,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 11: BUILD WINDOWS - .NET MAUI
+  # JOB 11: BUILD WINDOWS - .NET MAUI (inchange)
   # ============================================================
   build-windows-dotnet:
     needs: prepare
@@ -1968,7 +2410,9 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 12: BUILD WINDOWS - Python — FIX find (parentheses)
+  # JOB 12: BUILD WINDOWS - Python — PyInstaller par defaut (tolerant,
+  # juste besoin d'un .py), Briefcase seulement si config Windows
+  # Briefcase deliberement etoffee.
   # ============================================================
   build-windows-python:
     needs: prepare
@@ -1984,7 +2428,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
 
       - name: Cache pip
         uses: actions/cache@v4
@@ -1994,57 +2438,103 @@ jobs:
           restore-keys: |
             pip-win-
 
-      - name: Build with Briefcase for Windows
+      - name: Decide PyInstaller vs Briefcase
+        id: decide
+        shell: bash
+        run: |
+          set -e
+          cd src/
+          PROJECT_ROOT=$(find . \( -name "setup.py" -o -name "pyproject.toml" -o -name "main.py" -o -name "app.py" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT=$(find . -name "*.py" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+          cd "$PROJECT_ROOT"
+          echo "PYTHON_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
+
+          TOOL="pyinstaller"
+          if [ -f "pyproject.toml" ] && grep -q "\[tool.briefcase\]" pyproject.toml 2>/dev/null; then
+            APP_SECTIONS=$(grep -c "^\[tool\.briefcase\.app\." pyproject.toml 2>/dev/null || echo 0)
+            REQUIRES_COUNT=$(awk '/^\[tool\.briefcase/{inside=1} /^\[/{if(!/tool\.briefcase/) inside=0} inside && /requires\s*=/{print}' pyproject.toml 2>/dev/null | grep -o '"[^"]*"' | wc -l)
+            if [ "$APP_SECTIONS" -gt 1 ] || [ "$REQUIRES_COUNT" -gt 3 ]; then
+              TOOL="briefcase"
+              echo "Config [tool.briefcase] etoffee detectee -> Briefcase"
+            fi
+          fi
+
+          echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
+          echo "=== OUTIL CHOISI (Windows): $TOOL ==="
+
+      # ============================================================
+      # PYINSTALLER — chemin par defaut, aucune structure requise.
+      # ============================================================
+      - name: Build with PyInstaller
+        id: build-pyinstaller
+        if: ${{ steps.decide.outputs.tool == 'pyinstaller' }}
         shell: bash
         run: |
           set -eu
-          cd src/
-          PROJECT_ROOT=$(find . \( -name "setup.py" -o -name "pyproject.toml" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
+          cd "$PYTHON_PROJECT_ROOT"
 
-          if [ -f "pyproject.toml" ]; then
-            sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
-            if ! awk '/^\[project\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
-              sed -i '/^\[project\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
-            fi
+          if [ -f "requirements.txt" ]; then
+            pip install -r requirements.txt
           fi
 
-          if [ -f "pyproject.toml" ]; then
-            sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
-            if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
-              sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
-            fi
+          ENTRY=""
+          for candidate in main.py app.py; do
+            [ -f "$candidate" ] && ENTRY="$candidate" && break
+          done
+          if [ -z "$ENTRY" ]; then
+            ENTRY=$(find . -maxdepth 2 -name "*.py" -type f | head -1)
           fi
-
-          if [ ! -f "pyproject.toml" ]; then
-            cat > pyproject.toml << 'EOF'
-          [build-system]
-          requires = ["setuptools>=61.0"]
-          build-backend = "setuptools.build_meta"
-
-          [project]
-          name = "app"
-          version = "0.1.0"
-          description = "Auto-generated app"
-          license = "LicenseRef-Proprietary"
-          requires-python = ">=3.10"
-
-          [tool.briefcase]
-          license = "LicenseRef-Proprietary"
-          project_name = "App"
-          bundle = "com.philtech"
-          version = "0.1.0"
-
-          [tool.briefcase.app.app]
-          formal_name = "App"
-          description = "Auto-generated app"
-          sources = ["."]
+          if [ -z "$ENTRY" ]; then
+            echo "Aucun fichier .py trouve - creation d'un main.py minimal..."
+            cat > main.py << 'EOF'
+          def main():
+              print("Hello from Python!")
+          if __name__ == "__main__":
+              main()
           EOF
+            ENTRY="main.py"
           fi
 
-          python -m pip install --upgrade pip
-          python -m pip install --upgrade briefcase
+          pip install --upgrade pip
+          pip install --upgrade pyinstaller
+
+          APP_NAME_SAFE=$(echo "${{ github.event.inputs.app_name }}" | tr -cd '[:alnum:]_-')
+          [ -z "$APP_NAME_SAFE" ] && APP_NAME_SAFE="app"
+
+          set +e
+          pyinstaller --onefile --windowed --name "$APP_NAME_SAFE" "$ENTRY" 2>&1 | tee /tmp/pyinstaller.log
+          PYI_EXIT=$?
+          set -e
+
+          if [ "$PYI_EXIT" -ne 0 ] || [ ! -f "dist/${APP_NAME_SAFE}.exe" ]; then
+            ERROR_MSG=$(tail -40 /tmp/pyinstaller.log | tr '\n' ' ' | tr -d '\r')
+            echo "error_message=PyInstaller build failed: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "error_message=success" >> "$GITHUB_OUTPUT"
+
+      # ============================================================
+      # BRIEFCASE — seulement pour config Windows deliberement etoffee.
+      # ============================================================
+      - name: Build with Briefcase for Windows
+        id: build-briefcase
+        if: ${{ steps.decide.outputs.tool == 'briefcase' }}
+        shell: bash
+        run: |
+          set -eu
+          cd "$PYTHON_PROJECT_ROOT"
+
+          sed -i -E 's/^([[:space:]]*license[[:space:]]*=[[:space:]]*)"testapp"[[:space:]]*$/\1"LicenseRef-Proprietary"/' pyproject.toml
+          if ! awk '/^\[project\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
+            sed -i '/^\[project\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
+          fi
+          if ! awk '/^\[tool\.briefcase\]$/{inside=1; next} /^\[/{inside=0} inside && /^[[:space:]]*license[[:space:]]*=/{found=1} END{exit !found}' pyproject.toml; then
+            sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
+          fi
+
+          pip install --upgrade pip
+          pip install --upgrade briefcase
           briefcase create windows app
           briefcase build windows app
           briefcase package windows app -p app
@@ -2054,6 +2544,7 @@ jobs:
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
           find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find "$PYTHON_PROJECT_ROOT/dist" -maxdepth 1 -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -2064,7 +2555,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 13: BUILD WINDOWS - Go
+  # JOB 13: BUILD WINDOWS - Go (inchange)
   # ============================================================
   build-windows-go:
     needs: prepare
@@ -2126,11 +2617,9 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 14: POST-BUILD — remonte le message d'erreur precis de
-  # build-kotlin-java (et build-other) au lieu du generique, ET
-  # (NOUVEAU) remonte les corrections automatiques appliquees
-  # (fixes_applied) au callback client sous la cle "warnings",
-  # meme en cas de succes.
+  # JOB 14: POST-BUILD — remonte le message d'erreur precis, et les
+  # corrections automatiques appliquees (fixes_applied), au callback
+  # client sous la cle "warnings", meme en cas de succes.
   # ============================================================
   post-build:
     needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
@@ -2240,7 +2729,12 @@ jobs:
             ERROR_MSG="${ERROR_MSG}Flutter build failed. "
           fi
           if [ "${{ needs.build-python.result }}" == "failure" ]; then
-            ERROR_MSG="${ERROR_MSG}Python build failed. "
+            PYTHON_ERROR="${{ needs.build-python.outputs.error_message }}"
+            if [ -n "$PYTHON_ERROR" ] && [ "$PYTHON_ERROR" != "success" ]; then
+              ERROR_MSG="${ERROR_MSG}Python build failed: ${PYTHON_ERROR} "
+            else
+              ERROR_MSG="${ERROR_MSG}Python build failed. "
+            fi
           fi
           if [ "${{ needs.build-dotnet.result }}" == "failure" ]; then
             ERROR_MSG="${ERROR_MSG}.NET MAUI build failed. "
@@ -2251,6 +2745,9 @@ jobs:
             if [ -n "$OTHER_ERROR" ] && [ "$OTHER_ERROR" != "success" ]; then
               ERROR_MSG="${ERROR_MSG}(${OTHER_ERROR}) "
             fi
+          fi
+          if [ "${{ needs.build-windows-python.result }}" == "failure" ]; then
+            ERROR_MSG="${ERROR_MSG}Windows Python build failed. "
           fi
 
           if [ -z "$ERROR_MSG" ]; then
