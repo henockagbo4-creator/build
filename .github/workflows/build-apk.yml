@@ -582,6 +582,12 @@ jobs:
                 convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_foreground.png"
             done
             echo "Icone personnalisee forcee avec succes dans toutes les densites."
+            ADAPTIVE_DIR="$RES_DIR/mipmap-anydpi-v26"
+            if [ -d "$ADAPTIVE_DIR" ]; then
+              rm -f "$ADAPTIVE_DIR/ic_launcher.xml"
+              rm -f "$ADAPTIVE_DIR/ic_launcher_round.xml"
+              echo "Fichiers adaptatifs supprimes : $ADAPTIVE_DIR/ic_launcher.xml et ic_launcher_round.xml"
+            fi
           fi
 
       - name: Build Cordova
@@ -719,7 +725,7 @@ jobs:
           if [ -z "$RES_DIR" ]; then
             echo "ATTENTION: dossier res/ Android introuvable, icone personnalisee non appliquee."
           else
-            echo "Application forcee de l'icone dans : $RES_DIR"
+                       echo "Application forcee de l'icone dans : $RES_DIR"
             declare -A SIZES=( ["mipmap-mdpi"]=48 ["mipmap-hdpi"]=72 ["mipmap-xhdpi"]=96 ["mipmap-xxhdpi"]=144 ["mipmap-xxxhdpi"]=192 )
             for dir in "${!SIZES[@]}"; do
               SIZE="${SIZES[$dir]}"
@@ -730,6 +736,12 @@ jobs:
                 convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_foreground.png"
             done
             echo "Icone personnalisee forcee avec succes dans toutes les densites."
+            ADAPTIVE_DIR="$RES_DIR/mipmap-anydpi-v26"
+            if [ -d "$ADAPTIVE_DIR" ]; then
+              rm -f "$ADAPTIVE_DIR/ic_launcher.xml"
+              rm -f "$ADAPTIVE_DIR/ic_launcher_round.xml"
+              echo "Fichiers adaptatifs supprimes : $ADAPTIVE_DIR/ic_launcher.xml et ic_launcher_round.xml"
+            fi
           fi
 
       - name: Disable default splash screen
