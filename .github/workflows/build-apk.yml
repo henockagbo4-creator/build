@@ -541,6 +541,15 @@ jobs:
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
+          # FIX 2 : ImageMagick n'est pas garanti preinstalle sur tous les
+          # runners ubuntu-latest (versions d'image variables). On
+          # l'installe explicitement pour que "convert" soit toujours
+          # disponible pour le fallback force plus bas.
+          if ! command -v convert >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y imagemagick
+          fi
+
           cd "$SAVED_CORDOVA_DIR"
           mkdir -p resources
           curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
@@ -689,6 +698,13 @@ jobs:
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
+          # FIX 2 : meme raison que pour Cordova - on garantit la presence
+          # d'ImageMagick avant d'appeler "convert".
+          if ! command -v convert >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y imagemagick
+          fi
+
           cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
           mkdir -p resources
           curl -f -L -o resources/icon.png "${{ github.event.inputs.icon_url }}"
@@ -795,6 +811,8 @@ jobs:
     needs: prepare
     if: ${{ github.event.inputs.platform != 'windows' && needs.prepare.outputs.detected_type == 'react-native' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      error_message: ${{ steps.build.outputs.error_message || '' }}
     steps:
       - name: Download source
         uses: actions/download-artifact@v4
@@ -841,6 +859,7 @@ jobs:
             gradle-${{ runner.os }}-
 
       - name: Build React Native
+        id: build
         run: |
           set -e
           cd src/
@@ -848,16 +867,36 @@ jobs:
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
 
+          npm ci --prefer-offline || npm install
+
           if [ ! -d "android" ]; then
             echo "android/ manquant - tentative de regeneration..."
+            # FIX 4 : ne plus avaler l'erreur avec "|| true". Si prebuild/eject
+            # echoue, on le sait explicitement au lieu de planter plus loin
+            # sur un "cd android: No such file or directory" illisible.
             if [ -f "package.json" ] && grep -q '"expo"' package.json; then
-              npx expo prebuild --platform android 2>/dev/null || true
+              if ! npx expo prebuild --platform android 2>&1 | tee /tmp/prebuild.log; then
+                ERROR_MSG=$(tail -30 /tmp/prebuild.log | tr '\n' ' ' | tr -d '\r')
+                echo "error_message=Echec de 'expo prebuild' - le dossier android/ n'a pas pu etre genere: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
             else
-              npx react-native eject 2>/dev/null || true
+              if ! npx react-native eject 2>&1 | tee /tmp/eject.log; then
+                ERROR_MSG=$(tail -30 /tmp/eject.log | tr '\n' ' ' | tr -d '\r')
+                echo "error_message=Echec de 'react-native eject' - le dossier android/ n'a pas pu etre genere: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+            fi
+
+            # Verification finale explicite : si android/ n'existe toujours
+            # pas malgre un exit code 0 (cas rare mais possible), on le
+            # signale clairement plutot que de laisser planter "cd android".
+            if [ ! -d "android" ]; then
+              echo "error_message=Le dossier android/ est toujours absent apres la regeneration, sans erreur explicite du prebuild/eject. Verifiez la structure du projet source." >> "$GITHUB_OUTPUT"
+              exit 1
             fi
           fi
 
-          npm ci --prefer-offline || npm install
           cd android
           chmod +x gradlew
 
@@ -1318,55 +1357,114 @@ jobs:
           set -o pipefail
           cd "$GRADLE_PROJECT_ROOT"
 
-          generate_gradle_wrapper() {
-            local wrapper_props="gradle/wrapper/gradle-wrapper.properties"
-            local gradle_version="8.9"
+          # ============================================================
+          # FIX 3 : la version Gradle du wrapper doit etre compatible avec
+          # l'AGP declare dans build.gradle(.kts). Un AGP 9.x exige au
+          # minimum Gradle 9.3.1 ; generer/garder un wrapper 8.9 fait
+          # planter le build avec "Minimum supported Gradle version is
+          # 9.3.1. Current version is 8.9". On detecte l'AGP et on force
+          # la version Gradle adequate, MEME si un wrapper existe deja.
+          # ============================================================
+          detect_required_gradle_version() {
+            local agp_version=""
+            agp_version=$(grep -rhoE "com\.android\.(application|library)['\"]\)?\s+version\s+['\"][0-9]+\.[0-9]+(\.[0-9]+)?['\"]|com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?" \
+              . --include="build.gradle" --include="build.gradle.kts" --include="settings.gradle" --include="settings.gradle.kts" 2>/dev/null \
+              | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
 
-            if [ -f "$wrapper_props" ]; then
-              local existing_ver
-              existing_ver=$(grep -o 'gradle-[0-9][0-9.]*-\(bin\|all\)\.zip' "$wrapper_props" | head -1 | grep -o '[0-9][0-9.]*')
-              [ -n "$existing_ver" ] && gradle_version="$existing_ver"
+            if [ -z "$agp_version" ]; then
+              echo "8.9"
+              return
             fi
 
-            echo "gradlew manquant - generation du wrapper (Gradle $gradle_version)..."
+            local agp_major
+            agp_major=$(echo "$agp_version" | cut -d. -f1)
+
+            # Correspondance AGP -> Gradle minimum (approximatif mais
+            # suffisant pour eviter le crash "Minimum supported Gradle
+            # version"). AGP 9.x exige explicitement >= 9.3.1.
+            if [ "$agp_major" -ge 9 ]; then
+              echo "9.3.1"
+            elif [ "$agp_major" -eq 8 ]; then
+              echo "8.9"
+            else
+              echo "8.9"
+            fi
+          }
+
+          REQUIRED_GRADLE_VERSION=$(detect_required_gradle_version)
+          echo "Version Gradle requise (deduite de l'AGP du projet) : $REQUIRED_GRADLE_VERSION"
+
+          # ============================================================
+          # FIX 6 : un gradlew present ne veut pas dire un wrapper valide.
+          # Si gradle-wrapper.jar est absent, vide, ou n'est pas un zip
+          # valide (jar corrompu), gradlew plantera avec "Unable to access
+          # jarfile gradle-wrapper.jar" sans que le check existant
+          # ("[ ! -f gradlew ]") ne le detecte. On verifie explicitement.
+          # ============================================================
+          is_wrapper_valid() {
+            [ -s "gradlew" ] || return 1
+            [ -s "gradle/wrapper/gradle-wrapper.jar" ] || return 1
+            unzip -tq "gradle/wrapper/gradle-wrapper.jar" >/dev/null 2>&1 || return 1
+            return 0
+          }
+
+          generate_gradle_wrapper() {
+            local gradle_version="$1"
+            echo "Wrapper manquant ou invalide - generation (Gradle $gradle_version)..."
 
             if command -v gradle >/dev/null 2>&1; then
               gradle wrapper --gradle-version "$gradle_version" || true
             fi
 
-            if [ ! -s "gradlew" ]; then
+            if ! is_wrapper_valid; then
               echo "Fallback : telechargement direct des fichiers wrapper officiels..."
               mkdir -p gradle/wrapper
-              for TAG in "v${gradle_version}.0" "v${gradle_version}"; do
+              for TAG in "v${gradle_version}" "v${gradle_version}.0"; do
                 if curl -fsSL -o gradlew "https://raw.githubusercontent.com/gradle/gradle/${TAG}/gradlew" && [ -s gradlew ]; then
                   curl -fsSL -o gradlew.bat "https://raw.githubusercontent.com/gradle/gradle/${TAG}/gradlew.bat" || true
                   curl -fsSL -o gradle/wrapper/gradle-wrapper.jar "https://raw.githubusercontent.com/gradle/gradle/${TAG}/gradle/wrapper/gradle-wrapper.jar" || true
-                  break
+                  if unzip -tq "gradle/wrapper/gradle-wrapper.jar" >/dev/null 2>&1; then
+                    break
+                  fi
                 fi
               done
+            fi
 
-              if [ ! -f "$wrapper_props" ]; then
-                cat > "$wrapper_props" << PROPS_EOF
+            # Ecrit / reecrit systematiquement gradle-wrapper.properties avec
+            # la version requise, meme si le fichier existait deja avec une
+            # version incompatible avec l'AGP du projet.
+            mkdir -p gradle/wrapper
+            cat > gradle/wrapper/gradle-wrapper.properties << PROPS_EOF
           distributionBase=GRADLE_USER_HOME
           distributionPath=wrapper/dists
           distributionUrl=https\://services.gradle.org/distributions/gradle-${gradle_version}-bin.zip
           zipStoreBase=GRADLE_USER_HOME
           zipStorePath=wrapper/dists
           PROPS_EOF
-              fi
-            fi
 
             chmod +x gradlew 2>/dev/null || true
 
-            [ -s "gradlew" ]
+            is_wrapper_valid
           }
 
-          if [ ! -f "gradlew" ]; then
-            if ! generate_gradle_wrapper; then
-              echo "error_message=Impossible de generer le fichier gradlew (wrapper Gradle). Ni la commande systeme, ni le telechargement de secours n'ont fonctionne." >> "$GITHUB_OUTPUT"
+          if ! is_wrapper_valid; then
+            if ! generate_gradle_wrapper "$REQUIRED_GRADLE_VERSION"; then
+              echo "error_message=Impossible de generer un wrapper Gradle valide (version requise: $REQUIRED_GRADLE_VERSION). Ni la commande systeme, ni le telechargement de secours n'ont fonctionne." >> "$GITHUB_OUTPUT"
               exit 1
             fi
           else
+            # Wrapper present ET valide, mais peut pointer vers une version
+            # Gradle trop ancienne pour l'AGP du projet : on met a jour
+            # distributionUrl si besoin, sans regenerer gradlew/le jar.
+            CURRENT_URL_VERSION=$(grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?-(bin|all)\.zip' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
+            if [ "$CURRENT_URL_VERSION" != "$REQUIRED_GRADLE_VERSION" ]; then
+              REQUIRED_MAJOR=$(echo "$REQUIRED_GRADLE_VERSION" | cut -d. -f1)
+              CURRENT_MAJOR=$(echo "${CURRENT_URL_VERSION:-0}" | cut -d. -f1)
+              if [ "$REQUIRED_MAJOR" -gt "$CURRENT_MAJOR" ] 2>/dev/null; then
+                echo "Wrapper existant pointe vers Gradle $CURRENT_URL_VERSION, incompatible avec l'AGP detecte -> mise a jour vers $REQUIRED_GRADLE_VERSION"
+                sed -i -E "s#(distributionUrl=.*gradle-)[0-9]+\.[0-9]+(\.[0-9]+)?(-(bin|all)\.zip)#\1${REQUIRED_GRADLE_VERSION}\3#" gradle/wrapper/gradle-wrapper.properties
+              fi
+            fi
             chmod +x gradlew 2>/dev/null || true
           fi
 
@@ -1452,6 +1550,8 @@ jobs:
     needs: prepare
     if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
     runs-on: ubuntu-latest
+    outputs:
+      error_message: ${{ steps.build.outputs.error_message || '' }}
     steps:
       - name: Download source
         uses: actions/download-artifact@v4
@@ -1501,17 +1601,43 @@ jobs:
             gradle-${{ runner.os }}-
 
       - name: Build Flutter
+        id: build
         run: |
           set -e
           cd src/
           PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
 
-          if [ ! -f "pubspec.yaml" ]; then
-            echo "ERREUR: pubspec.yaml non trouve"
-            exit 1
+          # FIX 5 : pas de pubspec.yaml -> au lieu d'un echec sec, on genere
+          # un scaffold Flutter minimal a partir des .dart trouves (les
+          # clients envoient parfois juste un lib/ sans le reste du projet).
+          if [ -z "$PROJECT_ROOT" ]; then
+            DART_FILES=$(find . -name "*.lib" -o -name "*.dart" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -1)
+            if [ -z "$(find . -name "*.dart" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | head -1)" ]; then
+              echo "error_message=Aucun pubspec.yaml ni fichier .dart trouve dans le projet - impossible de generer un scaffold Flutter." >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+
+            echo "pubspec.yaml manquant mais fichiers .dart trouves - generation d'un scaffold Flutter minimal..."
+            SCAFFOLD_DIR="scaffolded-flutter-${{ github.event.inputs.build_id }}"
+            mkdir -p /tmp/dart_backup
+            find . -name "*.dart" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec cp {} /tmp/dart_backup/ \;
+
+            flutter config --enable-android
+            flutter create --platforms=android --project-name app "$SCAFFOLD_DIR"
+            cp /tmp/dart_backup/*.dart "$SCAFFOLD_DIR/lib/" 2>/dev/null || true
+
+            # S'assure qu'il existe bien un point d'entree main() dans lib/main.dart
+            if ! grep -rl "void main(" "$SCAFFOLD_DIR/lib/" >/dev/null 2>&1; then
+              echo "Aucune fonction main() trouvee dans les .dart fournis - le main.dart par defaut de 'flutter create' est conserve."
+            else
+              rm -f "$SCAFFOLD_DIR/lib/main.dart.orig" 2>/dev/null || true
+            fi
+
+            PROJECT_ROOT="$SCAFFOLD_DIR"
+            echo "Scaffold Flutter genere dans $SCAFFOLD_DIR/"
           fi
+
+          cd "$PROJECT_ROOT"
 
           if [ ! -d "android" ]; then
             echo "android/ manquant - regeneration avec backup..."
@@ -2475,7 +2601,7 @@ jobs:
           cd "$PYTHON_PROJECT_ROOT"
 
           if [ -f "requirements.txt" ]; then
-            pip install -r requirements.txt
+            python -m pip install -r requirements.txt
           fi
 
           ENTRY=""
@@ -2496,8 +2622,8 @@ jobs:
             ENTRY="main.py"
           fi
 
-          pip install --upgrade pip
-          pip install --upgrade pyinstaller
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade pyinstaller
 
           APP_NAME_SAFE=$(echo "${{ github.event.inputs.app_name }}" | tr -cd '[:alnum:]_-')
           [ -z "$APP_NAME_SAFE" ] && APP_NAME_SAFE="app"
@@ -2533,8 +2659,8 @@ jobs:
             sed -i '/^\[tool\.briefcase\]$/a license = "LicenseRef-Proprietary"' pyproject.toml
           fi
 
-          pip install --upgrade pip
-          pip install --upgrade briefcase
+          python -m pip install --upgrade pip
+          python -m pip install --upgrade briefcase
           briefcase create windows app
           briefcase build windows app
           briefcase package windows app -p app
@@ -2715,7 +2841,12 @@ jobs:
             ERROR_MSG="${ERROR_MSG}Capacitor build failed. "
           fi
           if [ "${{ needs.build-react-native.result }}" == "failure" ]; then
-            ERROR_MSG="${ERROR_MSG}React Native build failed. "
+            RN_ERROR="${{ needs.build-react-native.outputs.error_message }}"
+            if [ -n "$RN_ERROR" ] && [ "$RN_ERROR" != "success" ]; then
+              ERROR_MSG="${ERROR_MSG}React Native build failed: ${RN_ERROR} "
+            else
+              ERROR_MSG="${ERROR_MSG}React Native build failed. "
+            fi
           fi
           if [ "${{ needs.build-kotlin-java.result }}" == "failure" ]; then
             KOTLIN_ERROR="${{ needs.build-kotlin-java.outputs.error_message }}"
@@ -2726,7 +2857,12 @@ jobs:
             fi
           fi
           if [ "${{ needs.build-flutter.result }}" == "failure" ]; then
-            ERROR_MSG="${ERROR_MSG}Flutter build failed. "
+            FLUTTER_ERROR="${{ needs.build-flutter.outputs.error_message }}"
+            if [ -n "$FLUTTER_ERROR" ] && [ "$FLUTTER_ERROR" != "success" ]; then
+              ERROR_MSG="${ERROR_MSG}Flutter build failed: ${FLUTTER_ERROR} "
+            else
+              ERROR_MSG="${ERROR_MSG}Flutter build failed. "
+            fi
           fi
           if [ "${{ needs.build-python.result }}" == "failure" ]; then
             PYTHON_ERROR="${{ needs.build-python.outputs.error_message }}"
