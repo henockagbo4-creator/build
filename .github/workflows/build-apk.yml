@@ -131,7 +131,7 @@ jobs:
             exit 1
           fi
           mkdir -p src
-          unzip -o -s source.zip -d src/ || true
+          unzip -o -s source.zip -d src/
 
 
       - name: Detect source directory
