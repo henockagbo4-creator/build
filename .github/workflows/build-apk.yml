@@ -1401,6 +1401,77 @@ jobs:
           PYEOF
           fi
 
+          # ------------------------------------------------------------
+          # FIX11 (NOUVEAU) : version explicite retiree des plugins Android/
+          # Kotlin dans les modules NON-racine (ex: app/build.gradle.kts).
+          # Cause reelle de "plugin is already on the classpath with an
+          # unknown version" : le root declare le plugin via un mecanisme
+          # que FIX2 ne peut pas comparer textuellement (ex: alias() de
+          # version catalog libs.versions.toml, ou apply plugin: legacy),
+          # puis le module app/ redeclare EN PLUS une version explicite
+          # pour le meme plugin. Un module non-racine ne doit jamais fixer
+          # sa propre version pour ces plugins - c'est le role exclusif du
+          # root/settings. On retire donc systematiquement toute version
+          # explicite (syntaxe "version \"X\"" ET "version(\"X\")") pour ces
+          # plugins bien connus, dans tout fichier situe hors de la racine
+          # du projet (chemin contenant un "/").
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            # Uniquement les fichiers de module (pas la racine du projet).
+            case "$GRADLE_FILE" in
+              */*) : ;;
+              *) continue ;;
+            esac
+            if [ -f "$GRADLE_FILE" ]; then
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              content = f.read()
+
+          original = content
+
+          KNOWN_PLUGINS = [
+              'com.android.application',
+              'com.android.library',
+              'com.android.dynamic-feature',
+              'org.jetbrains.kotlin.android',
+              'org.jetbrains.kotlin.jvm',
+              'com.google.gms.google-services',
+          ]
+          ids_pattern = '|'.join(re.escape(p) for p in KNOWN_PLUGINS)
+
+          # Kotlin DSL, forme infixe : id("com.android.application") version "X"
+          # Kotlin DSL, forme fonction : id("com.android.application") version("X")
+          kt_pattern = re.compile(
+              r'(id\s*\(\s*["\'](?:' + ids_pattern + r')["\']\s*\))'
+              r'\s*version\s*'
+              r'(?:\(\s*["\'][^"\']+["\']\s*\)|["\'][^"\']+["\'])'
+          )
+          content = kt_pattern.sub(r'\1', content)
+
+          # Groovy DSL : id 'com.android.application' version 'X' (ou version('X'))
+          groovy_pattern = re.compile(
+              r"(id\s+['\"](?:" + ids_pattern + r")['\"])"
+              r"\s*version\s*"
+              r"(?:\(\s*['\"][^'\"]+['\"]\s*\)|['\"][^'\"]+['\"])"
+          )
+          content = groovy_pattern.sub(r'\1', content)
+
+          if content != original:
+              with open(path, 'w') as f:
+                  f.write(content)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Version explicite retiree des plugins Android/Kotlin dans {path} (un module non-racine ne doit pas fixer sa propre version - evite 'plugin already on classpath with unknown version').\n")
+          PYEOF
+            fi
+          done
+
           # FIX 3 : syntaxe DSL AGP recente "compileSdk { version = release(N) {...} }"
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
