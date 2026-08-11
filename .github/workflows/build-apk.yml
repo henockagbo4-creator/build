@@ -1290,13 +1290,34 @@ jobs:
             fi
           done
 
-          # FIX 1 : retire tout bloc buildscript{} legacy contenant
-          # "com.android.tools.build:gradle".
+          # FIX 1 (+ FIX10 elargi) : retire tout bloc buildscript{} legacy
+          # declarant l'AGP en classpath, en conflit avec la syntaxe
+          # plugins{} moderne. Detection elargie : en plus de la chaine
+          # litterale "com.android.tools.build:gradle", on detecte aussi
+          # le cas ou un buildscript{classpath} coexiste avec une
+          # declaration plugins{ id("com.android.application"/"...library") }
+          # ailleurs dans le meme fichier - meme si le classpath utilise un
+          # alias de version catalog ou une variable au lieu de la chaine
+          # litterale. C'est cette combinaison precise qui cause l'erreur
+          # Gradle "plugin is already on the classpath with an unknown
+          # version, so compatibility cannot be checked".
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
               *settings.gradle*) continue ;;
             esac
-            if [ -f "$GRADLE_FILE" ] && grep -q "com.android.tools.build:gradle" "$GRADLE_FILE" 2>/dev/null; then
+            HAS_LITERAL_CLASSPATH="false"
+            grep -q "com.android.tools.build:gradle" "$GRADLE_FILE" 2>/dev/null && HAS_LITERAL_CLASSPATH="true"
+
+            HAS_GENERIC_CONFLICT="false"
+            if [ "$HAS_LITERAL_CLASSPATH" == "false" ] && [ -f "$GRADLE_FILE" ]; then
+              if grep -qi "buildscript" "$GRADLE_FILE" 2>/dev/null \
+                 && grep -q "classpath" "$GRADLE_FILE" 2>/dev/null \
+                 && grep -qE "com\.android\.(application|library)" "$GRADLE_FILE" 2>/dev/null; then
+                HAS_GENERIC_CONFLICT="true"
+              fi
+            fi
+
+            if [ -f "$GRADLE_FILE" ] && { [ "$HAS_LITERAL_CLASSPATH" == "true" ] || [ "$HAS_GENERIC_CONFLICT" == "true" ]; }; then
               echo "Conflit buildscript/plugins detecte dans $GRADLE_FILE - nettoyage automatique..."
               python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
           import sys
