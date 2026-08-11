@@ -200,6 +200,9 @@ jobs:
             DETECTED="capacitor"
             echo "Capacitor detecte"
           elif [ -n "$(find_file "package.json")" ] && grep -q '"expo"' "$(find_file "package.json")" 2>/dev/null; then
+            # NOUVEAU : Expo managed n'est plus bloquant. On classe direct en
+            # react-native ; le job build-react-native detecte l'absence du
+            # dossier android/ et lance "npx expo prebuild" automatiquement.
             DETECTED="react-native"
             echo "Expo detecte (managed ou bare) - le prebuild sera fait automatiquement si besoin"
           elif { [ -n "$(find_file "build.gradle")" ] || [ -n "$(find_file "build.gradle.kts")" ]; } && [ -z "$(find_file "package.json")" ]; then
@@ -236,6 +239,14 @@ jobs:
             DETECTED="web"
             echo "Site statique detecte"
           else
+            # ============================================================
+            # FALLBACK PAR EXTENSION — dernier recours avant de bloquer.
+            # Les clients ne respectent pas toujours la structure attendue
+            # (pas de main.py nomme comme tel, pas de build.gradle a la
+            # racine, pas de package.json...). On devine par extension et
+            # on laisse le job de build correspondant scaffolder ce qui
+            # manque, plutot que de bloquer immediatement.
+            # ============================================================
             PY_COUNT=$(count_files "*.py")
             KT_JAVA_COUNT=$(( $(count_files "*.kt") + $(count_files "*.java") ))
             JS_TS_COUNT=$(( $(count_files "*.js") + $(count_files "*.ts") + $(count_files "*.jsx") + $(count_files "*.tsx") ))
@@ -405,6 +416,13 @@ jobs:
       - name: Install Cordova
         run: npm install -g cordova
 
+      # ============================================================
+      # NOUVEAU : bundling esbuild zero-config. Si on trouve du JS/TS/
+      # JSX/TSX sans package.json (donc jamais transpile), ou avec un
+      # package.json mais sans build reussi, on bundle nous-memes avec
+      # esbuild avant de filer le resultat a Cordova. Ca evite le
+      # "build reussi mais app cassee / ecran blanc".
+      # ============================================================
       - name: Bundle raw JS/JSX/TS with esbuild if no build output
         id: esbuild
         run: |
@@ -415,6 +433,9 @@ jobs:
           cd "$PROJECT_ROOT"
           echo "ESBUILD_ROOT=$PWD" >> "$GITHUB_ENV"
 
+          # On bundle si : (a) pas de package.json du tout, OU (b) un
+          # package.json existe mais sans script "build" (donc rien ne
+          # transpile le JSX/TS/imports).
           NEEDS_BUNDLE="false"
           if [ ! -f "package.json" ]; then
             if find . -maxdepth 3 -type f \( -iname "*.jsx" -o -iname "*.tsx" \) -not -path "*/node_modules/*" | grep -q .; then
@@ -489,6 +510,7 @@ jobs:
           cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
           rm -rf "$CORDOVA_DIR"/www/*
 
+          # Priorite : sortie esbuild > dist/ > build/ > racine
           COPY_FROM="."
           if [ -n "${ESBUILD_OUTPUT_DIR:-}" ] && [ -d "$ESBUILD_OUTPUT_DIR" ]; then
             COPY_FROM="$ESBUILD_OUTPUT_DIR"
@@ -510,10 +532,19 @@ jobs:
           cd "$SAVED_CORDOVA_DIR"
           cordova platform add android
 
+      # ============================================================
+      # ICONE FORCEE : cordova-res en premiere tentative, puis fallback
+      # force par ImageMagick dans tous les mipmap-*, quel que soit le
+      # resultat de cordova-res.
+      # ============================================================
       - name: Apply custom icon (Cordova)
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
+          # FIX 2 : ImageMagick n'est pas garanti preinstalle sur tous les
+          # runners ubuntu-latest (versions d'image variables). On
+          # l'installe explicitement pour que "convert" soit toujours
+          # disponible pour le fallback force plus bas.
           if ! command -v convert >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y imagemagick
@@ -551,12 +582,6 @@ jobs:
                 convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_foreground.png"
             done
             echo "Icone personnalisee forcee avec succes dans toutes les densites."
-            ADAPTIVE_DIR="$RES_DIR/mipmap-anydpi-v26"
-            if [ -d "$ADAPTIVE_DIR" ]; then
-              rm -f "$ADAPTIVE_DIR/ic_launcher.xml"
-              rm -f "$ADAPTIVE_DIR/ic_launcher_round.xml"
-              echo "Fichiers adaptatifs supprimes : $ADAPTIVE_DIR/ic_launcher.xml et ic_launcher_round.xml"
-            fi
           fi
 
       - name: Build Cordova
@@ -673,6 +698,8 @@ jobs:
         if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
+          # FIX 2 : meme raison que pour Cordova - on garantit la presence
+          # d'ImageMagick avant d'appeler "convert".
           if ! command -v convert >/dev/null 2>&1; then
             sudo apt-get update -y
             sudo apt-get install -y imagemagick
@@ -692,7 +719,7 @@ jobs:
           if [ -z "$RES_DIR" ]; then
             echo "ATTENTION: dossier res/ Android introuvable, icone personnalisee non appliquee."
           else
-                       echo "Application forcee de l'icone dans : $RES_DIR"
+            echo "Application forcee de l'icone dans : $RES_DIR"
             declare -A SIZES=( ["mipmap-mdpi"]=48 ["mipmap-hdpi"]=72 ["mipmap-xhdpi"]=96 ["mipmap-xxhdpi"]=144 ["mipmap-xxxhdpi"]=192 )
             for dir in "${!SIZES[@]}"; do
               SIZE="${SIZES[$dir]}"
@@ -703,12 +730,6 @@ jobs:
                 convert resources/icon.png -resize "${SIZE}x${SIZE}" "$RES_DIR/$dir/ic_launcher_foreground.png"
             done
             echo "Icone personnalisee forcee avec succes dans toutes les densites."
-            ADAPTIVE_DIR="$RES_DIR/mipmap-anydpi-v26"
-            if [ -d "$ADAPTIVE_DIR" ]; then
-              rm -f "$ADAPTIVE_DIR/ic_launcher.xml"
-              rm -f "$ADAPTIVE_DIR/ic_launcher_round.xml"
-              echo "Fichiers adaptatifs supprimes : $ADAPTIVE_DIR/ic_launcher.xml et ic_launcher_round.xml"
-            fi
           fi
 
       - name: Disable default splash screen
@@ -850,6 +871,9 @@ jobs:
 
           if [ ! -d "android" ]; then
             echo "android/ manquant - tentative de regeneration..."
+            # FIX 4 : ne plus avaler l'erreur avec "|| true". Si prebuild/eject
+            # echoue, on le sait explicitement au lieu de planter plus loin
+            # sur un "cd android: No such file or directory" illisible.
             if [ -f "package.json" ] && grep -q '"expo"' package.json; then
               if ! npx expo prebuild --platform android 2>&1 | tee /tmp/prebuild.log; then
                 ERROR_MSG=$(tail -30 /tmp/prebuild.log | tr '\n' ' ' | tr -d '\r')
@@ -864,6 +888,9 @@ jobs:
               fi
             fi
 
+            # Verification finale explicite : si android/ n'existe toujours
+            # pas malgre un exit code 0 (cas rare mais possible), on le
+            # signale clairement plutot que de laisser planter "cd android".
             if [ ! -d "android" ]; then
               echo "error_message=Le dossier android/ est toujours absent apres la regeneration, sans erreur explicite du prebuild/eject. Verifiez la structure du projet source." >> "$GITHUB_OUTPUT"
               exit 1
@@ -966,6 +993,14 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
+      # ============================================================
+      # NOUVEAU (FIX4) : scaffold Gradle complet si aucun build.gradle
+      # n'est trouve du tout (cas des clients qui envoient juste des
+      # fichiers .kt/.java bruts, sans projet Android Studio). On genere
+      # une structure minimale mais complete : settings.gradle,
+      # build.gradle racine, app/build.gradle, AndroidManifest.xml, et on
+      # deplace les sources trouvees dans app/src/main/java (ou kotlin).
+      # ============================================================
       - name: Scaffold Gradle project if build.gradle missing
         id: scaffold
         run: |
@@ -985,6 +1020,8 @@ jobs:
             [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
             PKG_PATH=$(echo "$PKG_ID" | tr '.' '/')
 
+            # Deplace les .kt/.java trouves dans l'arborescence source vers
+            # le bon dossier package, en preservant les fichiers.
             HAS_KOTLIN="false"
             mkdir -p "$PROJECT_ROOT/app/src/main/java/$PKG_PATH" "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH"
             while IFS= read -r f; do
@@ -994,6 +1031,7 @@ jobs:
               esac
             done < <(find . -type f \( -name "*.kt" -o -name "*.java" \) -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/$PROJECT_ROOT/*")
 
+            # S'assure qu'au moins une Activity minimale existe.
             if [ "$HAS_KOTLIN" == "true" ]; then
               if ! grep -rl "class.*Activity" "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH/" >/dev/null 2>&1; then
                 cat > "$PROJECT_ROOT/app/src/main/kotlin/$PKG_PATH/MainActivity.kt" << KT_EOF
@@ -1110,6 +1148,13 @@ jobs:
             echo "SCAFFOLDED=false" >> "$GITHUB_ENV"
           fi
 
+      # ============================================================
+      # AUTO-FIX : conflit "buildscript{classpath} legacy" vs "plugins{}"
+      # DSL moderne, versions de plugin dupliquees, syntaxe DSL AGP
+      # recente non supportee pour compileSdk/targetSdk/minSdk, ET
+      # (NOUVEAU FIX5) memoire Gradle insuffisante -> ajout automatique
+      # de org.gradle.jvmargs dans gradle.properties.
+      # ============================================================
       - name: Auto-fix legacy buildscript/plugins DSL conflict + memory
         run: |
           set -e
@@ -1135,12 +1180,21 @@ jobs:
 
           PROJECT_ROOT=$(find_project_root)
           cd "$PROJECT_ROOT"
+          # On stocke toujours un chemin ABSOLU (via $PWD apres le cd), pour
+          # que l'etape de build suivante n'ait pas a deviner si le chemin
+          # est relatif a src/ (cas normal) ou deja absolu (cas scaffold).
           echo "Racine du projet Gradle detectee : $PWD"
           echo "GRADLE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
           FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
           touch "$FIXES_LOG"
 
+          # ------------------------------------------------------------
+          # FIX5 (NOUVEAU) : memoire Gradle insuffisante -> cause frequente
+          # de builds qui timeout ou crashent silencieusement sur des
+          # runners standard. On force org.gradle.jvmargs si absent ou
+          # trop bas.
+          # ------------------------------------------------------------
           if [ -f "gradle.properties" ]; then
             if grep -q "org.gradle.jvmargs" gradle.properties; then
               sed -i -E 's/org\.gradle\.jvmargs\s*=.*/org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m/' gradle.properties
@@ -1156,112 +1210,6 @@ jobs:
           fi
           echo "Memoire Gradle fixee a -Xmx2048m dans gradle.properties (evite les crashs OOM silencieux)." >> "$FIXES_LOG"
 
-          # ------------------------------------------------------------
-          # FIX7 (NOUVEAU) : depot google() manquant dans settings.gradle(.kts).
-          # Le plugin "com.android.application" (et les autres plugins AGP)
-          # ne sont PAS hebeges sur le Gradle Plugin Portal mais sur le
-          # depot Maven de Google - erreur typique : "Plugin [id:
-          # 'com.android.application', version: '8.5.0'] was not found...
-          # Searched in the following repositories: Gradle Central Plugin
-          # Repository" (un seul depot cherche = google() absent du bloc
-          # pluginManagement.repositories). On corrige aussi le meme
-          # probleme cote dependencyResolutionManagement.repositories, qui
-          # cause une erreur symetrique sur la resolution des dependances
-          # de bibliotheques (androidx, etc.) une fois le plugin resolu.
-          # ------------------------------------------------------------
-          SETTINGS_FILE=""
-          for f in settings.gradle.kts settings.gradle; do
-            [ -f "$f" ] && SETTINGS_FILE="$f" && break
-          done
-
-          if [ -n "$SETTINGS_FILE" ]; then
-            python3 - "$SETTINGS_FILE" "$FIXES_LOG" << 'PYEOF'
-          import re
-          import sys
-
-          path, fixes_log = sys.argv[1], sys.argv[2]
-          with open(path) as f:
-              content = f.read()
-
-          original = content
-          fixes = []
-
-          def find_block(text, keyword, start=0):
-              """Trouve keyword { ... repositories { ... } ... } et retourne
-              (block_start, repos_start, repos_end, block_end) ou None."""
-              idx = text.find(keyword, start)
-              if idx == -1:
-                  return None
-              brace = text.find('{', idx)
-              if brace == -1:
-                  return None
-              depth = 0
-              i = brace
-              while i < len(text):
-                  if text[i] == '{':
-                      depth += 1
-                  elif text[i] == '}':
-                      depth -= 1
-                      if depth == 0:
-                          block_end = i + 1
-                          break
-                  i += 1
-              else:
-                  return None
-              block_body = text[brace:block_end]
-              repo_idx = block_body.find('repositories')
-              if repo_idx == -1:
-                  return (idx, brace, None, None, block_end)
-              repo_brace = block_body.find('{', repo_idx)
-              depth2 = 0
-              j = repo_brace
-              while j < len(block_body):
-                  if block_body[j] == '{':
-                      depth2 += 1
-                  elif block_body[j] == '}':
-                      depth2 -= 1
-                      if depth2 == 0:
-                          repo_end = j + 1
-                          break
-                  j += 1
-              else:
-                  return (idx, brace, None, None, block_end)
-              return (idx, brace, brace + repo_brace, brace + repo_end, block_end)
-
-          def ensure_google(text, keyword, label):
-              result = find_block(text, keyword)
-              if result is None:
-                  return text
-              idx, brace, repo_start, repo_end, block_end = result
-              if repo_start is None:
-                  # Le bloc existe mais sans sous-bloc repositories { } du
-                  # tout -> on en insere un juste apres l'accolade ouvrante.
-                  insertion = "\n        repositories {\n            google()\n            mavenCentral()\n            gradlePluginPortal()\n        }\n"
-                  text = text[:brace + 1] + insertion + text[brace + 1:]
-                  fixes.append(f"Bloc repositories {{}} ajoute dans {label} (google() absent)")
-                  return text
-              repo_block = text[repo_start:repo_end]
-              if 'google(' in repo_block or 'google ' in repo_block:
-                  return text
-              # Insere google() juste apres l'accolade ouvrante du bloc
-              # repositories existant.
-              open_brace_pos = repo_start + repo_block.find('{') + 1
-              text = text[:open_brace_pos] + "\n        google()" + text[open_brace_pos:]
-              fixes.append(f"google() ajoute dans le bloc repositories de {label} (absent -> resolution des plugins/dependances Android impossible)")
-              return text
-
-          content = ensure_google(content, 'pluginManagement', 'pluginManagement { repositories {} }')
-          content = ensure_google(content, 'dependencyResolutionManagement', 'dependencyResolutionManagement { repositories {} }')
-
-          if content != original:
-              with open(path, 'w') as f:
-                  f.write(content)
-              with open(fixes_log, 'a') as log:
-                  for fix in fixes:
-                      log.write(f"{fix} dans {path}\n")
-          PYEOF
-          fi
-
           PRIORITY_FILES=""
           for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
             [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
@@ -1276,6 +1224,8 @@ jobs:
             esac
           done
 
+          # FIX 1 : retire tout bloc buildscript{} legacy contenant
+          # "com.android.tools.build:gradle".
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
               *settings.gradle*) continue ;;
@@ -1312,6 +1262,7 @@ jobs:
             fi
           done
 
+          # FIX 2 : version de plugin declaree en double.
           if [ -n "$ALL_GRADLE_FILES" ]; then
             python3 - "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
           import re
@@ -1363,6 +1314,7 @@ jobs:
           PYEOF
           fi
 
+          # FIX 3 : syntaxe DSL AGP recente "compileSdk { version = release(N) {...} }"
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
               *settings.gradle*) continue ;;
@@ -1405,6 +1357,14 @@ jobs:
           set -o pipefail
           cd "$GRADLE_PROJECT_ROOT"
 
+          # ============================================================
+          # FIX 3 : la version Gradle du wrapper doit etre compatible avec
+          # l'AGP declare dans build.gradle(.kts). Un AGP 9.x exige au
+          # minimum Gradle 9.3.1 ; generer/garder un wrapper 8.9 fait
+          # planter le build avec "Minimum supported Gradle version is
+          # 9.3.1. Current version is 8.9". On detecte l'AGP et on force
+          # la version Gradle adequate, MEME si un wrapper existe deja.
+          # ============================================================
           detect_required_gradle_version() {
             local agp_version=""
             agp_version=$(grep -rhoE "com\.android\.(application|library)['\"]\)?\s+version\s+['\"][0-9]+\.[0-9]+(\.[0-9]+)?['\"]|com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?" \
@@ -1419,6 +1379,9 @@ jobs:
             local agp_major
             agp_major=$(echo "$agp_version" | cut -d. -f1)
 
+            # Correspondance AGP -> Gradle minimum (approximatif mais
+            # suffisant pour eviter le crash "Minimum supported Gradle
+            # version"). AGP 9.x exige explicitement >= 9.3.1.
             if [ "$agp_major" -ge 9 ]; then
               echo "9.3.1"
             elif [ "$agp_major" -eq 8 ]; then
@@ -1431,6 +1394,13 @@ jobs:
           REQUIRED_GRADLE_VERSION=$(detect_required_gradle_version)
           echo "Version Gradle requise (deduite de l'AGP du projet) : $REQUIRED_GRADLE_VERSION"
 
+          # ============================================================
+          # FIX 6 : un gradlew present ne veut pas dire un wrapper valide.
+          # Si gradle-wrapper.jar est absent, vide, ou n'est pas un zip
+          # valide (jar corrompu), gradlew plantera avec "Unable to access
+          # jarfile gradle-wrapper.jar" sans que le check existant
+          # ("[ ! -f gradlew ]") ne le detecte. On verifie explicitement.
+          # ============================================================
           is_wrapper_valid() {
             [ -s "gradlew" ] || return 1
             [ -s "gradle/wrapper/gradle-wrapper.jar" ] || return 1
@@ -1460,6 +1430,9 @@ jobs:
               done
             fi
 
+            # Ecrit / reecrit systematiquement gradle-wrapper.properties avec
+            # la version requise, meme si le fichier existait deja avec une
+            # version incompatible avec l'AGP du projet.
             mkdir -p gradle/wrapper
             cat > gradle/wrapper/gradle-wrapper.properties << PROPS_EOF
           distributionBase=GRADLE_USER_HOME
@@ -1480,6 +1453,9 @@ jobs:
               exit 1
             fi
           else
+            # Wrapper present ET valide, mais peut pointer vers une version
+            # Gradle trop ancienne pour l'AGP du projet : on met a jour
+            # distributionUrl si besoin, sans regenerer gradlew/le jar.
             CURRENT_URL_VERSION=$(grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?-(bin|all)\.zip' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
             if [ "$CURRENT_URL_VERSION" != "$REQUIRED_GRADLE_VERSION" ]; then
               REQUIRED_MAJOR=$(echo "$REQUIRED_GRADLE_VERSION" | cut -d. -f1)
@@ -1631,6 +1607,9 @@ jobs:
           cd src/
           PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
 
+          # FIX 5 : pas de pubspec.yaml -> au lieu d'un echec sec, on genere
+          # un scaffold Flutter minimal a partir des .dart trouves (les
+          # clients envoient parfois juste un lib/ sans le reste du projet).
           if [ -z "$PROJECT_ROOT" ]; then
             DART_FILES=$(find . -name "*.lib" -o -name "*.dart" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -1)
             if [ -z "$(find . -name "*.dart" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | head -1)" ]; then
@@ -1647,6 +1626,7 @@ jobs:
             flutter create --platforms=android --project-name app "$SCAFFOLD_DIR"
             cp /tmp/dart_backup/*.dart "$SCAFFOLD_DIR/lib/" 2>/dev/null || true
 
+            # S'assure qu'il existe bien un point d'entree main() dans lib/main.dart
             if ! grep -rl "void main(" "$SCAFFOLD_DIR/lib/" >/dev/null 2>&1; then
               echo "Aucune fonction main() trouvee dans les .dart fournis - le main.dart par defaut de 'flutter create' est conserve."
             else
@@ -1674,6 +1654,94 @@ jobs:
             [ -f "/tmp/flutter_backup/analysis_options.yaml" ] && cp /tmp/flutter_backup/analysis_options.yaml .
 
             echo "android/ regenere avec backup restaure"
+          fi
+
+          # ============================================================
+          # FIX8 (NOUVEAU) : android/ existant (fourni par le client) mais
+          # incoherent - app/build.gradle(.kts) declare un plugin AGP/Kotlin
+          # SANS version ("id(\"com.android.application\")"), en s'attendant
+          # a ce que la version soit fixee dans settings.gradle(.kts) via
+          # pluginManagement { plugins { ... version \"X\" apply false } }.
+          # Si ce bloc est absent/incomplet, Gradle echoue avec "plugin
+          # dependency must include a version number for this source".
+          # On detecte ce cas et on injecte des versions par defaut connues
+          # pour etre compatibles avec le Flutter stable installe sur le
+          # runner.
+          # ============================================================
+          if [ -d "android" ]; then
+            SETTINGS_FILE=""
+            for f in android/settings.gradle.kts android/settings.gradle; do
+              [ -f "$f" ] && SETTINGS_FILE="$f" && break
+            done
+            APP_GRADLE_FILE=""
+            for f in android/app/build.gradle.kts android/app/build.gradle; do
+              [ -f "$f" ] && APP_GRADLE_FILE="$f" && break
+            done
+
+            if [ -n "$SETTINGS_FILE" ] && [ -n "$APP_GRADLE_FILE" ]; then
+              python3 - "$SETTINGS_FILE" "$APP_GRADLE_FILE" << 'PYEOF'
+          import re
+          import sys
+
+          settings_path, app_path = sys.argv[1], sys.argv[2]
+
+          with open(app_path) as f:
+              app_content = f.read()
+          with open(settings_path) as f:
+              settings_content = f.read()
+
+          # Plugins couramment declares sans version au niveau app/, avec la
+          # version par defaut a injecter s'ils en manquent une globalement.
+          DEFAULT_VERSIONS = {
+              'com.android.application': '8.5.0',
+              'org.jetbrains.kotlin.android': '1.9.24',
+          }
+
+          bare_plugin_pattern = re.compile(
+              r'id\s*\(\s*["\'](?P<id>[\w.\-]+)["\']\s*\)(?!\s*version)|'
+              r'id\s+["\'](?P<id2>[\w.\-]+)["\'](?!\s+version)'
+          )
+
+          needed = []
+          for m in bare_plugin_pattern.finditer(app_content):
+              pid = m.group('id') or m.group('id2')
+              if pid in DEFAULT_VERSIONS:
+                  # Cette version est-elle deja declaree QUELQUE PART dans
+                  # settings (pluginManagement.plugins) ?
+                  if not re.search(re.escape(pid) + r'["\'\)]\s*\)?\s*version\s*["\']', settings_content) and \
+                     not re.search(r'version\s*["\'][^"\']+["\']\s*\)?\s*\n?\s*id\s*\(?\s*["\']' + re.escape(pid), settings_content):
+                      needed.append(pid)
+
+          if needed:
+              idx = settings_content.find('pluginManagement')
+              if idx != -1:
+                  brace = settings_content.find('{', idx)
+                  plugins_idx = settings_content.find('plugins', brace)
+                  # Cherche un bloc plugins { } DANS pluginManagement (avant la
+                  # fin du bloc pluginManagement, approx via prochaine accolade
+                  # fermante de meme profondeur - recherche simplifiee).
+                  block_end_search = settings_content.find('\n}', brace)
+                  has_plugins_block = plugins_idx != -1 and (block_end_search == -1 or plugins_idx < block_end_search)
+
+                  lines_to_add = "\n".join(
+                      f'        id("{pid}") version "{DEFAULT_VERSIONS[pid]}" apply false'
+                      for pid in needed
+                  )
+
+                  if has_plugins_block:
+                      pbrace = settings_content.find('{', plugins_idx)
+                      settings_content = settings_content[:pbrace + 1] + "\n" + lines_to_add + settings_content[pbrace + 1:]
+                  else:
+                      insertion = f"\n    plugins {{\n{lines_to_add}\n    }}\n"
+                      settings_content = settings_content[:brace + 1] + insertion + settings_content[brace + 1:]
+
+                  with open(settings_path, 'w') as f:
+                      f.write(settings_content)
+                  print(f"FIX8 applique : version(s) injectee(s) pour {', '.join(needed)} dans {settings_path}")
+              else:
+                  print(f"ATTENTION FIX8 : plugin(s) sans version ({needed}) detecte(s) dans {app_path}, mais aucun bloc pluginManagement trouve dans {settings_path} - correction manuelle necessaire.")
+          PYEOF
+            fi
           fi
 
           flutter pub get
@@ -1772,6 +1840,13 @@ jobs:
             zlib1g-dev libncurses5-dev libncursesw5-dev \
             cmake libffi-dev libssl-dev unzip
 
+      # ============================================================
+      # DECISION : Buildozer par defaut. Briefcase seulement si une
+      # config [tool.briefcase] deja etoffee est trouvee (plusieurs
+      # apps declares, ou une liste "requires" de plus de 3 paquets),
+      # ce qui indique un projet Briefcase construit intentionnellement
+      # qu'on ne veut pas court-circuiter.
+      # ============================================================
       - name: Decide Buildozer vs Briefcase
         id: decide
         run: |
@@ -1804,6 +1879,11 @@ jobs:
           echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
           echo "=== OUTIL CHOISI: $TOOL ==="
 
+      # ============================================================
+      # BUILDOZER — chemin par defaut. Genere buildozer.spec si absent,
+      # a partir de n'importe quel .py trouve (main.py, app.py, ou le
+      # premier fichier .py rencontre).
+      # ============================================================
       - name: Build with Buildozer
         id: build-buildozer
         if: ${{ steps.decide.outputs.tool == 'buildozer' }}
@@ -1829,10 +1909,15 @@ jobs:
             ENTRY="main.py"
           fi
 
+          # Si l'entree n'est pas nommee main.py, buildozer.spec pointera
+          # vers elle via "source.include_exts" / on la copie en main.py
+          # pour rester dans la convention Buildozer standard.
           if [ "$ENTRY" != "main.py" ]; then
             cp "$ENTRY" main.py
           fi
 
+          # Detection de Kivy (sinon requirement python3 seul, qui marche
+          # pour n'importe quel script pur, meme sans UI graphique Kivy).
           REQUIREMENTS="python3"
           if grep -rl "^import kivy\|^from kivy" . --include="*.py" >/dev/null 2>&1; then
             REQUIREMENTS="python3,kivy"
@@ -1897,6 +1982,10 @@ jobs:
           fi
           echo "error_message=success" >> "$GITHUB_OUTPUT"
 
+      # ============================================================
+      # BRIEFCASE — seulement pour les projets deja construits pour
+      # Briefcase de facon deliberee (voir "Decide" ci-dessus).
+      # ============================================================
       - name: Build with Briefcase
         id: build-briefcase
         if: ${{ steps.decide.outputs.tool == 'briefcase' }}
@@ -2588,6 +2677,9 @@ jobs:
           echo "tool=$TOOL" >> "$GITHUB_OUTPUT"
           echo "=== OUTIL CHOISI (Windows): $TOOL ==="
 
+      # ============================================================
+      # PYINSTALLER — chemin par defaut, aucune structure requise.
+      # ============================================================
       - name: Build with PyInstaller
         id: build-pyinstaller
         if: ${{ steps.decide.outputs.tool == 'pyinstaller' }}
@@ -2636,6 +2728,9 @@ jobs:
           fi
           echo "error_message=success" >> "$GITHUB_OUTPUT"
 
+      # ============================================================
+      # BRIEFCASE — seulement pour config Windows deliberement etoffee.
+      # ============================================================
       - name: Build with Briefcase for Windows
         id: build-briefcase
         if: ${{ steps.decide.outputs.tool == 'briefcase' }}
