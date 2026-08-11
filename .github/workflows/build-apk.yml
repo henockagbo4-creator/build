@@ -1224,6 +1224,72 @@ jobs:
             esac
           done
 
+          # ------------------------------------------------------------
+          # FIX9 (NOUVEAU) : residus de commande shell en tete de fichier
+          # Gradle - typiquement "cat > build.gradle << EOF" ou "cat <<
+          # 'EOF'" colle par erreur au tout debut du fichier (le client a
+          # genere son build.gradle via un script et a oublie de retirer
+          # l'enveloppe heredoc), ou un marqueur "EOF" isole restant en fin
+          # de fichier. Gradle essaie alors d'evaluer le mot "cat" comme
+          # une propriete Groovy -> "Could not get unknown property 'cat'
+          # for root project ... build.gradle line: 1".
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$GRADLE_FILE" ]; then
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              lines = f.readlines()
+
+          original_lines = list(lines)
+
+          # Motifs de residus heredoc/shell a reperer en tete de fichier :
+          # "cat > x << EOF", "cat << 'EOF'", "cat <<EOF", ou juste "cat"
+          # seul sur la ligne.
+          heredoc_start = re.compile(r'^\s*cat\b.*<<\s*[\'"]?[A-Za-z_]+[\'"]?\s*$')
+          bare_cat = re.compile(r'^\s*cat\s*$')
+
+          removed_leading = 0
+          while lines:
+              stripped = lines[0].strip()
+              if stripped == '':
+                  # ligne vide en tete -> on la retire aussi pour continuer
+                  # a inspecter la vraie premiere ligne de contenu
+                  lines.pop(0)
+                  removed_leading += 1
+                  continue
+              if heredoc_start.match(lines[0]) or bare_cat.match(lines[0]):
+                  lines.pop(0)
+                  removed_leading += 1
+                  continue
+              break
+
+          # Marqueur heredoc isole en toute fin de fichier (ex: derniere
+          # ligne non-vide == "EOF" ou un mot-terminator similaire tout seul).
+          removed_trailing = 0
+          while lines:
+              stripped = lines[-1].strip()
+              if stripped == '':
+                  lines.pop()
+                  continue
+              if re.match(r'^[A-Za-z_]+_?EOF$|^EOF$', stripped):
+                  lines.pop()
+                  removed_trailing += 1
+                  continue
+              break
+
+          if removed_leading > 0 or removed_trailing > 0:
+              with open(path, 'w') as f:
+                  f.writelines(lines)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Residus de commande shell/heredoc (ex: 'cat > ... << EOF') retires de {path} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin) - fichier genere via un script cote client sans nettoyage de l'enveloppe.\n")
+          PYEOF
+            fi
+          done
+
           # FIX 1 : retire tout bloc buildscript{} legacy contenant
           # "com.android.tools.build:gradle".
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
