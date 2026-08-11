@@ -1516,12 +1516,17 @@ jobs:
           cd "$GRADLE_PROJECT_ROOT"
 
           # ============================================================
-          # FIX 3 : la version Gradle du wrapper doit etre compatible avec
-          # l'AGP declare dans build.gradle(.kts). Un AGP 9.x exige au
-          # minimum Gradle 9.3.1 ; generer/garder un wrapper 8.9 fait
+          # FIX 3 (+ mapping affine) : la version Gradle du wrapper doit
+          # etre compatible avec l'AGP declare dans build.gradle(.kts). Le
+          # minimum requis varie par version MINEURE d'AGP, pas seulement
+          # par version majeure (ex: AGP 8.9.x exige Gradle >= 8.11.1, alors
+          # qu'AGP 8.0.x se contente de Gradle 8.0) - un mapping uniquement
+          # par majeure (tout "8.x" -> "8.9") est donc insuffisant et fait
           # planter le build avec "Minimum supported Gradle version is
-          # 9.3.1. Current version is 8.9". On detecte l'AGP et on force
-          # la version Gradle adequate, MEME si un wrapper existe deja.
+          # 8.11.1. Current version is 8.9". On detecte l'AGP et on choisit
+          # la version Gradle minimale correspondante d'apres la table de
+          # compatibilite officielle Android/Gradle, MEME si un wrapper
+          # existe deja.
           # ============================================================
           detect_required_gradle_version() {
             local agp_version=""
@@ -1534,19 +1539,34 @@ jobs:
               return
             fi
 
-            local agp_major
+            local agp_major agp_minor
             agp_major=$(echo "$agp_version" | cut -d. -f1)
+            agp_minor=$(echo "$agp_version" | cut -d. -f2)
 
-            # Correspondance AGP -> Gradle minimum (approximatif mais
-            # suffisant pour eviter le crash "Minimum supported Gradle
-            # version"). AGP 9.x exige explicitement >= 9.3.1.
+            # Table de compatibilite AGP -> Gradle minimum (par version
+            # MINEURE), d'apres la doc officielle Android Gradle Plugin.
+            # Volontairement conservateur : en cas de version AGP future
+            # non listee, on retombe sur le plus haut minimum connu de la
+            # meme serie majeure plutot que de risquer un minimum trop bas.
             if [ "$agp_major" -ge 9 ]; then
               echo "9.3.1"
-            elif [ "$agp_major" -eq 8 ]; then
-              echo "8.9"
-            else
-              echo "8.9"
+              return
             fi
+
+            if [ "$agp_major" -eq 8 ]; then
+              if   [ "$agp_minor" -le 1 ]; then echo "8.0"
+              elif [ "$agp_minor" -eq 2 ]; then echo "8.2"
+              elif [ "$agp_minor" -eq 3 ]; then echo "8.4"
+              elif [ "$agp_minor" -eq 4 ]; then echo "8.6"
+              elif [ "$agp_minor" -le 6 ]; then echo "8.7"
+              elif [ "$agp_minor" -eq 7 ]; then echo "8.9"
+              elif [ "$agp_minor" -eq 8 ]; then echo "8.10.2"
+              else echo "8.11.1"
+              fi
+              return
+            fi
+
+            echo "8.9"
           }
 
           REQUIRED_GRADLE_VERSION=$(detect_required_gradle_version)
@@ -1614,12 +1634,15 @@ jobs:
             # Wrapper present ET valide, mais peut pointer vers une version
             # Gradle trop ancienne pour l'AGP du projet : on met a jour
             # distributionUrl si besoin, sans regenerer gradlew/le jar.
+            # Comparaison de version COMPLETE (via sort -V), pas seulement
+            # le major - un wrapper 8.9 est "major 8" comme un requis
+            # 8.11.1, une comparaison majeure seule aurait manque la mise
+            # a jour necessaire.
             CURRENT_URL_VERSION=$(grep -oE 'gradle-[0-9]+\.[0-9]+(\.[0-9]+)?-(bin|all)\.zip' gradle/wrapper/gradle-wrapper.properties 2>/dev/null | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -1)
-            if [ "$CURRENT_URL_VERSION" != "$REQUIRED_GRADLE_VERSION" ]; then
-              REQUIRED_MAJOR=$(echo "$REQUIRED_GRADLE_VERSION" | cut -d. -f1)
-              CURRENT_MAJOR=$(echo "${CURRENT_URL_VERSION:-0}" | cut -d. -f1)
-              if [ "$REQUIRED_MAJOR" -gt "$CURRENT_MAJOR" ] 2>/dev/null; then
-                echo "Wrapper existant pointe vers Gradle $CURRENT_URL_VERSION, incompatible avec l'AGP detecte -> mise a jour vers $REQUIRED_GRADLE_VERSION"
+            if [ -n "$CURRENT_URL_VERSION" ] && [ "$CURRENT_URL_VERSION" != "$REQUIRED_GRADLE_VERSION" ]; then
+              LOWER_VERSION=$(printf '%s\n%s\n' "$CURRENT_URL_VERSION" "$REQUIRED_GRADLE_VERSION" | sort -V | head -1)
+              if [ "$LOWER_VERSION" == "$CURRENT_URL_VERSION" ] && [ "$CURRENT_URL_VERSION" != "$REQUIRED_GRADLE_VERSION" ]; then
+                echo "Wrapper existant pointe vers Gradle $CURRENT_URL_VERSION, insuffisant pour l'AGP detecte (requis: $REQUIRED_GRADLE_VERSION) -> mise a jour"
                 sed -i -E "s#(distributionUrl=.*gradle-)[0-9]+\.[0-9]+(\.[0-9]+)?(-(bin|all)\.zip)#\1${REQUIRED_GRADLE_VERSION}\3#" gradle/wrapper/gradle-wrapper.properties
               fi
             fi
