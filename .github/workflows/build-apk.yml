@@ -131,8 +131,7 @@ jobs:
             exit 1
           fi
           mkdir -p src
-          unzip -o source.zip -d src/ || true
-
+          unzip -o source.zip -d src/
 
       - name: Detect source directory
         id: detect
@@ -521,7 +520,19 @@ jobs:
             COPY_FROM="build"
           fi
 
-          cp -r "$COPY_FROM"/* "$CORDOVA_DIR"/www/ 2>/dev/null || true
+          # FIX13 (NOUVEAU) : ne jamais copier node_modules/ dans www/. En
+          # l'absence de dist/build/sortie esbuild, COPY_FROM pointait sur
+          # la racine du projet entiere - node_modules inclus. Les symlinks
+          # de node_modules/.bin/* (crees par npm) font planter la copie
+          # Cordova avec "src and dest cannot be the same ... .bin/errno" ;
+          # en plus d'etre totalement inutile a embarquer dans l'app.
+          mkdir -p "$CORDOVA_DIR"/www
+          if command -v rsync >/dev/null 2>&1; then
+            rsync -a --exclude 'node_modules' --exclude '.git' "$COPY_FROM"/ "$CORDOVA_DIR"/www/ 2>/dev/null || true
+          else
+            find "$COPY_FROM" -maxdepth 1 -mindepth 1 ! -name node_modules ! -name .git \
+              -exec cp -r {} "$CORDOVA_DIR"/www/ \; 2>/dev/null || true
+          fi
 
           sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="SplashScreenDelay" value="0" />\n</widget>#' "$CORDOVA_DIR"/config.xml
 
@@ -1534,6 +1545,85 @@ jobs:
             agp_version=$(grep -rhoE "com\.android\.(application|library)['\"]\)?\s+version\s+['\"][0-9]+\.[0-9]+(\.[0-9]+)?['\"]|com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?" \
               . --include="build.gradle" --include="build.gradle.kts" --include="settings.gradle" --include="settings.gradle.kts" 2>/dev/null \
               | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
+
+            # ------------------------------------------------------------
+            # FIX12 (corrige) : la version AGP n'est pas toujours ecrite en
+            # dur dans build.gradle(.kts) - les projets Android Studio
+            # recents la declarent via un VERSION CATALOG
+            # (gradle/libs.versions.toml), reference ensuite par
+            # alias(libs.plugins.android.application) sans aucun numero de
+            # version visible dans les fichiers .gradle.
+            #
+            # BUG CORRIGE : la structure reelle d'un catalog est
+            #   [plugins]
+            #   android-application = { id = "com.android.application", version.ref = "agp" }
+            # La cle a gauche du "=" est un ALIAS ARBITRAIRE (ex:
+            # "android-application"), PAS "com.android.application" - le
+            # plugin ID n'apparait que comme VALEUR du champ "id" a
+            # l'interieur des accolades. La version precedente de ce fix
+            # cherchait "com.android.application" comme cle directe, ce qui
+            # ne correspond jamais a la vraie syntaxe TOML -> le catalog
+            # n'etait jamais lu, et on retombait silencieusement sur le
+            # defaut "8.9". On reecrit cette extraction en Python, qui gere
+            # correctement les tables inline TOML (y compris sur plusieurs
+            # lignes) plutot que de la deviner via un grep fragile.
+            # ------------------------------------------------------------
+            if [ -z "$agp_version" ]; then
+              local toml_file
+              toml_file=$(find . -iname "*.versions.toml" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" 2>/dev/null | head -1)
+              if [ -n "$toml_file" ]; then
+                agp_version=$(python3 - "$toml_file" << 'PYEOF'
+          import re
+          import sys
+
+          path = sys.argv[1]
+          with open(path) as f:
+              content = f.read()
+
+          # Section [plugins] : cherche l'entree dont le champ "id" vaut
+          # com.android.application ou com.android.library, sur un bloc
+          # allant jusqu'a la prochaine accolade fermante (gere le cas
+          # multi-lignes en plus du cas inline classique).
+          version_ref = None
+          for m in re.finditer(r'\{([^}]*)\}', content, re.DOTALL):
+              block = m.group(1)
+              if re.search(r'id\s*=\s*"com\.android\.(application|library)"', block):
+                  ref_match = re.search(r'version\.ref\s*=\s*"([^"]+)"', block)
+                  if ref_match:
+                      version_ref = ref_match.group(1)
+                      break
+                  # Version fixee directement dans le bloc plugins (rare,
+                  # mais possible) : version = "9.1.1" sans passer par un
+                  # alias de la table [versions].
+                  direct_match = re.search(r'(?<!\.ref\s*=\s*)version\s*=\s*"([0-9]+\.[0-9]+(?:\.[0-9]+)?)"', block)
+                  if direct_match:
+                      print(direct_match.group(1))
+                      sys.exit(0)
+
+          if version_ref:
+              # Cherche la valeur de cet alias dans la section [versions] :
+              # "agp = "9.1.1""  (avec ou sans espaces, guillemets simples
+              # ou doubles).
+              ref_pattern = re.compile(
+                  r'^\s*' + re.escape(version_ref) + r'\s*=\s*["\']([0-9]+\.[0-9]+(?:\.[0-9]+)?)["\']',
+                  re.MULTILINE
+              )
+              ref_match = ref_pattern.search(content)
+              if ref_match:
+                  print(ref_match.group(1))
+                  sys.exit(0)
+
+          # Fallback heuristique : cle conventionnelle "agp" (nom par
+          # defaut utilise par Android Studio pour la table [versions]),
+          # au cas ou l'analyse structuree ci-dessus n'ait rien trouve.
+          fallback = re.search(r'^\s*agp\s*=\s*["\']([0-9]+\.[0-9]+(?:\.[0-9]+)?)["\']', content, re.MULTILINE)
+          if fallback:
+              print(fallback.group(1))
+          PYEOF
+                )
+                [ -n "$agp_version" ] && echo "AGP detecte via version catalog ($toml_file) : $agp_version" >&2
+              fi
+            fi
 
             if [ -z "$agp_version" ]; then
               echo "8.9"
