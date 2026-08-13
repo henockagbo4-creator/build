@@ -1102,19 +1102,27 @@ jobs:
               <string name="app_name">${{ github.event.inputs.app_name }}</string>
           </resources>
           STRINGS_EOF
-
             cat > "$PROJECT_ROOT/settings.gradle" << SETTINGS_EOF
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
           rootProject.name = "app"
           include(":app")
           SETTINGS_EOF
 
             cat > "$PROJECT_ROOT/build.gradle" << ROOT_GRADLE_EOF
-          buildscript {
-              repositories { google(); mavenCentral() }
-          }
-          allprojects {
-              repositories { google(); mavenCentral() }
-          }
+          // Root build.gradle - plugins managed via settings.gradle
           ROOT_GRADLE_EOF
 
             KOTLIN_PLUGIN=""
