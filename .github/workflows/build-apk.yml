@@ -1322,6 +1322,35 @@ jobs:
             fi
           done
 
+          # ------------------------------------------------------------
+          # FIX15 (NOUVEAU) : classpath AGP trop ancien pour tourner sous
+          # n'importe quel Gradle moderne. Un AGP < 7.0 (souvent 2.x/3.x,
+          # cohabite generalement avec jcenter() sur les projets 2015-2019)
+          # est binaire-incompatible avec les Gradle actuels : meme en
+          # ajustant la version du wrapper, le classloading echoue avec des
+          # erreurs internes du type "org/gradle/initialization/
+          # BuildCompletionListener" (classe interne retiree depuis). Le
+          # wrapper Gradle ne peut RIEN faire pour ce cas - il faut aussi
+          # moderniser la version d'AGP elle-meme. On bump donc tout
+          # classpath 'com.android.tools.build:gradle:X.Y.Z' avec X < 7
+          # vers une version moderne connue pour etre compatible avec le
+          # JDK 17 / Gradle recents utilises sur ce pipeline.
+          # ------------------------------------------------------------
+          MODERN_AGP_VERSION="8.5.0"
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$GRADLE_FILE" ]; then
+              OLD_AGP=$(grep -oE "com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?" "$GRADLE_FILE" 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
+              if [ -n "$OLD_AGP" ]; then
+                OLD_AGP_MAJOR=$(echo "$OLD_AGP" | cut -d. -f1)
+                if [ "$OLD_AGP_MAJOR" -lt 7 ] 2>/dev/null; then
+                  sed -i -E "s#com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?#com.android.tools.build:gradle:${MODERN_AGP_VERSION}#g" "$GRADLE_FILE"
+                  echo "AGP $OLD_AGP (trop ancien, incompatible binaire avec les Gradle recents) bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
+                  echo "AGP obsolete detecte ($OLD_AGP) dans $GRADLE_FILE -> mis a jour vers $MODERN_AGP_VERSION"
+                fi
+              fi
+            fi
+          done
+
           # FIX 1 (+ FIX10, resserre) : retire tout bloc buildscript{}
           # legacy declarant l'AGP en classpath, en conflit avec la syntaxe
           # plugins{} moderne. Detection elargie a la chaine litterale
