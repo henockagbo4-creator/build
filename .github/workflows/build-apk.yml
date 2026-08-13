@@ -1302,17 +1302,33 @@ jobs:
             fi
           done
 
-          # FIX 1 (+ FIX10 elargi) : retire tout bloc buildscript{} legacy
-          # declarant l'AGP en classpath, en conflit avec la syntaxe
-          # plugins{} moderne. Detection elargie : en plus de la chaine
-          # litterale "com.android.tools.build:gradle", on detecte aussi
-          # le cas ou un buildscript{classpath} coexiste avec une
-          # declaration plugins{ id("com.android.application"/"...library") }
-          # ailleurs dans le meme fichier - meme si le classpath utilise un
-          # alias de version catalog ou une variable au lieu de la chaine
-          # litterale. C'est cette combinaison precise qui cause l'erreur
-          # Gradle "plugin is already on the classpath with an unknown
-          # version, so compatibility cannot be checked".
+          # FIX 1 (+ FIX10, resserre) : retire tout bloc buildscript{}
+          # legacy declarant l'AGP en classpath, en conflit avec la syntaxe
+          # plugins{} moderne. Detection elargie a la chaine litterale
+          # "com.android.tools.build:gradle" ET a la co-existence d'un
+          # buildscript{classpath} avec une VRAIE declaration DSL
+          # "plugins { id(\"com.android.application\") }" (n'importe ou dans
+          # le projet, root ou module).
+          #
+          # BUG CORRIGE : la version precedente detectait un "conflit" des
+          # qu'un fichier contenait le texte "com.android.application"
+          # QUELLE QU'EN SOIT LA SYNTAXE - ce qui matchait aussi
+          # "apply plugin: 'com.android.application'" (syntaxe LEGACY qui a
+          # justement BESOIN du buildscript{classpath} pour fonctionner,
+          # sans aucun conflit reel avec plugins{}). Resultat : sur un
+          # projet 100% legacy (apply plugin, pas de plugins{} du tout), le
+          # fix supprimait le seul mecanisme capable de resoudre le plugin
+          # -> "Plugin with id 'com.android.application' not found". On
+          # exige maintenant la vraie syntaxe DSL id(...)/id '...' pour
+          # confirmer qu'un plugins{} existe reellement quelque part.
+          HAS_PLUGINS_DSL_ANYWHERE="false"
+          for CHECK_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$CHECK_FILE" ] && grep -qE "id\s*\(\s*[\"']com\.android\.(application|library)[\"']|id\s+[\"']com\.android\.(application|library)[\"']" "$CHECK_FILE" 2>/dev/null; then
+              HAS_PLUGINS_DSL_ANYWHERE="true"
+              break
+            fi
+          done
+
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
               *settings.gradle*) continue ;;
@@ -1321,10 +1337,9 @@ jobs:
             grep -q "com.android.tools.build:gradle" "$GRADLE_FILE" 2>/dev/null && HAS_LITERAL_CLASSPATH="true"
 
             HAS_GENERIC_CONFLICT="false"
-            if [ "$HAS_LITERAL_CLASSPATH" == "false" ] && [ -f "$GRADLE_FILE" ]; then
+            if [ "$HAS_LITERAL_CLASSPATH" == "false" ] && [ -f "$GRADLE_FILE" ] && [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ]; then
               if grep -qi "buildscript" "$GRADLE_FILE" 2>/dev/null \
-                 && grep -q "classpath" "$GRADLE_FILE" 2>/dev/null \
-                 && grep -qE "com\.android\.(application|library)" "$GRADLE_FILE" 2>/dev/null; then
+                 && grep -q "classpath" "$GRADLE_FILE" 2>/dev/null; then
                 HAS_GENERIC_CONFLICT="true"
               fi
             fi
