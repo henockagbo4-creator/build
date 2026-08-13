@@ -1364,7 +1364,19 @@ jobs:
               fi
             fi
 
-            if [ -f "$GRADLE_FILE" ] && { [ "$HAS_LITERAL_CLASSPATH" == "true" ] || [ "$HAS_GENERIC_CONFLICT" == "true" ]; }; then
+            # BUG CORRIGE (meme famille que le resserrement de FIX10) : la
+            # branche "correspondance litterale" ci-dessus supprimait le
+            # buildscript{} des qu'elle trouvait "com.android.tools.build:
+            # gradle", SANS jamais verifier qu'un plugins{} concurrent
+            # existait vraiment. Sur un projet 100% legacy pre-2019
+            # (buildscript{classpath} + "apply plugin:", zero plugins{}
+            # nulle part), ce buildscript est le SEUL mecanisme capable de
+            # resoudre le plugin - le supprimer casse le build avec
+            # "Plugin with id 'com.android.application' not found", quelle
+            # que soit la version de Gradle utilisee ensuite. On exige donc
+            # HAS_PLUGINS_DSL_ANYWHERE (deja calcule plus haut) pour LES
+            # DEUX branches, litterale et generique.
+            if [ -f "$GRADLE_FILE" ] && [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ] && { [ "$HAS_LITERAL_CLASSPATH" == "true" ] || [ "$HAS_GENERIC_CONFLICT" == "true" ]; }; then
               echo "Conflit buildscript/plugins detecte dans $GRADLE_FILE - nettoyage automatique..."
               python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
           import sys
