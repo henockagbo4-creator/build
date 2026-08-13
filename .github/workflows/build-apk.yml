@@ -1102,27 +1102,19 @@ jobs:
               <string name="app_name">${{ github.event.inputs.app_name }}</string>
           </resources>
           STRINGS_EOF
+
             cat > "$PROJECT_ROOT/settings.gradle" << SETTINGS_EOF
-          pluginManagement {
-              repositories {
-                  google()
-                  mavenCentral()
-                  gradlePluginPortal()
-              }
-          }
-          dependencyResolutionManagement {
-              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
           rootProject.name = "app"
           include(":app")
           SETTINGS_EOF
 
             cat > "$PROJECT_ROOT/build.gradle" << ROOT_GRADLE_EOF
-          // Root build.gradle - plugins managed via settings.gradle
+          buildscript {
+              repositories { google(); mavenCentral() }
+          }
+          allprojects {
+              repositories { google(); mavenCentral() }
+          }
           ROOT_GRADLE_EOF
 
             KOTLIN_PLUGIN=""
@@ -1307,6 +1299,26 @@ jobs:
               with open(fixes_log, 'a') as log:
                   log.write(f"Residus de commande shell/heredoc (ex: 'cat > ... << EOF') retires de {path} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin) - fichier genere via un script cote client sans nettoyage de l'enveloppe.\n")
           PYEOF
+            fi
+          done
+
+          # ------------------------------------------------------------
+          # FIX14 (NOUVEAU) : jcenter() n'existe plus. Le service Bintray/
+          # JCenter a ferme definitivement en fevrier 2022, et les versions
+          # recentes de Gradle ont retire la methode DSL "jcenter()" du tout
+          # (pas juste deprecie) -> "Could not find method jcenter() for
+          # arguments [] on repository container". N'importe quel projet
+          # Android Studio anterieur a ~2019 declare encore jcenter() par
+          # defaut dans ses blocs repositories{}. On le remplace par
+          # mavenCentral(), equivalent fonctionnel qui couvre l'immense
+          # majorite des memes artefacts - fix generique, sans lien avec un
+          # projet particulier.
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$GRADLE_FILE" ] && grep -qE '\bjcenter\s*\(\s*\)' "$GRADLE_FILE" 2>/dev/null; then
+              sed -i -E 's/\bjcenter\s*\(\s*\)/mavenCentral()/g' "$GRADLE_FILE"
+              echo "jcenter() remplace par mavenCentral() dans $GRADLE_FILE (JCenter est ferme depuis 2022, la methode n'existe plus dans les versions recentes de Gradle)." >> "$FIXES_LOG"
+              echo "jcenter() remplace par mavenCentral() dans $GRADLE_FILE"
             fi
           done
 
