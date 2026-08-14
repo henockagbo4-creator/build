@@ -24,6 +24,29 @@
 #      [tool.briefcase] complexe (plusieurs apps ou requires etendus).
 #   6. build-windows-python : PyInstaller par defaut, Briefcase seulement
 #      si config Windows Briefcase complexe detectee.
+#
+# ============================================================================
+# CORRECTIFS DE CETTE VERSION (suite aux runs #332, #331, #325) :
+#   FIX-PERM  : "prepare" — chmod -R apres unzip pour eviter un EACCES lors
+#               du zip de l'artifact "source-*" quand le zip source contient
+#               des fichiers avec des permissions restrictives (ex: run #332,
+#               vpn/buildozer.spec illisible par le runner).
+#   FIX-FLUTTER-DEPS : "build-flutter" — si "flutter pub get" echoue sur un
+#               conflit de versions (ex: run #331, "alarm ^4.3.2 which
+#               doesn't match any versions"), tentative automatique de
+#               "flutter pub upgrade --major-versions" avant d'abandonner,
+#               et message d'erreur explicite remonte au callback au lieu
+#               d'un "Flutter build failed." generique.
+#   FIX-AGP-DEEP : "build-kotlin-java" — le bump AGP (FIX15) ne matchait que
+#               les versions ecrites en dur ("com.android.tools.build:
+#               gradle:X.Y.Z"). Si l'AGP est declare via une variable
+#               ext{} (tres courant sur les vieux projets Android Studio),
+#               la regex ne trouvait rien, l'AGP restait ancien, et le
+#               build echouait encore avec "org/gradle/initialization/
+#               BuildCompletionListener" meme apres regeneration du wrapper
+#               (run #325). On detecte maintenant cette signature d'erreur
+#               precise et on force un bump AGP (toutes syntaxes confondues)
+#               + une nouvelle tentative, au lieu d'abandonner directement.
 # ============================================================================
 
 name: Build APK
@@ -132,6 +155,23 @@ jobs:
           fi
           mkdir -p src
           unzip -o source.zip -d src/
+
+      # ============================================================
+      # FIX-PERM (NOUVEAU) : certains zips clients contiennent des
+      # fichiers avec des permissions restrictives (ex: buildozer.spec
+      # non lisible), ce qui fait planter la creation du zip d'artifact
+      # plus loin avec "EACCES: permission denied" (vu sur le run #332,
+      # src/vpn/buildozer.spec). On normalise systematiquement les
+      # permissions juste apres l'extraction, avant que quoi que ce
+      # soit d'autre ne touche a src/.
+      # ============================================================
+      - name: Fix source file permissions
+        run: |
+          set -e
+          echo "Normalisation des permissions dans src/ (evite les EACCES lors du zip d'artifact)..."
+          chmod -R u+rwX,go+rX src/ 2>/dev/null || true
+          find src/ -type f ! -readable -exec chmod u+r {} \; 2>/dev/null || true
+          find src/ -type d ! -readable -exec chmod u+rx {} \; 2>/dev/null || true
 
       - name: Detect source directory
         id: detect
@@ -1335,6 +1375,19 @@ jobs:
           # classpath 'com.android.tools.build:gradle:X.Y.Z' avec X < 7
           # vers une version moderne connue pour etre compatible avec le
           # JDK 17 / Gradle recents utilises sur ce pipeline.
+          #
+          # FIX-AGP-DEEP (NOUVEAU, suite au run #325) : la regex ci-dessous
+          # ne matche que les versions ecrites en dur. Beaucoup de vieux
+          # projets Android Studio declarent l'AGP via une variable ext{}
+          # (ex: "classpath \"com.android.tools.build:gradle:$agp_version\""
+          # avec "agp_version = '2.3.3'" defini plus haut) - dans ce cas la
+          # regex litterale ne trouve rien, l'AGP reste ancien, et le build
+          # replante avec la meme signature "BuildCompletionListener" meme
+          # apres regeneration du wrapper. On detecte maintenant aussi ce
+          # cas : si un classpath AGP utilise une variable ($xxx ou
+          # ${xxx}), on cherche la valeur de cette variable ailleurs dans
+          # le meme fichier (ext.xxx = 'A.B.C' ou xxx = 'A.B.C') et on la
+          # bump directement si elle est trop ancienne.
           # ------------------------------------------------------------
           MODERN_AGP_VERSION="8.5.0"
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
@@ -1346,6 +1399,22 @@ jobs:
                   sed -i -E "s#com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?#com.android.tools.build:gradle:${MODERN_AGP_VERSION}#g" "$GRADLE_FILE"
                   echo "AGP $OLD_AGP (trop ancien, incompatible binaire avec les Gradle recents) bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
                   echo "AGP obsolete detecte ($OLD_AGP) dans $GRADLE_FILE -> mis a jour vers $MODERN_AGP_VERSION"
+                fi
+              else
+                # Pas de version litterale trouvee : verifie si l'AGP est
+                # declare via une variable (ex: gradle:$agp_version ou
+                # gradle:${agpVersion}).
+                VAR_NAME=$(grep -oE "com\.android\.tools\.build:gradle:\\\$\{?[A-Za-z0-9_]+\}?" "$GRADLE_FILE" 2>/dev/null | grep -oE "[A-Za-z0-9_]+$" | head -1)
+                if [ -n "$VAR_NAME" ]; then
+                  VAR_VALUE=$(grep -oE "(ext\.)?${VAR_NAME}\s*=\s*['\"][0-9]+\.[0-9]+(\.[0-9]+)?['\"]" "$GRADLE_FILE" 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
+                  if [ -n "$VAR_VALUE" ]; then
+                    VAR_MAJOR=$(echo "$VAR_VALUE" | cut -d. -f1)
+                    if [ "$VAR_MAJOR" -lt 7 ] 2>/dev/null; then
+                      sed -i -E "s#(ext\.)?${VAR_NAME}(\s*=\s*['\"])[0-9]+\.[0-9]+(\.[0-9]+)?(['\"])#\1${VAR_NAME}\2${MODERN_AGP_VERSION}\4#g" "$GRADLE_FILE"
+                      echo "AGP declare via variable '$VAR_NAME' = $VAR_VALUE (trop ancien) bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
+                      echo "AGP obsolete via variable ($VAR_NAME=$VAR_VALUE) dans $GRADLE_FILE -> mis a jour vers $MODERN_AGP_VERSION"
+                    fi
+                  fi
                 fi
               fi
             fi
@@ -1377,6 +1446,81 @@ jobs:
               break
             fi
           done
+
+          # ------------------------------------------------------------
+          # FIX16 (NOUVEAU) : "Plugin with id 'com.android.application' not
+          # found". Cause tres frequente quand un plugins{} DSL est utilise
+          # (root ou module) mais que settings.gradle(.kts) ne declare pas
+          # de bloc pluginManagement{ repositories{ google() ... } }. Sans
+          # ce bloc, Gradle ne cherche les plugins QUE sur le Gradle Plugin
+          # Portal par defaut, qui n'heberge pas les plugins Android (ils
+          # sont sur le maven Google). Concerne notamment les projets
+          # scaffoldes par ce pipeline (FIX4, dont le settings.gradle
+          # genere n'avait pas ce bloc) et tout vieux projet dont le
+          # settings.gradle n'a jamais eu ce bloc. On l'ajoute ou on le
+          # complete automatiquement, sans toucher au reste du fichier.
+          # ------------------------------------------------------------
+          if [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ]; then
+            SETTINGS_FOR_PLUGINS=""
+            for f in settings.gradle.kts settings.gradle; do
+              [ -f "$f" ] && SETTINGS_FOR_PLUGINS="$f" && break
+            done
+            if [ -n "$SETTINGS_FOR_PLUGINS" ]; then
+              python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              content = f.read()
+
+          original = content
+          changed_reason = ""
+
+          pm_match = re.search(r'pluginManagement\s*\{', content)
+          if pm_match is None:
+              block = (
+                  'pluginManagement {\n'
+                  '    repositories {\n'
+                  '        google()\n'
+                  '        mavenCentral()\n'
+                  '        gradlePluginPortal()\n'
+                  '    }\n'
+                  '}\n'
+              )
+              content = block + content
+              changed_reason = "bloc pluginManagement{repositories{google()...}} ajoute en tete (absent)"
+          else:
+              # pluginManagement existe : verifie que son repositories{}
+              # contient bien google() (source des plugins Android).
+              start = pm_match.end() - 1
+              depth = 0
+              i = start
+              while i < len(content):
+                  if content[i] == '{':
+                      depth += 1
+                  elif content[i] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          break
+                  i += 1
+              pm_block = content[start:i+1]
+              if 'google()' not in pm_block:
+                  repo_match = re.search(r'repositories\s*\{', pm_block)
+                  if repo_match:
+                      insert_at = repo_match.end()
+                      new_pm_block = pm_block[:insert_at] + '\n        google()' + pm_block[insert_at:]
+                      content = content[:start] + new_pm_block + content[i+1:]
+                      changed_reason = "google() ajoute dans le bloc repositories{} de pluginManagement existant (absent -> plugin Android introuvable)"
+
+          if content != original:
+              with open(path, 'w') as f:
+                  f.write(content)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"{changed_reason} dans {path} (evite \"Plugin with id 'com.android.application' not found\").\n")
+          PYEOF
+            fi
+          fi
 
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             case "$GRADLE_FILE" in
@@ -1819,9 +1963,35 @@ jobs:
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
 
+          # ============================================================
+          # FIX-AGP-DEEP (NOUVEAU, suite au run #325) : meme apres bump AGP
+          # (FIX15 ci-dessus, litteral ET via variable) et regeneration du
+          # wrapper, un cas residuel peut subsister (ex: AGP reference par
+          # un mecanisme non couvert par les regex, comme un ancien plugin
+          # binaire Maven local). Plutot que d'abandonner sur la premiere
+          # occurrence de "org/gradle/initialization/BuildCompletionListener"
+          # (signature caracteristique d'un AGP trop ancien pour le Gradle
+          # charge), on force un bump AGP sur TOUS les fichiers gradle du
+          # projet (quelle que soit la syntaxe de declaration detectee ou
+          # non plus haut) et on retente une seule fois.
+          # ============================================================
           run_gradle() {
             TASK="$1"
             if ! ./gradlew "$TASK" 2>&1 | tee /tmp/gradle_output.log; then
+              if grep -q "BuildCompletionListener" /tmp/gradle_output.log; then
+                echo "Signature 'BuildCompletionListener' detectee (AGP trop ancien, incompatible binaire avec le Gradle charge) - bump force de l'AGP sur tous les fichiers gradle et nouvelle tentative..."
+                for GF in $(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*"); do
+                  sed -i -E "s#com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?#com.android.tools.build:gradle:${MODERN_AGP_VERSION}#g" "$GF" 2>/dev/null || true
+                done
+                if ! ./gradlew "$TASK" 2>&1 | tee /tmp/gradle_output_retry.log; then
+                  ERROR_MSG=$(grep -A 8 "What went wrong" /tmp/gradle_output_retry.log | head -25)
+                  [ -z "$ERROR_MSG" ] && ERROR_MSG=$(tail -30 /tmp/gradle_output_retry.log)
+                  ERROR_MSG=$(echo "$ERROR_MSG" | tr '\n' ' ' | tr -d '\r')
+                  echo "error_message=Gradle build failed after forced AGP bump retry: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+                  return 1
+                fi
+                return 0
+              fi
               ERROR_MSG=$(grep -A 8 "What went wrong" /tmp/gradle_output.log | head -25)
               [ -z "$ERROR_MSG" ] && ERROR_MSG=$(tail -30 /tmp/gradle_output.log)
               ERROR_MSG=$(echo "$ERROR_MSG" | tr '\n' ' ' | tr -d '\r')
@@ -1892,7 +2062,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 6: BUILD FLUTTER (inchange)
+  # JOB 6: BUILD FLUTTER
   # ============================================================
   build-flutter:
     needs: prepare
@@ -2092,7 +2262,35 @@ jobs:
             fi
           fi
 
-          flutter pub get
+          # ============================================================
+          # FIX-FLUTTER-DEPS (NOUVEAU, suite au run #331) : "flutter pub
+          # get" peut echouer avec un conflit de versions de dependance
+          # (ex: "dailyflow depends on alarm ^4.3.2 which doesn't match any
+          # versions, version solving failed") quand une contrainte de
+          # version fixee dans pubspec.yaml ne correspond plus a aucune
+          # version publiee sur pub.dev. On tente automatiquement un
+          # "flutter pub upgrade --major-versions" (assouplit les
+          # contraintes vers les dernieres versions majeures compatibles,
+          # comme suggere par le message d'erreur de Flutter lui-meme)
+          # avant d'abandonner. Le message d'erreur precis est toujours
+          # remonte au callback si les deux tentatives echouent, au lieu
+          # du "Flutter build failed." generique precedent.
+          # ============================================================
+          if ! flutter pub get 2>&1 | tee /tmp/pub_get.log; then
+            if grep -qE "version solving failed|doesn't match any versions|Because .* depends on" /tmp/pub_get.log; then
+              echo "Conflit de versions de dependances detecte - tentative de resolution automatique (flutter pub upgrade --major-versions)..."
+              if ! flutter pub upgrade --major-versions 2>&1 | tee /tmp/pub_upgrade.log; then
+                ERROR_MSG=$(tail -30 /tmp/pub_upgrade.log | tr '\n' ' ' | tr -d '\r')
+                echo "error_message=Conflit de dependances Flutter (pubspec.yaml) non resolu automatiquement: $ERROR_MSG" >> "$GITHUB_OUTPUT"
+                exit 1
+              fi
+              echo "Conflit de dependances resolu via 'pub upgrade --major-versions'."
+            else
+              ERROR_MSG=$(tail -30 /tmp/pub_get.log | tr '\n' ' ' | tr -d '\r')
+              echo "error_message=Echec de 'flutter pub get': $ERROR_MSG" >> "$GITHUB_OUTPUT"
+              exit 1
+            fi
+          fi
 
           FORMAT="${{ github.event.inputs.output_format }}"
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
