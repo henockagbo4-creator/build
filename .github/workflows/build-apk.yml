@@ -1850,6 +1850,70 @@ jobs:
           PYEOF
           fi
 
+          # ------------------------------------------------------------
+          # FIX18 (NOUVEAU) : "Namespace not specified. Specify a namespace
+          # in the module's build file". AGP 8+ n'accepte plus de deduire
+          # le namespace depuis l'attribut "package" du AndroidManifest.xml
+          # (mecanisme deprecie en AGP 7, retire en AGP 8.0.0). Tres
+          # frequent sur les vieux projets Android Studio (pre-2022) dont
+          # le build.gradle ne declare jamais explicitement "namespace" et
+          # comptait sur ce fallback. Comme ce pipeline bump systematiquement
+          # l'AGP vers une version recente (FIX15/FIX-AGP-DEEP), ce cas
+          # devient frequent. On detecte les modules avec le plugin
+          # com.android.application/library mais sans "namespace" declare,
+          # on recupere le "package" du AndroidManifest.xml correspondant
+          # (ou, a defaut, le package_id fourni par le client / un package
+          # genere), et on l'injecte dans le bloc android{}.
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            [ -f "$GRADLE_FILE" ] || continue
+
+            if ! grep -qE "id\s*\(\s*[\"']com\.android\.(application|library)[\"']|id\s+[\"']com\.android\.(application|library)[\"']|apply plugin:\s*[\"']com\.android\.(application|library)[\"']" "$GRADLE_FILE" 2>/dev/null; then
+              continue
+            fi
+            if grep -qE '^\s*namespace\b' "$GRADLE_FILE" 2>/dev/null; then
+              continue
+            fi
+
+            MODULE_DIR=$(dirname "$GRADLE_FILE")
+            MANIFEST_PATH=""
+            for candidate in "$MODULE_DIR/src/main/AndroidManifest.xml" "$MODULE_DIR/AndroidManifest.xml"; do
+              [ -f "$candidate" ] && MANIFEST_PATH="$candidate" && break
+            done
+
+            NAMESPACE_VALUE=""
+            if [ -n "$MANIFEST_PATH" ]; then
+              NAMESPACE_VALUE=$(grep -oE 'package\s*=\s*"[^"]+"' "$MANIFEST_PATH" 2>/dev/null | head -1 | sed -E 's/package\s*=\s*"([^"]+)"/\1/')
+            fi
+            [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="${{ github.event.inputs.package_id }}"
+            [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="com.philtech.app"
+
+            python3 - "$GRADLE_FILE" "$NAMESPACE_VALUE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+
+          path, namespace, fixes_log = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path) as f:
+              content = f.read()
+
+          m = re.search(r'\bandroid\s*\{', content)
+          if m is None:
+              sys.exit(0)
+
+          line = f'\n    namespace = "{namespace}"' if path.endswith('.kts') else f'\n    namespace "{namespace}"'
+          insert_at = m.end()
+          new_content = content[:insert_at] + line + content[insert_at:]
+
+          with open(path, 'w') as f:
+              f.write(new_content)
+          with open(fixes_log, 'a') as log:
+              log.write(f'namespace "{namespace}" ajoute dans le bloc android{{}} de {path} (AGP 8+ n\'accepte plus le fallback sur l\'attribut package du AndroidManifest.xml).\n')
+          PYEOF
+          done
+
       - name: Build Kotlin/Java
         id: build
         run: |
