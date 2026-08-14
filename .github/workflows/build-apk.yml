@@ -2151,11 +2151,12 @@ jobs:
           # ============================================================
           run_gradle() {
             TASK="$1"
+            LOCAL_MODERN_AGP_VERSION="8.5.0"
             if ! ./gradlew "$TASK" 2>&1 | tee /tmp/gradle_output.log; then
               if grep -q "BuildCompletionListener" /tmp/gradle_output.log; then
                 echo "Signature 'BuildCompletionListener' detectee (AGP trop ancien, incompatible binaire avec le Gradle charge) - bump force de l'AGP sur tous les fichiers gradle et nouvelle tentative..."
                 for GF in $(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*"); do
-                  sed -i -E "s#com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?#com.android.tools.build:gradle:${MODERN_AGP_VERSION}#g" "$GF" 2>/dev/null || true
+                  sed -i -E "s#com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?#com.android.tools.build:gradle:${LOCAL_MODERN_AGP_VERSION}#g" "$GF" 2>/dev/null || true
                 done
                 if ! ./gradlew "$TASK" 2>&1 | tee /tmp/gradle_output_retry.log; then
                   ERROR_MSG=$(grep -A 8 "What went wrong" /tmp/gradle_output_retry.log | head -25)
