@@ -1460,11 +1460,12 @@ jobs:
           # settings.gradle n'a jamais eu ce bloc. On l'ajoute ou on le
           # complete automatiquement, sans toucher au reste du fichier.
           # ------------------------------------------------------------
+          SETTINGS_FOR_PLUGINS=""
+          for f in settings.gradle.kts settings.gradle; do
+            [ -f "$f" ] && SETTINGS_FOR_PLUGINS="$f" && break
+          done
+
           if [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ]; then
-            SETTINGS_FOR_PLUGINS=""
-            for f in settings.gradle.kts settings.gradle; do
-              [ -f "$f" ] && SETTINGS_FOR_PLUGINS="$f" && break
-            done
             if [ -n "$SETTINGS_FOR_PLUGINS" ]; then
               python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" << 'PYEOF'
           import re
@@ -1739,6 +1740,115 @@ jobs:
           PYEOF
             fi
           done
+
+          # ------------------------------------------------------------
+          # FIX17 (NOUVEAU) : "Plugin [id: 'com.android.application'] was
+          # not found ... plugin dependency must include a version number
+          # for this source". Se produit quand un module NON-racine (ex:
+          # app/build.gradle(.kts)) declare un plugin bien connu (com.
+          # android.application/library, org.jetbrains.kotlin.android/jvm,
+          # google-services) SANS version explicite - ce qui n'est valide
+          # QUE si settings.gradle(.kts) fixe la version via un bloc
+          # pluginManagement { plugins { id("...") version "X" apply
+          # false } }. Si ce bloc est absent ou incomplet, Gradle echoue
+          # avec ce message precis. C'est notamment un effet de bord
+          # possible de FIX11 ci-dessus (qui retire les versions explicites
+          # des modules non-racine en supposant qu'elles sont fixees
+          # ailleurs) quand cette hypothese ne tient pas. On execute ce fix
+          # en tout dernier, une fois l'etat final de tous les fichiers
+          # gradle connu, pour detecter tout plugin encore sans version et
+          # injecter une version par defaut dans pluginManagement.plugins.
+          # ------------------------------------------------------------
+          if [ -n "$SETTINGS_FOR_PLUGINS" ]; then
+            python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
+          import re
+          import sys
+
+          settings_path, fixes_log = sys.argv[1], sys.argv[2]
+          module_files = [p for p in sys.argv[3:] if 'settings.gradle' not in p]
+
+          DEFAULT_VERSIONS = {
+              'com.android.application': '8.5.0',
+              'com.android.library': '8.5.0',
+              'org.jetbrains.kotlin.android': '1.9.24',
+              'org.jetbrains.kotlin.jvm': '1.9.24',
+              'com.google.gms.google-services': '4.4.2',
+          }
+          ids_pattern = '|'.join(re.escape(p) for p in DEFAULT_VERSIONS)
+
+          bare_plugin_pattern = re.compile(
+              r'id\s*\(\s*["\'](?P<id1>' + ids_pattern + r')["\']\s*\)(?!\s*version)|'
+              r'id\s+["\'](?P<id2>' + ids_pattern + r')["\'](?!\s+version)'
+          )
+
+          needed = set()
+          for path in module_files:
+              try:
+                  with open(path) as f:
+                      content = f.read()
+              except OSError:
+                  continue
+              for m in bare_plugin_pattern.finditer(content):
+                  pid = m.group('id1') or m.group('id2')
+                  needed.add(pid)
+
+          if not needed:
+              sys.exit(0)
+
+          with open(settings_path) as f:
+              settings_content = f.read()
+
+          # Retire les plugins deja verses avec une version connue quelque
+          # part dans settings.gradle(.kts) (pluginManagement.plugins).
+          still_needed = sorted(
+              pid for pid in needed
+              if not re.search(re.escape(pid) + r'["\'\)]\s*\)?\s*version\s*["\']', settings_content)
+          )
+
+          if not still_needed:
+              sys.exit(0)
+
+          pm_match = re.search(r'pluginManagement\s*\{', settings_content)
+          if pm_match is None:
+              # Ne devrait normalement pas arriver (FIX16 garantit deja ce
+              # bloc plus haut), mais on ne prend aucun risque.
+              sys.exit(0)
+
+          pm_start = pm_match.end() - 1
+          depth = 0
+          i = pm_start
+          while i < len(settings_content):
+              if settings_content[i] == '{':
+                  depth += 1
+              elif settings_content[i] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      break
+              i += 1
+          pm_end = i
+          pm_block = settings_content[pm_start:pm_end + 1]
+
+          plugins_match = re.search(r'plugins\s*\{', pm_block)
+          lines_to_add = "\n".join(
+              f'        id("{pid}") version "{DEFAULT_VERSIONS[pid]}" apply false'
+              for pid in still_needed
+          )
+
+          if plugins_match:
+              insert_at = plugins_match.end()
+              new_pm_block = pm_block[:insert_at] + "\n" + lines_to_add + pm_block[insert_at:]
+          else:
+              insertion = f"\n    plugins {{\n{lines_to_add}\n    }}\n"
+              new_pm_block = pm_block[:-1] + insertion + "}"
+
+          new_settings_content = settings_content[:pm_start] + new_pm_block + settings_content[pm_end + 1:]
+
+          with open(settings_path, 'w') as f:
+              f.write(new_settings_content)
+          with open(fixes_log, 'a') as log:
+              log.write("Version(s) par defaut injectee(s) pour " + ", ".join(still_needed) + " dans le bloc pluginManagement.plugins de " + settings_path + " (evite \"plugin dependency must include a version number\").\n")
+          PYEOF
+          fi
 
       - name: Build Kotlin/Java
         id: build
