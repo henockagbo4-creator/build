@@ -1208,7 +1208,7 @@ jobs:
       # de org.gradle.jvmargs dans gradle.properties.
       # ============================================================
       - name: Auto-fix legacy buildscript/plugins DSL conflict + memory
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 1/3 - create fix script)
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 1/3 - init + FIX5)
         run: |
           set -e
           cd src/
@@ -1219,13 +1219,9 @@ jobs:
               return
             fi
             local root
-            root=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
-              -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" \
-              -exec dirname {} \; | head -1)
+            root=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f               -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*"               -exec dirname {} \; | head -1)
             if [ -z "$root" ]; then
-              root=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f \
-                -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*" \
-                -exec dirname {} \; | head -1)
+              root=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f                 -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*"                 -exec dirname {} \; | head -1)
             fi
             [ -z "$root" ] && root="."
             echo "$root"
@@ -1247,11 +1243,11 @@ jobs:
               echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m" >> gradle.properties
             fi
           else
-            cat > gradle.properties << PROPS_EOF
-org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-android.useAndroidX=true
-android.enableJetifier=true
-PROPS_EOF
+            cat > gradle.properties << 'PROPS_EOF'
+            org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+            android.useAndroidX=true
+            android.enableJetifier=true
+            PROPS_EOF
           fi
           echo "Memoire Gradle fixee a -Xmx2048m dans gradle.properties (evite les crashs OOM silencieux)." >> "$FIXES_LOG"
 
@@ -1260,8 +1256,7 @@ PROPS_EOF
           for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
             [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
           done
-          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
-            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sed 's|^\./||' | sort)
+          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f             -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sed 's|^\./||' | sort)
           ALL_GRADLE_FILES="$PRIORITY_FILES"
           for f in $OTHER_FILES; do
             case " $PRIORITY_FILES " in
@@ -1271,11 +1266,9 @@ PROPS_EOF
           done
           echo "$ALL_GRADLE_FILES" > /tmp/all_gradle_files.txt
           echo "$FIXES_LOG" > /tmp/fixes_log.txt
-
-          # Sauvegarder le répertoire courant
           echo "$PWD" > /tmp/project_root.txt
 
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 2/3 - fixes 9,14,15)
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 2/3 - FIX9,14,15)
         run: |
           set -e
           cd "$(cat /tmp/project_root.txt)"
@@ -1292,7 +1285,7 @@ path, fixes_log = sys.argv[1], sys.argv[2]
 with open(path) as f:
     lines = f.readlines()
 original_lines = list(lines)
-heredoc_start = re.compile(r'^\s*cat\b.*<<\s*['"]?[A-Za-z_]+['"]?\s*$')
+heredoc_start = re.compile(r'^\s*cat.*<<\s*['"]?[A-Za-z_]+['"]?\s*$')
 bare_cat = re.compile(r'^\s*cat\s*$')
 removed_leading = 0
 while lines:
@@ -1321,15 +1314,16 @@ if removed_leading > 0 or removed_trailing > 0:
     with open(path, 'w') as f:
         f.writelines(lines)
     with open(fixes_log, 'a') as log:
-        log.write(f"Residus de commande shell/heredoc retires de {path} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin).\n")
+        log.write(f"Residus de commande shell/heredoc retires de {path} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin).
+")
 PYEOF
             fi
           done
 
           # FIX14 : jcenter() -> mavenCentral()
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
-            if [ -f "$GRADLE_FILE" ] && grep -qE '\bjcenter\s*\(\s*\)' "$GRADLE_FILE" 2>/dev/null; then
-              sed -i -E 's/\bjcenter\s*\(\s*\)/mavenCentral()/g' "$GRADLE_FILE"
+            if [ -f "$GRADLE_FILE" ] && grep -qE 'jcenter\s*\(\s*\)' "$GRADLE_FILE" 2>/dev/null; then
+              sed -i -E 's/jcenter\s*\(\s*\)/mavenCentral()/g' "$GRADLE_FILE"
               echo "jcenter() remplace par mavenCentral() dans $GRADLE_FILE (JCenter est ferme depuis 2022)." >> "$FIXES_LOG"
             fi
           done
@@ -1346,13 +1340,13 @@ PYEOF
                   echo "AGP $OLD_AGP bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
                 fi
               else
-                VAR_NAME=$(grep -oE "com\.android\.tools\.build:gradle:\\$\{?[A-Za-z0-9_]+\}?" "$GRADLE_FILE" 2>/dev/null | grep -oE "[A-Za-z0-9_]+$" | head -1)
+                VAR_NAME=$(grep -oE "com\.android\.tools\.build:gradle:\$\{?[A-Za-z0-9_]+\}?" "$GRADLE_FILE" 2>/dev/null | grep -oE "[A-Za-z0-9_]+$" | head -1)
                 if [ -n "$VAR_NAME" ]; then
                   VAR_VALUE=$(grep -oE "(ext\.)?${VAR_NAME}\s*=\s*['"][0-9]+\.[0-9]+(\.[0-9]+)?['"]" "$GRADLE_FILE" 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
                   if [ -n "$VAR_VALUE" ]; then
                     VAR_MAJOR=$(echo "$VAR_VALUE" | cut -d. -f1)
                     if [ "$VAR_MAJOR" -lt 7 ] 2>/dev/null; then
-                      sed -i -E "s#(ext\.)?${VAR_NAME}(\s*=\s*['"])[0-9]+\.[0-9]+(\.[0-9]+)?(['"])#\1${VAR_NAME}\2${MODERN_AGP_VERSION}\4#g" "$GRADLE_FILE"
+                      sed -i -E "s#(ext\.)?${VAR_NAME}(\s*=\s*['"])[0-9]+\.[0-9]+(\.[0-9]+)?(['"])#${VAR_NAME}${MODERN_AGP_VERSION}#g" "$GRADLE_FILE"
                       echo "AGP declare via variable '$VAR_NAME' = $VAR_VALUE bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
                     fi
                   fi
@@ -1361,7 +1355,7 @@ PYEOF
             fi
           done
 
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 3/3 - fixes 10,16,2,11,3,17,18)
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 3/3 - FIX10,16,2,11,3,17,18)
         run: |
           set -e
           cd "$(cat /tmp/project_root.txt)"
@@ -1394,13 +1388,20 @@ changed_reason = ""
 pm_match = re.search(r'pluginManagement\s*\{', content)
 if pm_match is None:
     block = (
-        'pluginManagement {\n'
-        '    repositories {\n'
-        '        google()\n'
-        '        mavenCentral()\n'
-        '        gradlePluginPortal()\n'
-        '    }\n'
-        '}\n'
+        'pluginManagement {
+'
+        '    repositories {
+'
+        '        google()
+'
+        '        mavenCentral()
+'
+        '        gradlePluginPortal()
+'
+        '    }
+'
+        '}
+'
     )
     content = block + content
     changed_reason = "bloc pluginManagement ajoute en tete (absent)"
@@ -1421,14 +1422,16 @@ else:
         repo_match = re.search(r'repositories\s*\{', pm_block)
         if repo_match:
             insert_at = repo_match.end()
-            new_pm_block = pm_block[:insert_at] + '\n        google()' + pm_block[insert_at:]
+            new_pm_block = pm_block[:insert_at] + '
+        google()' + pm_block[insert_at:]
             content = content[:start] + new_pm_block + content[i+1:]
             changed_reason = "google() ajoute dans pluginManagement existant"
 if content != original:
     with open(path, 'w') as f:
         f.write(content)
     with open(fixes_log, 'a') as log:
-        log.write(f"{changed_reason} dans {path}.\n")
+        log.write(f"{changed_reason} dans {path}.
+")
 PYEOF
           fi
 
@@ -1470,7 +1473,8 @@ if idx != -1:
         with open(path, 'w') as f:
             f.write(content)
         with open(fixes_log, 'a') as log:
-            log.write(f"Bloc buildscript{{}} obsolete retire de {path} (conflit avec plugins{{}} moderne)\n")
+            log.write(f"Bloc buildscript{{}} obsolete retire de {path} (conflit avec plugins{{}} moderne)
+")
 PYEOF
             fi
           done
@@ -1516,7 +1520,8 @@ for path in files:
         changed_files.append(path)
 if changed_files:
     with open(fixes_log, 'a') as log:
-        log.write(f"Version de plugin dupliquee retiree dans : {', '.join(changed_files)}\n")
+        log.write(f"Version de plugin dupliquee retiree dans : {', '.join(changed_files)}
+")
 PYEOF
           fi
 
@@ -1551,18 +1556,19 @@ kt_pattern = re.compile(
     r'\s*version\s*'
     r'(?:\(\s*["'][^"']+["']\s*\)|["'][^"']+["'])'
 )
-content = kt_pattern.sub(r'\1', content)
+content = kt_pattern.sub(r'', content)
 groovy_pattern = re.compile(
     r"(id\s+['"](?:" + ids_pattern + r")['"])"
     r"\s*version\s*"
     r"(?:\(\s*['"][^'"]+['"]\s*\)|['"][^'"]+['"])"
 )
-content = groovy_pattern.sub(r'\1', content)
+content = groovy_pattern.sub(r'', content)
 if content != original:
     with open(path, 'w') as f:
         f.write(content)
     with open(fixes_log, 'a') as log:
-        log.write(f"Version explicite retiree des plugins dans {path}.\n")
+        log.write(f"Version explicite retiree des plugins dans {path}.
+")
 PYEOF
             fi
           done
@@ -1592,7 +1598,8 @@ if matches:
         f.write(new_content)
     details = ", ".join(f"{field} {{ version = release({ver}) }} -> {field} = {ver}" for field, ver in matches)
     with open(fixes_log, 'a') as log:
-        log.write(f"Syntaxe DSL Sdk simplifiee dans {path} ({details})\n")
+        log.write(f"Syntaxe DSL Sdk simplifiee dans {path} ({details})
+")
 PYEOF
             fi
           done
@@ -1653,21 +1660,28 @@ while i < len(settings_content):
 pm_end = i
 pm_block = settings_content[pm_start:pm_end + 1]
 plugins_match = re.search(r'plugins\s*\{', pm_block)
-lines_to_add = "\n".join(
+lines_to_add = "
+".join(
     f'        id("{pid}") version "{DEFAULT_VERSIONS[pid]}" apply false'
     for pid in still_needed
 )
 if plugins_match:
     insert_at = plugins_match.end()
-    new_pm_block = pm_block[:insert_at] + "\n" + lines_to_add + pm_block[insert_at:]
+    new_pm_block = pm_block[:insert_at] + "
+" + lines_to_add + pm_block[insert_at:]
 else:
-    insertion = f"\n    plugins {{\n{lines_to_add}\n    }}\n"
+    insertion = f"
+    plugins {{
+{lines_to_add}
+    }}
+"
     new_pm_block = pm_block[:-1] + insertion + "}"
 new_settings_content = settings_content[:pm_start] + new_pm_block + settings_content[pm_end + 1:]
 with open(settings_path, 'w') as f:
     f.write(new_settings_content)
 with open(fixes_log, 'a') as log:
-    log.write("Version(s) par defaut injectee(s) pour " + ", ".join(still_needed) + " dans " + settings_path + ".\n")
+    log.write("Version(s) par defaut injectee(s) pour " + ", ".join(still_needed) + " dans " + settings_path + ".
+")
 PYEOF
           fi
 
@@ -1677,10 +1691,10 @@ PYEOF
               *settings.gradle*) continue ;;
             esac
             [ -f "$GRADLE_FILE" ] || continue
-            if ! grep -qE "id\s*\(\s*\["']com\.android\.(application|library)["']|id\s+\["']com\.android\.(application|library)["']|apply plugin:\s*\["']com\.android\.(application|library)["']" "$GRADLE_FILE" 2>/dev/null; then
+            if ! grep -qE "id\s*\(\s*["']com\.android\.(application|library)["']|id\s+["']com\.android\.(application|library)["']|apply plugin:\s*["']com\.android\.(application|library)["']" "$GRADLE_FILE" 2>/dev/null; then
               continue
             fi
-            if grep -qE '^\s*namespace\b' "$GRADLE_FILE" 2>/dev/null; then
+            if grep -qE '^\s*namespace' "$GRADLE_FILE" 2>/dev/null; then
               continue
             fi
             MODULE_DIR=$(dirname "$GRADLE_FILE")
@@ -1690,7 +1704,7 @@ PYEOF
             done
             NAMESPACE_VALUE=""
             if [ -n "$MANIFEST_PATH" ]; then
-              NAMESPACE_VALUE=$(grep -oE 'package\s*=\s*"[^"]+"' "$MANIFEST_PATH" 2>/dev/null | head -1 | sed -E 's/package\s*=\s*"([^"]+)"/\1/')
+              NAMESPACE_VALUE=$(grep -oE 'package\s*=\s*"[^"]+"' "$MANIFEST_PATH" 2>/dev/null | head -1 | sed -E 's/package\s*=\s*"([^"]+)"//')
             fi
             [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="${{ github.event.inputs.package_id }}"
             [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="com.philtech.app"
@@ -1700,16 +1714,19 @@ import sys
 path, namespace, fixes_log = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(path) as f:
     content = f.read()
-m = re.search(r'\bandroid\s*\{', content)
+m = re.search(r'android\s*\{', content)
 if m is None:
     sys.exit(0)
-line = f'\n    namespace = "{namespace}"' if path.endswith('.kts') else f'\n    namespace "{namespace}"'
+line = f'
+    namespace = "{namespace}"' if path.endswith('.kts') else f'
+    namespace "{namespace}"'
 insert_at = m.end()
 new_content = content[:insert_at] + line + content[insert_at:]
 with open(path, 'w') as f:
     f.write(new_content)
 with open(fixes_log, 'a') as log:
-    log.write(f'namespace "{namespace}" ajoute dans {path}.\n')
+    log.write(f'namespace "{namespace}" ajoute dans {path}.
+')
 PYEOF
           done
 
