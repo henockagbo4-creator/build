@@ -1208,6 +1208,23 @@ jobs:
       # de org.gradle.jvmargs dans gradle.properties.
       # ============================================================
       - name: Auto-fix legacy buildscript/plugins DSL conflict + memory
+      - name: Create Python fix scripts
+        run: |
+          set -e
+          mkdir -p /tmp/fix_scripts
+          echo 'Creating combined fix script...'
+          cat > /tmp/fix_scripts/combined.py.b64 << 'B64EOF'
+CmltcG9ydCByZQppbXBvcnQgc3lzCgpkZWYgZml4OShwYXRoLCBmaXhlc19sb2cpOgogICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICAgICAgbGluZXMgPSBmLnJlYWRsaW5lcygpCiAgICBvcmlnaW5hbF9saW5lcyA9IGxpc3QobGluZXMpCiAgICBoZXJlZG9jX3N0YXJ0ID0gcmUuY29tcGlsZShyJ15ccypjYXRcYi4qPDxccypbJyJdP1tBLVphLXpfXStbJyJdP1xzKiQnKQogICAgYmFyZV9jYXQgPSByZS5jb21waWxlKHInXlxzKmNhdFxzKiQnKQogICAgcmVtb3ZlZF9sZWFkaW5nID0gMAogICAgd2hpbGUgbGluZXM6CiAgICAgICAgc3RyaXBwZWQgPSBsaW5lc1swXS5zdHJpcCgpCiAgICAgICAgaWYgc3RyaXBwZWQgPT0gJyc6CiAgICAgICAgICAgIGxpbmVzLnBvcCgwKQogICAgICAgICAgICByZW1vdmVkX2xlYWRpbmcgKz0gMQogICAgICAgICAgICBjb250aW51ZQogICAgICAgIGlmIGhlcmVkb2Nfc3RhcnQubWF0Y2gobGluZXNbMF0pIG9yIGJhcmVfY2F0Lm1hdGNoKGxpbmVzWzBdKToKICAgICAgICAgICAgbGluZXMucG9wKDApCiAgICAgICAgICAgIHJlbW92ZWRfbGVhZGluZyArPSAxCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgYnJlYWsKICAgIHJlbW92ZWRfdHJhaWxpbmcgPSAwCiAgICB3aGlsZSBsaW5lczoKICAgICAgICBzdHJpcHBlZCA9IGxpbmVzWy0xXS5zdHJpcCgpCiAgICAgICAgaWYgc3RyaXBwZWQgPT0gJyc6CiAgICAgICAgICAgIGxpbmVzLnBvcCgpCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgaWYgcmUubWF0Y2gocideW0EtWmEtel9dK18/RU9GJHxeRU9GJCcsIHN0cmlwcGVkKToKICAgICAgICAgICAgbGluZXMucG9wKCkKICAgICAgICAgICAgcmVtb3ZlZF90cmFpbGluZyArPSAxCiAgICAgICAgICAgIGNvbnRpbnVlCiAgICAgICAgYnJlYWsKICAgIGlmIHJlbW92ZWRfbGVhZGluZyA+IDAgb3IgcmVtb3ZlZF90cmFpbGluZyA+IDA6CiAgICAgICAgd2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgICAgICAgICAgZi53cml0ZWxpbmVzKGxpbmVzKQogICAgICAgIHdpdGggb3BlbihmaXhlc19sb2csICdhJykgYXMgbG9nOgogICAgICAgICAgICBsb2cud3JpdGUoZiJSZXNpZHVzIGRlIGNvbW1hbmRlIHNoZWxsL2hlcmVkb2MgcmV0aXJlcyBkZSB7cGF0aH0gKHtyZW1vdmVkX2xlYWRpbmd9IGxpZ25lKHMpIGVuIHRldGUsIHtyZW1vdmVkX3RyYWlsaW5nfSBlbiBmaW4pLlxuIikKCmRlZiBmaXgxNShzZXR0aW5nc19wYXRoLCBmaXhlc19sb2cpOgogICAgd2l0aCBvcGVuKHNldHRpbmdzX3BhdGgpIGFzIGY6CiAgICAgICAgY29udGVudCA9IGYucmVhZCgpCiAgICBvcmlnaW5hbCA9IGNvbnRlbnQKICAgIGNoYW5nZWRfcmVhc29uID0gIiIKICAgIHBtX21hdGNoID0gcmUuc2VhcmNoKHIncGx1Z2luTWFuYWdlbWVudFxzKlx7JywgY29udGVudCkKICAgIGlmIHBtX21hdGNoIGlzIE5vbmU6CiAgICAgICAgYmxvY2sgPSAoCiAgICAgICAgICAgICdwbHVnaW5NYW5hZ2VtZW50IHtcbicKICAg
+ICAgICAgICAgJyAgICByZXBvc2l0b3JpZXMge1xuJwogICAgICAgICAgICAnICAgICAgICBnb29nbGUoKVxuJwogICAgICAgICAgICAnICAgICAgICBtYXZlbkNlbnRyYWwoKVxuJwogICAgICAgICAgICAnICAgICAgICBncmFkbGVQbHVnaW5Qb3J0YWwoKVxuJwogICAgICAgICAgICAnICAgIH1cbicKICAgICAgICAgICAgJ31cbicKICAgICAgICApCiAgICAgICAgY29udGVudCA9IGJsb2NrICsgY29udGVudAogICAgICAgIGNoYW5nZWRfcmVhc29uID0gImJsb2MgcGx1Z2luTWFuYWdlbWVudCBham91dGUgZW4gdGV0ZSAoYWJzZW50KSIKICAgIGVsc2U6CiAgICAgICAgc3RhcnQgPSBwbV9tYXRjaC5lbmQoKSAtIDEKICAgICAgICBkZXB0aCA9IDAKICAgICAgICBpID0gc3RhcnQKICAgICAgICB3aGlsZSBpIDwgbGVuKGNvbnRlbnQpOgogICAgICAgICAgICBpZiBjb250ZW50W2ldID09ICd7JzoKICAgICAgICAgICAgICAgIGRlcHRoICs9IDEKICAgICAgICAgICAgZWxpZiBjb250ZW50W2ldID09ICd9JzoKICAgICAgICAgICAgICAgIGRlcHRoIC09IDEKICAgICAgICAgICAgICAgIGlmIGRlcHRoID09IDA6CiAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgaSArPSAxCiAgICAgICAgcG1fYmxvY2sgPSBjb250ZW50W3N0YXJ0OmkrMV0KICAgICAgICBpZiAnZ29vZ2xlKCknIG5vdCBpbiBwbV9ibG9jazoKICAgICAgICAgICAgcmVwb19tYXRjaCA9IHJlLnNlYXJjaChyJ3JlcG9zaXRvcmllc1xzKlx7JywgcG1fYmxvY2spCiAgICAgICAgICAgIGlmIHJlcG9fbWF0Y2g6CiAgICAgICAgICAgICAgICBpbnNlcnRfYXQgPSByZXBvX21hdGNoLmVuZCgpCiAgICAgICAgICAgICAgICBuZXdfcG1fYmxvY2sgPSBwbV9ibG9ja1s6aW5zZXJ0X2F0XSArICdcbiAgICAgICAgZ29vZ2xlKCknICsgcG1fYmxvY2tbaW5zZXJ0X2F0Ol0KICAgICAgICAgICAgICAgIGNvbnRlbnQgPSBjb250ZW50WzpzdGFydF0gKyBuZXdfcG1fYmxvY2sgKyBjb250ZW50W2krMTpdCiAgICAgICAgICAgICAgICBjaGFuZ2VkX3JlYXNvbiA9ICJnb29nbGUoKSBham91dGUgZGFucyBwbHVnaW5NYW5hZ2VtZW50IGV4aXN0YW50IgogICAgaWYgY29udGVudCAhPSBvcmlnaW5hbDoKICAgICAgICB3aXRoIG9wZW4oc2V0dGluZ3NfcGF0aCwgJ3cnKSBhcyBmOgogICAgICAgICAgICBmLndyaXRlKGNvbnRlbnQpCiAgICAgICAgd2l0aCBvcGVuKGZpeGVzX2xvZywgJ2EnKSBhcyBsb2c6CiAgICAgICAgICAgIGxvZy53cml0ZShmIntjaGFuZ2VkX3JlYXNvbn0gZGFucyB7c2V0dGluZ3NfcGF0aH0uXG4iKQoKZGVmIGZpeF9idWlsZHNjcmlwdChwYXRoLCBmaXhlc19sb2cpOgogICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICAgICAgY29udGVudCA9IGYucmVhZCgpCiAgICBpZHggPSBjb250ZW50LmZpbmQoJ2J1aWxkc2NyaXB0JykKICAgIGlmIGlkeCAhPSAtMToKICAgICAgICBicmFjZV9zdGFydCA9IGNvbnRlbnQuZmluZCgneycsIGlkeCkKICAgICAgICBp
+ZiBicmFjZV9zdGFydCAhPSAtMToKICAgICAgICAgICAgZGVwdGggPSAwCiAgICAgICAgICAgIGkgPSBicmFjZV9zdGFydAogICAgICAgICAgICB3aGlsZSBpIDwgbGVuKGNvbnRlbnQpOgogICAgICAgICAgICAgICAgaWYgY29udGVudFtpXSA9PSAneyc6CiAgICAgICAgICAgICAgICAgICAgZGVwdGggKz0gMQogICAgICAgICAgICAgICAgZWxpZiBjb250ZW50W2ldID09ICd9JzoKICAgICAgICAgICAgICAgICAgICBkZXB0aCAtPSAxCiAgICAgICAgICAgICAgICAgICAgaWYgZGVwdGggPT0gMDoKICAgICAgICAgICAgICAgICAgICAgICAgYnJlYWsKICAgICAgICAgICAgICAgIGkgKz0gMQogICAgICAgICAgICBlbmQgPSBpICsgMQogICAgICAgICAgICBjb250ZW50ID0gY29udGVudFs6aWR4XSArIGNvbnRlbnRbZW5kOl0KICAgICAgICAgICAgd2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgICAgICAgICAgICAgIGYud3JpdGUoY29udGVudCkKICAgICAgICAgICAgd2l0aCBvcGVuKGZpeGVzX2xvZywgJ2EnKSBhcyBsb2c6CiAgICAgICAgICAgICAgICBsb2cud3JpdGUoZiJCbG9jIGJ1aWxkc2NyaXB0e3t9fSBvYnNvbGV0ZSByZXRpcmUgZGUge3BhdGh9IChjb25mbGl0IGF2ZWMgcGx1Z2luc3t7fX0gbW9kZXJuZSlcbiIpCgpkZWYgZml4MihmaXhlc19sb2csICpmaWxlcyk6CiAgICBwYXR0ZXJuID0gcmUuY29tcGlsZSgKICAgICAgICByJ2lkXHMqXChccyooP1A8cTE+WyInXSkoP1A8aWQxPltcdy5cLV0rKSg/UD1xMSlccypcKVxzKnZlcnNpb25ccyooP1A8cTF2PlsiJ10pKD9QPHZlcjE+W14iJ10rKSg/UD1xMXYpJwogICAgICAgIHInfCcKICAgICAgICByJ2lkXHMrKD9QPHEyPlsiJ10pKD9QPGlkMj5bXHcuXC1dKykoP1A9cTIpXHMrdmVyc2lvblxzKyg/UDxxMnY+WyInXSkoP1A8dmVyMj5bXiInXSspKD9QPXEydiknCiAgICApCiAgICBzZWVuX2lkcyA9IHNldCgpCiAgICBjaGFuZ2VkX2ZpbGVzID0gW10KICAgIGZvciBwYXRoIGluIGZpbGVzOgogICAgICAgIHRyeToKICAgICAgICAgICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICAgICAgICAgICAgICBjb250ZW50ID0gZi5yZWFkKCkKICAgICAgICBleGNlcHQgT1NFcnJvcjoKICAgICAgICAgICAgY29udGludWUKICAgICAgICBkZWYgcmVwbChtKToKICAgICAgICAgICAgaWYgbS5ncm91cCgnaWQxJykgaXMgbm90IE5vbmU6CiAgICAgICAgICAgICAgICBwaWQgPSBtLmdyb3VwKCdpZDEnKQogICAgICAgICAgICAgICAgaWYgcGlkIGluIHNlZW5faWRzOgogICAgICAgICAgICAgICAgICAgIHJldHVybiBmJ2lkKCJ7cGlkfSIpJwogICAgICAgICAgICAgICAgc2Vlbl9pZHMuYWRkKHBpZCkKICAgICAgICAgICAgICAgIHJldHVybiBtLmdyb3VwKDApCiAgICAgICAgICAgIGVsc2U6CiAgICAgICAgICAgICAgICBwaWQgPSBtLmdyb3VwKCdpZDInKQogICAgICAgICAgICAgICAgcXVvdGUgPSBtLmdyb3VwKCdxMicpCiAgICAgICAgICAgICAgICBpZiBwaWQgaW4gc2Vlbl9p
+ZHM6CiAgICAgICAgICAgICAgICAgICAgcmV0dXJuIGYnaWQge3F1b3RlfXtwaWR9e3F1b3RlfScKICAgICAgICAgICAgICAgIHNlZW5faWRzLmFkZChwaWQpCiAgICAgICAgICAgICAgICByZXR1cm4gbS5ncm91cCgwKQogICAgICAgIG5ld19jb250ZW50ID0gcGF0dGVybi5zdWIocmVwbCwgY29udGVudCkKICAgICAgICBpZiBuZXdfY29udGVudCAhPSBjb250ZW50OgogICAgICAgICAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgICAgICAgICAgZi53cml0ZShuZXdfY29udGVudCkKICAgICAgICAgICAgY2hhbmdlZF9maWxlcy5hcHBlbmQocGF0aCkKICAgIGlmIGNoYW5nZWRfZmlsZXM6CiAgICAgICAgd2l0aCBvcGVuKGZpeGVzX2xvZywgJ2EnKSBhcyBsb2c6CiAgICAgICAgICAgIGxvZy53cml0ZShmIlZlcnNpb24gZGUgcGx1Z2luIGR1cGxpcXVlZSByZXRpcmVlIGRhbnMgOiB7JywgJy5qb2luKGNoYW5nZWRfZmlsZXMpfVxuIikKCmRlZiBmaXgxMShwYXRoLCBmaXhlc19sb2cpOgogICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICAgICAgY29udGVudCA9IGYucmVhZCgpCiAgICBvcmlnaW5hbCA9IGNvbnRlbnQKICAgIEtOT1dOX1BMVUdJTlMgPSBbCiAgICAgICAgJ2NvbS5hbmRyb2lkLmFwcGxpY2F0aW9uJywKICAgICAgICAnY29tLmFuZHJvaWQubGlicmFyeScsCiAgICAgICAgJ2NvbS5hbmRyb2lkLmR5bmFtaWMtZmVhdHVyZScsCiAgICAgICAgJ29yZy5qZXRicmFpbnMua290bGluLmFuZHJvaWQnLAogICAgICAgICdvcmcuamV0YnJhaW5zLmtvdGxpbi5qdm0nLAogICAgICAgICdjb20uZ29vZ2xlLmdtcy5nb29nbGUtc2VydmljZXMnLAogICAgXQogICAgaWRzX3BhdHRlcm4gPSAnfCcuam9pbihyZS5lc2NhcGUocCkgZm9yIHAgaW4gS05PV05fUExVR0lOUykKICAgIGt0X3BhdHRlcm4gPSByZS5jb21waWxlKAogICAgICAgIHInKGlkXHMqXChccypbIiddKD86JyArIGlkc19wYXR0ZXJuICsgcicpWyInXVxzKlwpKScKICAgICAgICByJ1xzKnZlcnNpb25ccyonCiAgICAgICAgcicoPzpcKFxzKlsiJ11bXiInXStbIiddXHMqXCl8WyInXVteIiddK1siJ10pJwogICAgKQogICAgY29udGVudCA9IGt0X3BhdHRlcm4uc3ViKHInXDEnLCBjb250ZW50KQogICAgZ3Jvb3Z5X3BhdHRlcm4gPSByZS5jb21waWxlKAogICAgICAgIHIiKGlkXHMrWyciXSg/OiIgKyBpZHNfcGF0dGVybiArIHIiKVsnIl0pIgogICAgICAgIHIiXHMqdmVyc2lvblxzKiIKICAgICAgICByIig/OlwoXHMqWyciXVteJyJdK1snIl1ccypcKXxbJyJdW14nIl0rWyciXSkiCiAgICApCiAgICBjb250ZW50ID0gZ3Jvb3Z5X3BhdHRlcm4uc3ViKHInXDEnLCBjb250ZW50KQogICAgaWYgY29udGVudCAhPSBvcmlnaW5hbDoKICAgICAgICB3aXRoIG9wZW4ocGF0aCwgJ3cnKSBhcyBmOgogICAgICAgICAgICBmLndyaXRlKGNvbnRlbnQpCiAgICAgICAgd2l0aCBvcGVuKGZpeGVzX2xvZywgJ2EnKSBhcyBsb2c6CiAgICAgICAgICAgIGxvZy53cml0
+ZShmIlZlcnNpb24gZXhwbGljaXRlIHJldGlyZWUgZGVzIHBsdWdpbnMgZGFucyB7cGF0aH0uXG4iKQoKZGVmIGZpeDMocGF0aCwgZml4ZXNfbG9nKToKICAgIHdpdGggb3BlbihwYXRoKSBhcyBmOgogICAgICAgIGNvbnRlbnQgPSBmLnJlYWQoKQogICAgcGF0dGVybiA9IHJlLmNvbXBpbGUoCiAgICAgICAgcicoY29tcGlsZVNka3x0YXJnZXRTZGt8bWluU2RrKVxzKlx7XHMqdmVyc2lvblxzKj1ccypyZWxlYXNlXChccyooXGQrKVxzKlwpXHMqKFx7W159XSpcfSk/XHMqXH0nCiAgICApCiAgICBtYXRjaGVzID0gW10KICAgIGRlZiByZXBsKG0pOgogICAgICAgIG1hdGNoZXMuYXBwZW5kKChtLmdyb3VwKDEpLCBtLmdyb3VwKDIpKSkKICAgICAgICByZXR1cm4gZid7bS5ncm91cCgxKX0gPSB7bS5ncm91cCgyKX0nCiAgICBuZXdfY29udGVudCA9IHBhdHRlcm4uc3ViKHJlcGwsIGNvbnRlbnQpCiAgICBpZiBtYXRjaGVzOgogICAgICAgIHdpdGggb3BlbihwYXRoLCAndycpIGFzIGY6CiAgICAgICAgICAgIGYud3JpdGUobmV3X2NvbnRlbnQpCiAgICAgICAgZGV0YWlscyA9ICIsICIuam9pbihmIntmaWVsZH0ge3sgdmVyc2lvbiA9IHJlbGVhc2Uoe3Zlcn0pIH19IC0+IHtmaWVsZH0gPSB7dmVyfSIgZm9yIGZpZWxkLCB2ZXIgaW4gbWF0Y2hlcykKICAgICAgICB3aXRoIG9wZW4oZml4ZXNfbG9nLCAnYScpIGFzIGxvZzoKICAgICAgICAgICAgbG9nLndyaXRlKGYiU3ludGF4ZSBEU0wgU2RrIHNpbXBsaWZpZWUgZGFucyB7cGF0aH0gKHtkZXRhaWxzfSlcbiIpCgpkZWYgZml4MTcoc2V0dGluZ3NfcGF0aCwgZml4ZXNfbG9nLCAqbW9kdWxlX2ZpbGVzKToKICAgIERFRkFVTFRfVkVSU0lPTlMgPSB7CiAgICAgICAgJ2NvbS5hbmRyb2lkLmFwcGxpY2F0aW9uJzogJzguNS4wJywKICAgICAgICAnY29tLmFuZHJvaWQubGlicmFyeSc6ICc4LjUuMCcsCiAgICAgICAgJ29yZy5qZXRicmFpbnMua290bGluLmFuZHJvaWQnOiAnMS45LjI0JywKICAgICAgICAnb3JnLmpldGJyYWlucy5rb3RsaW4uanZtJzogJzEuOS4yNCcsCiAgICAgICAgJ2NvbS5nb29nbGUuZ21zLmdvb2dsZS1zZXJ2aWNlcyc6ICc0LjQuMicsCiAgICB9CiAgICBpZHNfcGF0dGVybiA9ICd8Jy5qb2luKHJlLmVzY2FwZShwKSBmb3IgcCBpbiBERUZBVUxUX1ZFUlNJT05TKQogICAgYmFyZV9wbHVnaW5fcGF0dGVybiA9IHJlLmNvbXBpbGUoCiAgICAgICAgcidpZFxzKlwoXHMqWyInXSg/UDxpZDE+JyArIGlkc19wYXR0ZXJuICsgcicpWyInXVxzKlwpKD8hXHMqdmVyc2lvbil8JwogICAgICAgIHInaWRccytbIiddKD9QPGlkMj4nICsgaWRzX3BhdHRlcm4gKyByJylbIiddKD8hXHMrdmVyc2lvbiknCiAgICApCiAgICBuZWVkZWQgPSBzZXQoKQogICAgZm9yIHBhdGggaW4gbW9kdWxlX2ZpbGVzOgogICAgICAgIHRyeToKICAgICAgICAgICAgd2l0aCBvcGVuKHBhdGgpIGFzIGY6CiAgICAgICAgICAgICAgICBjb250ZW50ID0gZi5yZWFkKCkKICAgICAgICBleGNlcHQgT1NFcnJvcjoK
+ICAgICAgICAgICAgY29udGludWUKICAgICAgICBmb3IgbSBpbiBiYXJlX3BsdWdpbl9wYXR0ZXJuLmZpbmRpdGVyKGNvbnRlbnQpOgogICAgICAgICAgICBwaWQgPSBtLmdyb3VwKCdpZDEnKSBvciBtLmdyb3VwKCdpZDInKQogICAgICAgICAgICBuZWVkZWQuYWRkKHBpZCkKICAgIGlmIG5vdCBuZWVkZWQ6CiAgICAgICAgcmV0dXJuCiAgICB3aXRoIG9wZW4oc2V0dGluZ3NfcGF0aCkgYXMgZjoKICAgICAgICBzZXR0aW5nc19jb250ZW50ID0gZi5yZWFkKCkKICAgIHN0aWxsX25lZWRlZCA9IHNvcnRlZCgKICAgICAgICBwaWQgZm9yIHBpZCBpbiBuZWVkZWQKICAgICAgICBpZiBub3QgcmUuc2VhcmNoKHJlLmVzY2FwZShwaWQpICsgcidbIidcKV1ccypcKT9ccyp2ZXJzaW9uXHMqWyInXScsIHNldHRpbmdzX2NvbnRlbnQpCiAgICApCiAgICBpZiBub3Qgc3RpbGxfbmVlZGVkOgogICAgICAgIHJldHVybgogICAgcG1fbWF0Y2ggPSByZS5zZWFyY2gocidwbHVnaW5NYW5hZ2VtZW50XHMqXHsnLCBzZXR0aW5nc19jb250ZW50KQogICAgaWYgcG1fbWF0Y2ggaXMgTm9uZToKICAgICAgICByZXR1cm4KICAgIHBtX3N0YXJ0ID0gcG1fbWF0Y2guZW5kKCkgLSAxCiAgICBkZXB0aCA9IDAKICAgIGkgPSBwbV9zdGFydAogICAgd2hpbGUgaSA8IGxlbihzZXR0aW5nc19jb250ZW50KToKICAgICAgICBpZiBzZXR0aW5nc19jb250ZW50W2ldID09ICd7JzoKICAgICAgICAgICAgZGVwdGggKz0gMQogICAgICAgIGVsaWYgc2V0dGluZ3NfY29udGVudFtpXSA9PSAnfSc6CiAgICAgICAgICAgIGRlcHRoIC09IDEKICAgICAgICAgICAgaWYgZGVwdGggPT0gMDoKICAgICAgICAgICAgICAgIGJyZWFrCiAgICAgICAgaSArPSAxCiAgICBwbV9lbmQgPSBpCiAgICBwbV9ibG9jayA9IHNldHRpbmdzX2NvbnRlbnRbcG1fc3RhcnQ6cG1fZW5kICsgMV0KICAgIHBsdWdpbnNfbWF0Y2ggPSByZS5zZWFyY2gocidwbHVnaW5zXHMqXHsnLCBwbV9ibG9jaykKICAgIGxpbmVzX3RvX2FkZCA9ICJcbiIuam9pbigKICAgICAgICBmJyAgICAgICAgaWQoIntwaWR9IikgdmVyc2lvbiAie0RFRkFVTFRfVkVSU0lPTlNbcGlkXX0iIGFwcGx5IGZhbHNlJwogICAgICAgIGZvciBwaWQgaW4gc3RpbGxfbmVlZGVkCiAgICApCiAgICBpZiBwbHVnaW5zX21hdGNoOgogICAgICAgIGluc2VydF9hdCA9IHBsdWdpbnNfbWF0Y2guZW5kKCkKICAgICAgICBuZXdfcG1fYmxvY2sgPSBwbV9ibG9ja1s6aW5zZXJ0X2F0XSArICJcbiIgKyBsaW5lc190b19hZGQgKyBwbV9ibG9ja1tpbnNlcnRfYXQ6XQogICAgZWxzZToKICAgICAgICBpbnNlcnRpb24gPSBmIlxuICAgIHBsdWdpbnMge3tcbntsaW5lc190b19hZGR9XG4gICAgfX1cbiIKICAgICAgICBuZXdfcG1fYmxvY2sgPSBwbV9ibG9ja1s6LTFdICsgaW5zZXJ0aW9uICsgIn0iCiAgICBuZXdfc2V0dGluZ3NfY29udGVudCA9IHNldHRpbmdzX2NvbnRlbnRbOnBtX3N0YXJ0XSArIG5ld19wbV9ibG9jayArIHNldHRpbmdzX2NvbnRlbnRb
+cG1fZW5kICsgMTpdCiAgICB3aXRoIG9wZW4oc2V0dGluZ3NfcGF0aCwgJ3cnKSBhcyBmOgogICAgICAgIGYud3JpdGUobmV3X3NldHRpbmdzX2NvbnRlbnQpCiAgICB3aXRoIG9wZW4oZml4ZXNfbG9nLCAnYScpIGFzIGxvZzoKICAgICAgICBsb2cud3JpdGUoIlZlcnNpb24ocykgcGFyIGRlZmF1dCBpbmplY3RlZShzKSBwb3VyICIgKyAiLCAiLmpvaW4oc3RpbGxfbmVlZGVkKSArICIgZGFucyAiICsgc2V0dGluZ3NfcGF0aCArICIuXG4iKQoKZGVmIGZpeDE4KHBhdGgsIG5hbWVzcGFjZSwgZml4ZXNfbG9nKToKICAgIHdpdGggb3BlbihwYXRoKSBhcyBmOgogICAgICAgIGNvbnRlbnQgPSBmLnJlYWQoKQogICAgbSA9IHJlLnNlYXJjaChyJ1xiYW5kcm9pZFxzKlx7JywgY29udGVudCkKICAgIGlmIG0gaXMgTm9uZToKICAgICAgICByZXR1cm4KICAgIGxpbmUgPSBmJ1xuICAgIG5hbWVzcGFjZSA9ICJ7bmFtZXNwYWNlfSInIGlmIHBhdGguZW5kc3dpdGgoJy5rdHMnKSBlbHNlIGYnXG4gICAgbmFtZXNwYWNlICJ7bmFtZXNwYWNlfSInCiAgICBpbnNlcnRfYXQgPSBtLmVuZCgpCiAgICBuZXdfY29udGVudCA9IGNvbnRlbnRbOmluc2VydF9hdF0gKyBsaW5lICsgY29udGVudFtpbnNlcnRfYXQ6XQogICAgd2l0aCBvcGVuKHBhdGgsICd3JykgYXMgZjoKICAgICAgICBmLndyaXRlKG5ld19jb250ZW50KQogICAgd2l0aCBvcGVuKGZpeGVzX2xvZywgJ2EnKSBhcyBsb2c6CiAgICAgICAgbG9nLndyaXRlKGYnbmFtZXNwYWNlICJ7bmFtZXNwYWNlfSIgYWpvdXRlIGRhbnMge3BhdGh9LlxuJykKCmlmIF9fbmFtZV9fID09ICdfX21haW5fXyc6CiAgICBjbWQgPSBzeXMuYXJndlsxXQogICAgYXJncyA9IHN5cy5hcmd2WzI6XQogICAgZ2xvYmFscygpW2NtZF0oKmFyZ3MpCg==
+B64EOF
+          base64 -d /tmp/fix_scripts/combined.py.b64 > /tmp/fix_scripts/combined.py
+          chmod +x /tmp/fix_scripts/combined.py
+
       - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 1/3 - init + FIX5)
         run: |
           set -e
@@ -1243,11 +1260,9 @@ jobs:
               echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m" >> gradle.properties
             fi
           else
-            cat > gradle.properties << 'PROPS_EOF'
-            org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-            android.useAndroidX=true
-            android.enableJetifier=true
-            PROPS_EOF
+            echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m" > gradle.properties
+            echo "android.useAndroidX=true" >> gradle.properties
+            echo "android.enableJetifier=true" >> gradle.properties
           fi
           echo "Memoire Gradle fixee a -Xmx2048m dans gradle.properties (evite les crashs OOM silencieux)." >> "$FIXES_LOG"
 
@@ -1278,45 +1293,7 @@ jobs:
           # FIX9 : residus heredoc
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
             if [ -f "$GRADLE_FILE" ]; then
-              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
-import re
-import sys
-path, fixes_log = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    lines = f.readlines()
-original_lines = list(lines)
-heredoc_start = re.compile(r'^\s*cat.*<<\s*['"]?[A-Za-z_]+['"]?\s*$')
-bare_cat = re.compile(r'^\s*cat\s*$')
-removed_leading = 0
-while lines:
-    stripped = lines[0].strip()
-    if stripped == '':
-        lines.pop(0)
-        removed_leading += 1
-        continue
-    if heredoc_start.match(lines[0]) or bare_cat.match(lines[0]):
-        lines.pop(0)
-        removed_leading += 1
-        continue
-    break
-removed_trailing = 0
-while lines:
-    stripped = lines[-1].strip()
-    if stripped == '':
-        lines.pop()
-        continue
-    if re.match(r'^[A-Za-z_]+_?EOF$|^EOF$', stripped):
-        lines.pop()
-        removed_trailing += 1
-        continue
-    break
-if removed_leading > 0 or removed_trailing > 0:
-    with open(path, 'w') as f:
-        f.writelines(lines)
-    with open(fixes_log, 'a') as log:
-        log.write(f"Residus de commande shell/heredoc retires de {path} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin).
-")
-PYEOF
+              python3 /tmp/fix_scripts/combined.py fix9 "$GRADLE_FILE" "$FIXES_LOG"
             fi
           done
 
@@ -1377,62 +1354,7 @@ PYEOF
           done
 
           if [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ] && [ -n "$SETTINGS_FOR_PLUGINS" ]; then
-            python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" << 'PYEOF'
-import re
-import sys
-path, fixes_log = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    content = f.read()
-original = content
-changed_reason = ""
-pm_match = re.search(r'pluginManagement\s*\{', content)
-if pm_match is None:
-    block = (
-        'pluginManagement {
-'
-        '    repositories {
-'
-        '        google()
-'
-        '        mavenCentral()
-'
-        '        gradlePluginPortal()
-'
-        '    }
-'
-        '}
-'
-    )
-    content = block + content
-    changed_reason = "bloc pluginManagement ajoute en tete (absent)"
-else:
-    start = pm_match.end() - 1
-    depth = 0
-    i = start
-    while i < len(content):
-        if content[i] == '{':
-            depth += 1
-        elif content[i] == '}':
-            depth -= 1
-            if depth == 0:
-                break
-        i += 1
-    pm_block = content[start:i+1]
-    if 'google()' not in pm_block:
-        repo_match = re.search(r'repositories\s*\{', pm_block)
-        if repo_match:
-            insert_at = repo_match.end()
-            new_pm_block = pm_block[:insert_at] + '
-        google()' + pm_block[insert_at:]
-            content = content[:start] + new_pm_block + content[i+1:]
-            changed_reason = "google() ajoute dans pluginManagement existant"
-if content != original:
-    with open(path, 'w') as f:
-        f.write(content)
-    with open(fixes_log, 'a') as log:
-        log.write(f"{changed_reason} dans {path}.
-")
-PYEOF
+            python3 /tmp/fix_scripts/combined.py fix15 "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG"
           fi
 
           for GRADLE_FILE in $ALL_GRADLE_FILES; do
@@ -1449,80 +1371,13 @@ PYEOF
             fi
             if [ -f "$GRADLE_FILE" ] && [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ] && { [ "$HAS_LITERAL_CLASSPATH" == "true" ] || [ "$HAS_GENERIC_CONFLICT" == "true" ]; }; then
               echo "Conflit buildscript/plugins detecte dans $GRADLE_FILE - nettoyage..."
-              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
-import sys
-path, fixes_log = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    content = f.read()
-idx = content.find('buildscript')
-if idx != -1:
-    brace_start = content.find('{', idx)
-    if brace_start != -1:
-        depth = 0
-        i = brace_start
-        while i < len(content):
-            if content[i] == '{':
-                depth += 1
-            elif content[i] == '}':
-                depth -= 1
-                if depth == 0:
-                    break
-            i += 1
-        end = i + 1
-        content = content[:idx] + content[end:]
-        with open(path, 'w') as f:
-            f.write(content)
-        with open(fixes_log, 'a') as log:
-            log.write(f"Bloc buildscript{{}} obsolete retire de {path} (conflit avec plugins{{}} moderne)
-")
-PYEOF
+              python3 /tmp/fix_scripts/combined.py fix_buildscript "$GRADLE_FILE" "$FIXES_LOG"
             fi
           done
 
           # FIX2 : versions dupliquees
           if [ -n "$ALL_GRADLE_FILES" ]; then
-            python3 - "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
-import re
-import sys
-fixes_log = sys.argv[1]
-files = sys.argv[2:]
-pattern = re.compile(
-    r'id\s*\(\s*(?P<q1>["'])(?P<id1>[\w.\-]+)(?P=q1)\s*\)\s*version\s*(?P<q1v>["'])(?P<ver1>[^"']+)(?P=q1v)'
-    r'|'
-    r'id\s+(?P<q2>["'])(?P<id2>[\w.\-]+)(?P=q2)\s+version\s+(?P<q2v>["'])(?P<ver2>[^"']+)(?P=q2v)'
-)
-seen_ids = set()
-changed_files = []
-for path in files:
-    try:
-        with open(path) as f:
-            content = f.read()
-    except OSError:
-        continue
-    def repl(m):
-        if m.group('id1') is not None:
-            pid = m.group('id1')
-            if pid in seen_ids:
-                return f'id("{pid}")'
-            seen_ids.add(pid)
-            return m.group(0)
-        else:
-            pid = m.group('id2')
-            quote = m.group('q2')
-            if pid in seen_ids:
-                return f'id {quote}{pid}{quote}'
-            seen_ids.add(pid)
-            return m.group(0)
-    new_content = pattern.sub(repl, content)
-    if new_content != content:
-        with open(path, 'w') as f:
-            f.write(new_content)
-        changed_files.append(path)
-if changed_files:
-    with open(fixes_log, 'a') as log:
-        log.write(f"Version de plugin dupliquee retiree dans : {', '.join(changed_files)}
-")
-PYEOF
+            python3 /tmp/fix_scripts/combined.py fix2 "$FIXES_LOG" $ALL_GRADLE_FILES
           fi
 
           # FIX11 : versions explicites dans modules non-racine
@@ -1535,41 +1390,7 @@ PYEOF
               *) continue ;;
             esac
             if [ -f "$GRADLE_FILE" ]; then
-              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
-import re
-import sys
-path, fixes_log = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    content = f.read()
-original = content
-KNOWN_PLUGINS = [
-    'com.android.application',
-    'com.android.library',
-    'com.android.dynamic-feature',
-    'org.jetbrains.kotlin.android',
-    'org.jetbrains.kotlin.jvm',
-    'com.google.gms.google-services',
-]
-ids_pattern = '|'.join(re.escape(p) for p in KNOWN_PLUGINS)
-kt_pattern = re.compile(
-    r'(id\s*\(\s*["'](?:' + ids_pattern + r')["']\s*\))'
-    r'\s*version\s*'
-    r'(?:\(\s*["'][^"']+["']\s*\)|["'][^"']+["'])'
-)
-content = kt_pattern.sub(r'', content)
-groovy_pattern = re.compile(
-    r"(id\s+['"](?:" + ids_pattern + r")['"])"
-    r"\s*version\s*"
-    r"(?:\(\s*['"][^'"]+['"]\s*\)|['"][^'"]+['"])"
-)
-content = groovy_pattern.sub(r'', content)
-if content != original:
-    with open(path, 'w') as f:
-        f.write(content)
-    with open(fixes_log, 'a') as log:
-        log.write(f"Version explicite retiree des plugins dans {path}.
-")
-PYEOF
+              python3 /tmp/fix_scripts/combined.py fix11 "$GRADLE_FILE" "$FIXES_LOG"
             fi
           done
 
@@ -1579,110 +1400,13 @@ PYEOF
               *settings.gradle*) continue ;;
             esac
             if [ -f "$GRADLE_FILE" ] && grep -qE '(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(' "$GRADLE_FILE" 2>/dev/null; then
-              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
-import re
-import sys
-path, fixes_log = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    content = f.read()
-pattern = re.compile(
-    r'(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(\s*(\d+)\s*\)\s*(\{[^}]*\})?\s*\}'
-)
-matches = []
-def repl(m):
-    matches.append((m.group(1), m.group(2)))
-    return f'{m.group(1)} = {m.group(2)}'
-new_content = pattern.sub(repl, content)
-if matches:
-    with open(path, 'w') as f:
-        f.write(new_content)
-    details = ", ".join(f"{field} {{ version = release({ver}) }} -> {field} = {ver}" for field, ver in matches)
-    with open(fixes_log, 'a') as log:
-        log.write(f"Syntaxe DSL Sdk simplifiee dans {path} ({details})
-")
-PYEOF
+              python3 /tmp/fix_scripts/combined.py fix3 "$GRADLE_FILE" "$FIXES_LOG"
             fi
           done
 
           # FIX17 : versions par defaut pour plugins sans version
           if [ -n "$SETTINGS_FOR_PLUGINS" ]; then
-            python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
-import re
-import sys
-settings_path, fixes_log = sys.argv[1], sys.argv[2]
-module_files = [p for p in sys.argv[3:] if 'settings.gradle' not in p]
-DEFAULT_VERSIONS = {
-    'com.android.application': '8.5.0',
-    'com.android.library': '8.5.0',
-    'org.jetbrains.kotlin.android': '1.9.24',
-    'org.jetbrains.kotlin.jvm': '1.9.24',
-    'com.google.gms.google-services': '4.4.2',
-}
-ids_pattern = '|'.join(re.escape(p) for p in DEFAULT_VERSIONS)
-bare_plugin_pattern = re.compile(
-    r'id\s*\(\s*["'](?P<id1>' + ids_pattern + r')["']\s*\)(?!\s*version)|'
-    r'id\s+["'](?P<id2>' + ids_pattern + r')["'](?!\s+version)'
-)
-needed = set()
-for path in module_files:
-    try:
-        with open(path) as f:
-            content = f.read()
-    except OSError:
-        continue
-    for m in bare_plugin_pattern.finditer(content):
-        pid = m.group('id1') or m.group('id2')
-        needed.add(pid)
-if not needed:
-    sys.exit(0)
-with open(settings_path) as f:
-    settings_content = f.read()
-still_needed = sorted(
-    pid for pid in needed
-    if not re.search(re.escape(pid) + r'["'\)]\s*\)?\s*version\s*["']', settings_content)
-)
-if not still_needed:
-    sys.exit(0)
-pm_match = re.search(r'pluginManagement\s*\{', settings_content)
-if pm_match is None:
-    sys.exit(0)
-pm_start = pm_match.end() - 1
-depth = 0
-i = pm_start
-while i < len(settings_content):
-    if settings_content[i] == '{':
-        depth += 1
-    elif settings_content[i] == '}':
-        depth -= 1
-        if depth == 0:
-            break
-    i += 1
-pm_end = i
-pm_block = settings_content[pm_start:pm_end + 1]
-plugins_match = re.search(r'plugins\s*\{', pm_block)
-lines_to_add = "
-".join(
-    f'        id("{pid}") version "{DEFAULT_VERSIONS[pid]}" apply false'
-    for pid in still_needed
-)
-if plugins_match:
-    insert_at = plugins_match.end()
-    new_pm_block = pm_block[:insert_at] + "
-" + lines_to_add + pm_block[insert_at:]
-else:
-    insertion = f"
-    plugins {{
-{lines_to_add}
-    }}
-"
-    new_pm_block = pm_block[:-1] + insertion + "}"
-new_settings_content = settings_content[:pm_start] + new_pm_block + settings_content[pm_end + 1:]
-with open(settings_path, 'w') as f:
-    f.write(new_settings_content)
-with open(fixes_log, 'a') as log:
-    log.write("Version(s) par defaut injectee(s) pour " + ", ".join(still_needed) + " dans " + settings_path + ".
-")
-PYEOF
+            python3 /tmp/fix_scripts/combined.py fix17 "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" $ALL_GRADLE_FILES
           fi
 
           # FIX18 : namespace manquant
@@ -1691,7 +1415,7 @@ PYEOF
               *settings.gradle*) continue ;;
             esac
             [ -f "$GRADLE_FILE" ] || continue
-            if ! grep -qE "id\s*\(\s*["']com\.android\.(application|library)["']|id\s+["']com\.android\.(application|library)["']|apply plugin:\s*["']com\.android\.(application|library)["']" "$GRADLE_FILE" 2>/dev/null; then
+            if ! grep -qE "id\s*\(\s*[\"']com\.android\.(application|library)[\"']|id\s+[\"']com\.android\.(application|library)[\"']|apply plugin:\s*[\"']com\.android\.(application|library)[\"']" "$GRADLE_FILE" 2>/dev/null; then
               continue
             fi
             if grep -qE '^\s*namespace' "$GRADLE_FILE" 2>/dev/null; then
@@ -1708,26 +1432,7 @@ PYEOF
             fi
             [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="${{ github.event.inputs.package_id }}"
             [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="com.philtech.app"
-            python3 - "$GRADLE_FILE" "$NAMESPACE_VALUE" "$FIXES_LOG" << 'PYEOF'
-import re
-import sys
-path, namespace, fixes_log = sys.argv[1], sys.argv[2], sys.argv[3]
-with open(path) as f:
-    content = f.read()
-m = re.search(r'android\s*\{', content)
-if m is None:
-    sys.exit(0)
-line = f'
-    namespace = "{namespace}"' if path.endswith('.kts') else f'
-    namespace "{namespace}"'
-insert_at = m.end()
-new_content = content[:insert_at] + line + content[insert_at:]
-with open(path, 'w') as f:
-    f.write(new_content)
-with open(fixes_log, 'a') as log:
-    log.write(f'namespace "{namespace}" ajoute dans {path}.
-')
-PYEOF
+            python3 /tmp/fix_scripts/combined.py fix18 "$GRADLE_FILE" "$NAMESPACE_VALUE" "$FIXES_LOG"
           done
 
       - name: Build Kotlin/Java
