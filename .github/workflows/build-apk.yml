@@ -1207,8 +1207,19 @@ jobs:
       # (NOUVEAU FIX5) memoire Gradle insuffisante -> ajout automatique
       # de org.gradle.jvmargs dans gradle.properties.
       # ============================================================
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 1/3 - init + FIX5)
+      # NOTE : cette etape etait a l'origine un seul run: unique et tres
+      # long (700+ lignes). Elle a ete decoupee en 3 etapes plus courtes
+      # suite au run #353, ou GitHub Actions a rejete le fichier avec
+      # "Exceeded max expression length 21000" sur ce bloc precis -
+      # comportement documente comme s'appliquant a une seule expression
+      # ${{ }}, mais observe en pratique sur des blocs run: tres longs
+      # avec de nombreuses interpolations ${{ }} (voir discussions
+      # community github.com/orgs/community/discussions/45756). Le
+      # decoupage en steps plus petits contourne le probleme sans changer
+      # la logique. $GITHUB_ENV relaie ALL_GRADLE_FILES et FIXES_LOG entre
+      # les 3 etapes (GRADLE_PROJECT_ROOT est deja relaye par le mecanisme
+      # existant).
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (1/3 - setup + FIX5)
         run: |
           set -e
           cd src/
@@ -1219,9 +1230,13 @@ jobs:
               return
             fi
             local root
-            root=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f               -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*"               -exec dirname {} \; | head -1)
+            root=$(find . \( -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
+              -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" \
+              -exec dirname {} \; | head -1)
             if [ -z "$root" ]; then
-              root=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f                 -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*"                 -exec dirname {} \; | head -1)
+              root=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f \
+                -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/app/*" \
+                -exec dirname {} \; | head -1)
             fi
             [ -z "$root" ] && root="."
             echo "$root"
@@ -1229,13 +1244,21 @@ jobs:
 
           PROJECT_ROOT=$(find_project_root)
           cd "$PROJECT_ROOT"
+          # On stocke toujours un chemin ABSOLU (via $PWD apres le cd), pour
+          # que l'etape de build suivante n'ait pas a deviner si le chemin
+          # est relatif a src/ (cas normal) ou deja absolu (cas scaffold).
           echo "Racine du projet Gradle detectee : $PWD"
           echo "GRADLE_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
           FIXES_LOG="$GITHUB_WORKSPACE/fixes.log"
           touch "$FIXES_LOG"
 
-          # FIX5 : memoire Gradle
+          # ------------------------------------------------------------
+          # FIX5 (NOUVEAU) : memoire Gradle insuffisante -> cause frequente
+          # de builds qui timeout ou crashent silencieusement sur des
+          # runners standard. On force org.gradle.jvmargs si absent ou
+          # trop bas.
+          # ------------------------------------------------------------
           if [ -f "gradle.properties" ]; then
             if grep -q "org.gradle.jvmargs" gradle.properties; then
               sed -i -E 's/org\.gradle\.jvmargs\s*=.*/org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m/' gradle.properties
@@ -1243,18 +1266,20 @@ jobs:
               echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m" >> gradle.properties
             fi
           else
-            echo "org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m" > gradle.properties
-            echo "android.useAndroidX=true" >> gradle.properties
-            echo "android.enableJetifier=true" >> gradle.properties
+            cat > gradle.properties << PROPS_EOF
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          PROPS_EOF
           fi
           echo "Memoire Gradle fixee a -Xmx2048m dans gradle.properties (evite les crashs OOM silencieux)." >> "$FIXES_LOG"
 
-          # Collecter les fichiers gradle
           PRIORITY_FILES=""
           for f in settings.gradle.kts settings.gradle build.gradle.kts build.gradle; do
             [ -f "$f" ] && PRIORITY_FILES="$PRIORITY_FILES $f"
           done
-          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f             -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sed 's|^\./||' | sort)
+          OTHER_FILES=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" -o -name "settings.gradle" -o -name "settings.gradle.kts" \) -type f \
+            -not -path "*/node_modules/*" -not -path "*/.git/*" -not -path "*/build/*" | sed 's|^\./||' | sort)
           ALL_GRADLE_FILES="$PRIORITY_FILES"
           for f in $OTHER_FILES; do
             case " $PRIORITY_FILES " in
@@ -1262,174 +1287,308 @@ jobs:
               *) ALL_GRADLE_FILES="$ALL_GRADLE_FILES $f" ;;
             esac
           done
-          echo "$ALL_GRADLE_FILES" > /tmp/all_gradle_files.txt
-          echo "$FIXES_LOG" > /tmp/fixes_log.txt
-          echo "$PWD" > /tmp/project_root.txt
 
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 2/3 - FIX9,14,15)
-        shell: python -u {0}
+          echo "ALL_GRADLE_FILES=$ALL_GRADLE_FILES" >> "$GITHUB_ENV"
+          echo "FIXES_LOG=$FIXES_LOG" >> "$GITHUB_ENV"
+
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (2/3 - FIX9, FIX14, FIX15)
         run: |
+          set -e
+          cd "$GRADLE_PROJECT_ROOT"
+
+          # ------------------------------------------------------------
+          # FIX9 (NOUVEAU) : residus de commande shell en tete de fichier
+          # Gradle - typiquement "cat > build.gradle << EOF" ou "cat <<
+          # 'EOF'" colle par erreur au tout debut du fichier (le client a
+          # genere son build.gradle via un script et a oublie de retirer
+          # l'enveloppe heredoc), ou un marqueur "EOF" isole restant en fin
+          # de fichier. Gradle essaie alors d'evaluer le mot "cat" comme
+          # une propriete Groovy -> "Could not get unknown property 'cat'
+          # for root project ... build.gradle line: 1".
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$GRADLE_FILE" ]; then
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
           import re
-          import os
-          import subprocess
+          import sys
 
-          with open('/tmp/project_root.txt') as f:
-              project_root = f.read().strip()
-          with open('/tmp/fixes_log.txt') as f:
-              fixes_log = f.read().strip()
-          with open('/tmp/all_gradle_files.txt') as f:
-              all_gradle_files = f.read().strip().split()
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              lines = f.readlines()
 
-          os.chdir(project_root)
+          original_lines = list(lines)
 
-          # FIX9 : residus heredoc
-          for gradle_file in all_gradle_files:
-              if not os.path.isfile(gradle_file):
+          # Motifs de residus heredoc/shell a reperer en tete de fichier :
+          # "cat > x << EOF", "cat << 'EOF'", "cat <<EOF", ou juste "cat"
+          # seul sur la ligne.
+          heredoc_start = re.compile(r'^\s*cat\b.*<<\s*[\'"]?[A-Za-z_]+[\'"]?\s*$')
+          bare_cat = re.compile(r'^\s*cat\s*$')
+
+          removed_leading = 0
+          while lines:
+              stripped = lines[0].strip()
+              if stripped == '':
+                  # ligne vide en tete -> on la retire aussi pour continuer
+                  # a inspecter la vraie premiere ligne de contenu
+                  lines.pop(0)
+                  removed_leading += 1
                   continue
-              with open(gradle_file) as f:
-                  lines = f.readlines()
-              original_lines = list(lines)
-              heredoc_start = re.compile(r'^\s*cat.*<<\s*['"]?[A-Za-z_]+['"]?\s*$')
-              bare_cat = re.compile(r'^\s*cat\s*$')
-              removed_leading = 0
-              while lines:
-                  stripped = lines[0].strip()
-                  if stripped == '':
-                      lines.pop(0)
-                      removed_leading += 1
-                      continue
-                  if heredoc_start.match(lines[0]) or bare_cat.match(lines[0]):
-                      lines.pop(0)
-                      removed_leading += 1
-                      continue
-                  break
-              removed_trailing = 0
-              while lines:
-                  stripped = lines[-1].strip()
-                  if stripped == '':
-                      lines.pop()
-                      continue
-                  if re.match(r'^[A-Za-z_]+_?EOF$|^EOF$', stripped):
-                      lines.pop()
-                      removed_trailing += 1
-                      continue
-                  break
-              if removed_leading > 0 or removed_trailing > 0:
-                  with open(gradle_file, 'w') as f:
-                      f.writelines(lines)
-                  with open(fixes_log, 'a') as log:
-                      log.write(f"Residus de commande shell/heredoc retires de {gradle_file} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin).
-")
-
-          # FIX14 : jcenter() -> mavenCentral()
-          for gradle_file in all_gradle_files:
-              if not os.path.isfile(gradle_file):
+              if heredoc_start.match(lines[0]) or bare_cat.match(lines[0]):
+                  lines.pop(0)
+                  removed_leading += 1
                   continue
-              with open(gradle_file) as f:
-                  content = f.read()
-              if re.search(r'jcenter\s*\(\s*\)', content):
-                  content = re.sub(r'jcenter\s*\(\s*\)', 'mavenCentral()', content)
-                  with open(gradle_file, 'w') as f:
-                      f.write(content)
-                  with open(fixes_log, 'a') as log:
-                      log.write(f"jcenter() remplace par mavenCentral() dans {gradle_file} (JCenter est ferme depuis 2022).
-")
+              break
 
-          # FIX15 : AGP bump
-          MODERN_AGP_VERSION = "8.5.0"
-          for gradle_file in all_gradle_files:
-              if not os.path.isfile(gradle_file):
+          # Marqueur heredoc isole en toute fin de fichier (ex: derniere
+          # ligne non-vide == "EOF" ou un mot-terminator similaire tout seul).
+          removed_trailing = 0
+          while lines:
+              stripped = lines[-1].strip()
+              if stripped == '':
+                  lines.pop()
                   continue
-              with open(gradle_file) as f:
-                  content = f.read()
-              old_agp_match = re.search(r"com\.android\.tools\.build:gradle:([0-9]+\.[0-9]+(?:\.[0-9]+)?)", content)
-              if old_agp_match:
-                  old_agp = old_agp_match.group(1)
-                  old_major = int(old_agp.split('.')[0])
-                  if old_major < 7:
-                      content = re.sub(r"com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(?:\.[0-9]+)?", f"com.android.tools.build:gradle:{MODERN_AGP_VERSION}", content)
-                      with open(gradle_file, 'w') as f:
-                          f.write(content)
-                      with open(fixes_log, 'a') as log:
-                          log.write(f"AGP {old_agp} bump vers {MODERN_AGP_VERSION} dans {gradle_file}
-")
-              else:
-                  var_match = re.search(r"com\.android\.tools\.build:gradle:\$\{?([A-Za-z0-9_]+)\}?", content)
-                  if var_match:
-                      var_name = var_match.group(1)
-                      var_value_match = re.search(rf"(?:ext\.)?{re.escape(var_name)}\s*=\s*['"]([0-9]+\.[0-9]+(?:\.[0-9]+)?)['"]", content)
-                      if var_value_match:
-                          var_value = var_value_match.group(1)
-                          var_major = int(var_value.split('.')[0])
-                          if var_major < 7:
-                              content = re.sub(rf"((?:ext\.)?{re.escape(var_name)}(\s*=\s*['"]))[0-9]+\.[0-9]+(?:\.[0-9]+)?(['"])", rf"\g<1>{MODERN_AGP_VERSION}\g<3>", content)
-                              with open(gradle_file, 'w') as f:
-                                  f.write(content)
-                              with open(fixes_log, 'a') as log:
-                                  log.write(f"AGP declare via variable '{var_name}' = {var_value} bump vers {MODERN_AGP_VERSION} dans {gradle_file}
-")
+              if re.match(r'^[A-Za-z_]+_?EOF$|^EOF$', stripped):
+                  lines.pop()
+                  removed_trailing += 1
+                  continue
+              break
 
-      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (part 3/3 - FIX10,16,2,11,3,17,18)
-        shell: python -u {0}
+          if removed_leading > 0 or removed_trailing > 0:
+              with open(path, 'w') as f:
+                  f.writelines(lines)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Residus de commande shell/heredoc (ex: 'cat > ... << EOF') retires de {path} ({removed_leading} ligne(s) en tete, {removed_trailing} en fin) - fichier genere via un script cote client sans nettoyage de l'enveloppe.\n")
+          PYEOF
+            fi
+          done
+
+          # ------------------------------------------------------------
+          # FIX14 (NOUVEAU) : jcenter() n'existe plus. Le service Bintray/
+          # JCenter a ferme definitivement en fevrier 2022, et les versions
+          # recentes de Gradle ont retire la methode DSL "jcenter()" du tout
+          # (pas juste deprecie) -> "Could not find method jcenter() for
+          # arguments [] on repository container". N'importe quel projet
+          # Android Studio anterieur a ~2019 declare encore jcenter() par
+          # defaut dans ses blocs repositories{}. On le remplace par
+          # mavenCentral(), equivalent fonctionnel qui couvre l'immense
+          # majorite des memes artefacts - fix generique, sans lien avec un
+          # projet particulier.
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$GRADLE_FILE" ] && grep -qE '\bjcenter\s*\(\s*\)' "$GRADLE_FILE" 2>/dev/null; then
+              sed -i -E 's/\bjcenter\s*\(\s*\)/mavenCentral()/g' "$GRADLE_FILE"
+              echo "jcenter() remplace par mavenCentral() dans $GRADLE_FILE (JCenter est ferme depuis 2022, la methode n'existe plus dans les versions recentes de Gradle)." >> "$FIXES_LOG"
+              echo "jcenter() remplace par mavenCentral() dans $GRADLE_FILE"
+            fi
+          done
+
+          # ------------------------------------------------------------
+          # FIX15 (NOUVEAU) : classpath AGP trop ancien pour tourner sous
+          # n'importe quel Gradle moderne. Un AGP < 7.0 (souvent 2.x/3.x,
+          # cohabite generalement avec jcenter() sur les projets 2015-2019)
+          # est binaire-incompatible avec les Gradle actuels : meme en
+          # ajustant la version du wrapper, le classloading echoue avec des
+          # erreurs internes du type "org/gradle/initialization/
+          # BuildCompletionListener" (classe interne retiree depuis). Le
+          # wrapper Gradle ne peut RIEN faire pour ce cas - il faut aussi
+          # moderniser la version d'AGP elle-meme. On bump donc tout
+          # classpath 'com.android.tools.build:gradle:X.Y.Z' avec X < 7
+          # vers une version moderne connue pour etre compatible avec le
+          # JDK 17 / Gradle recents utilises sur ce pipeline.
+          #
+          # FIX-AGP-DEEP (NOUVEAU, suite au run #325) : la regex ci-dessous
+          # ne matche que les versions ecrites en dur. Beaucoup de vieux
+          # projets Android Studio declarent l'AGP via une variable ext{}
+          # (ex: "classpath \"com.android.tools.build:gradle:$agp_version\""
+          # avec "agp_version = '2.3.3'" defini plus haut) - dans ce cas la
+          # regex litterale ne trouve rien, l'AGP reste ancien, et le build
+          # replante avec la meme signature "BuildCompletionListener" meme
+          # apres regeneration du wrapper. On detecte maintenant aussi ce
+          # cas : si un classpath AGP utilise une variable ($xxx ou
+          # ${xxx}), on cherche la valeur de cette variable ailleurs dans
+          # le meme fichier (ext.xxx = 'A.B.C' ou xxx = 'A.B.C') et on la
+          # bump directement si elle est trop ancienne.
+          # ------------------------------------------------------------
+          MODERN_AGP_VERSION="8.5.0"
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$GRADLE_FILE" ]; then
+              OLD_AGP=$(grep -oE "com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?" "$GRADLE_FILE" 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
+              if [ -n "$OLD_AGP" ]; then
+                OLD_AGP_MAJOR=$(echo "$OLD_AGP" | cut -d. -f1)
+                if [ "$OLD_AGP_MAJOR" -lt 7 ] 2>/dev/null; then
+                  sed -i -E "s#com\.android\.tools\.build:gradle:[0-9]+\.[0-9]+(\.[0-9]+)?#com.android.tools.build:gradle:${MODERN_AGP_VERSION}#g" "$GRADLE_FILE"
+                  echo "AGP $OLD_AGP (trop ancien, incompatible binaire avec les Gradle recents) bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
+                  echo "AGP obsolete detecte ($OLD_AGP) dans $GRADLE_FILE -> mis a jour vers $MODERN_AGP_VERSION"
+                fi
+              else
+                # Pas de version litterale trouvee : verifie si l'AGP est
+                # declare via une variable (ex: gradle:$agp_version ou
+                # gradle:${agpVersion}).
+                VAR_NAME=$(grep -oE "com\.android\.tools\.build:gradle:\\\$\{?[A-Za-z0-9_]+\}?" "$GRADLE_FILE" 2>/dev/null | grep -oE "[A-Za-z0-9_]+$" | head -1)
+                if [ -n "$VAR_NAME" ]; then
+                  VAR_VALUE=$(grep -oE "(ext\.)?${VAR_NAME}\s*=\s*['\"][0-9]+\.[0-9]+(\.[0-9]+)?['\"]" "$GRADLE_FILE" 2>/dev/null | grep -oE "[0-9]+\.[0-9]+(\.[0-9]+)?" | head -1)
+                  if [ -n "$VAR_VALUE" ]; then
+                    VAR_MAJOR=$(echo "$VAR_VALUE" | cut -d. -f1)
+                    if [ "$VAR_MAJOR" -lt 7 ] 2>/dev/null; then
+                      sed -i -E "s#(ext\.)?${VAR_NAME}(\s*=\s*['\"])[0-9]+\.[0-9]+(\.[0-9]+)?(['\"])#\1${VAR_NAME}\2${MODERN_AGP_VERSION}\4#g" "$GRADLE_FILE"
+                      echo "AGP declare via variable '$VAR_NAME' = $VAR_VALUE (trop ancien) bump vers $MODERN_AGP_VERSION dans $GRADLE_FILE" >> "$FIXES_LOG"
+                      echo "AGP obsolete via variable ($VAR_NAME=$VAR_VALUE) dans $GRADLE_FILE -> mis a jour vers $MODERN_AGP_VERSION"
+                    fi
+                  fi
+                fi
+              fi
+            fi
+          done
+
+      - name: Auto-fix legacy buildscript/plugins DSL conflict + memory (3/3 - FIX1/10/16/2/11/3/17/18)
         run: |
+          set -e
+          cd "$GRADLE_PROJECT_ROOT"
+
+          # FIX 1 (+ FIX10, resserre) : retire tout bloc buildscript{}
+          # legacy declarant l'AGP en classpath, en conflit avec la syntaxe
+          # plugins{} moderne. Detection elargie a la chaine litterale
+          # "com.android.tools.build:gradle" ET a la co-existence d'un
+          # buildscript{classpath} avec une VRAIE declaration DSL
+          # "plugins { id(\"com.android.application\") }" (n'importe ou dans
+          # le projet, root ou module).
+          #
+          # BUG CORRIGE : la version precedente detectait un "conflit" des
+          # qu'un fichier contenait le texte "com.android.application"
+          # QUELLE QU'EN SOIT LA SYNTAXE - ce qui matchait aussi
+          # "apply plugin: 'com.android.application'" (syntaxe LEGACY qui a
+          # justement BESOIN du buildscript{classpath} pour fonctionner,
+          # sans aucun conflit reel avec plugins{}). Resultat : sur un
+          # projet 100% legacy (apply plugin, pas de plugins{} du tout), le
+          # fix supprimait le seul mecanisme capable de resoudre le plugin
+          # -> "Plugin with id 'com.android.application' not found". On
+          # exige maintenant la vraie syntaxe DSL id(...)/id '...' pour
+          # confirmer qu'un plugins{} existe reellement quelque part.
+          HAS_PLUGINS_DSL_ANYWHERE="false"
+          for CHECK_FILE in $ALL_GRADLE_FILES; do
+            if [ -f "$CHECK_FILE" ] && grep -qE "id\s*\(\s*[\"']com\.android\.(application|library)[\"']|id\s+[\"']com\.android\.(application|library)[\"']" "$CHECK_FILE" 2>/dev/null; then
+              HAS_PLUGINS_DSL_ANYWHERE="true"
+              break
+            fi
+          done
+
+          # ------------------------------------------------------------
+          # FIX16 (NOUVEAU) : "Plugin with id 'com.android.application' not
+          # found". Cause tres frequente quand un plugins{} DSL est utilise
+          # (root ou module) mais que settings.gradle(.kts) ne declare pas
+          # de bloc pluginManagement{ repositories{ google() ... } }. Sans
+          # ce bloc, Gradle ne cherche les plugins QUE sur le Gradle Plugin
+          # Portal par defaut, qui n'heberge pas les plugins Android (ils
+          # sont sur le maven Google). Concerne notamment les projets
+          # scaffoldes par ce pipeline (FIX4, dont le settings.gradle
+          # genere n'avait pas ce bloc) et tout vieux projet dont le
+          # settings.gradle n'a jamais eu ce bloc. On l'ajoute ou on le
+          # complete automatiquement, sans toucher au reste du fichier.
+          # ------------------------------------------------------------
+          SETTINGS_FOR_PLUGINS=""
+          for f in settings.gradle.kts settings.gradle; do
+            [ -f "$f" ] && SETTINGS_FOR_PLUGINS="$f" && break
+          done
+
+          if [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ]; then
+            if [ -n "$SETTINGS_FOR_PLUGINS" ]; then
+              python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" << 'PYEOF'
           import re
-          import os
+          import sys
 
-          with open('/tmp/project_root.txt') as f:
-              project_root = f.read().strip()
-          with open('/tmp/fixes_log.txt') as f:
-              fixes_log = f.read().strip()
-          with open('/tmp/all_gradle_files.txt') as f:
-              all_gradle_files = f.read().strip().split()
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              content = f.read()
 
-          os.chdir(project_root)
+          original = content
+          changed_reason = ""
 
-          # FIX10/1 : buildscript conflict + FIX16 : pluginManagement
-          has_plugins_dsl_anywhere = False
-          for check_file in all_gradle_files:
-              if not os.path.isfile(check_file):
-                  continue
-              with open(check_file) as f:
-                  content = f.read()
-              if re.search(r"id\s*\(\s*["']com\.android\.(application|library)["']|id\s+["']com\.android\.(application|library)["']", content):
-                  has_plugins_dsl_anywhere = True
-                  break
+          pm_match = re.search(r'pluginManagement\s*\{', content)
+          if pm_match is None:
+              block = (
+                  'pluginManagement {\n'
+                  '    repositories {\n'
+                  '        google()\n'
+                  '        mavenCentral()\n'
+                  '        gradlePluginPortal()\n'
+                  '    }\n'
+                  '}\n'
+              )
+              content = block + content
+              changed_reason = "bloc pluginManagement{repositories{google()...}} ajoute en tete (absent)"
+          else:
+              # pluginManagement existe : verifie que son repositories{}
+              # contient bien google() (source des plugins Android).
+              start = pm_match.end() - 1
+              depth = 0
+              i = start
+              while i < len(content):
+                  if content[i] == '{':
+                      depth += 1
+                  elif content[i] == '}':
+                      depth -= 1
+                      if depth == 0:
+                          break
+                  i += 1
+              pm_block = content[start:i+1]
+              if 'google()' not in pm_block:
+                  repo_match = re.search(r'repositories\s*\{', pm_block)
+                  if repo_match:
+                      insert_at = repo_match.end()
+                      new_pm_block = pm_block[:insert_at] + '\n        google()' + pm_block[insert_at:]
+                      content = content[:start] + new_pm_block + content[i+1:]
+                      changed_reason = "google() ajoute dans le bloc repositories{} de pluginManagement existant (absent -> plugin Android introuvable)"
 
-          settings_for_plugins = None
-          for f in ['settings.gradle.kts', 'settings.gradle']:
-              if os.path.isfile(f):
-                  settings_for_plugins = f
-                  break
+          if content != original:
+              with open(path, 'w') as f:
+                  f.write(content)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"{changed_reason} dans {path} (evite \"Plugin with id 'com.android.application' not found\").\n")
+          PYEOF
+            fi
+          fi
 
-          if has_plugins_dsl_anywhere and settings_for_plugins:
-              with open(settings_for_plugins) as f:
-                  content = f.read()
-              original = content
-              changed_reason = ""
-              pm_match = re.search(r'pluginManagement\s*\{', content)
-              if pm_match is None:
-                  block = (
-                      'pluginManagement {
-'
-                      '    repositories {
-'
-                      '        google()
-'
-                      '        mavenCentral()
-'
-                      '        gradlePluginPortal()
-'
-                      '    }
-'
-                      '}
-'
-                  )
-                  content = block + content
-                  changed_reason = "bloc pluginManagement ajoute en tete (absent)"
-              else:
-                  start = pm_match.end() - 1
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            HAS_LITERAL_CLASSPATH="false"
+            grep -q "com.android.tools.build:gradle" "$GRADLE_FILE" 2>/dev/null && HAS_LITERAL_CLASSPATH="true"
+
+            HAS_GENERIC_CONFLICT="false"
+            if [ "$HAS_LITERAL_CLASSPATH" == "false" ] && [ -f "$GRADLE_FILE" ] && [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ]; then
+              if grep -qi "buildscript" "$GRADLE_FILE" 2>/dev/null \
+                 && grep -q "classpath" "$GRADLE_FILE" 2>/dev/null; then
+                HAS_GENERIC_CONFLICT="true"
+              fi
+            fi
+
+            # BUG CORRIGE (meme famille que le resserrement de FIX10) : la
+            # branche "correspondance litterale" ci-dessus supprimait le
+            # buildscript{} des qu'elle trouvait "com.android.tools.build:
+            # gradle", SANS jamais verifier qu'un plugins{} concurrent
+            # existait vraiment. Sur un projet 100% legacy pre-2019
+            # (buildscript{classpath} + "apply plugin:", zero plugins{}
+            # nulle part), ce buildscript est le SEUL mecanisme capable de
+            # resoudre le plugin - le supprimer casse le build avec
+            # "Plugin with id 'com.android.application' not found", quelle
+            # que soit la version de Gradle utilisee ensuite. On exige donc
+            # HAS_PLUGINS_DSL_ANYWHERE (deja calcule plus haut) pour LES
+            # DEUX branches, litterale et generique.
+            if [ -f "$GRADLE_FILE" ] && [ "$HAS_PLUGINS_DSL_ANYWHERE" == "true" ] && { [ "$HAS_LITERAL_CLASSPATH" == "true" ] || [ "$HAS_GENERIC_CONFLICT" == "true" ]; }; then
+              echo "Conflit buildscript/plugins detecte dans $GRADLE_FILE - nettoyage automatique..."
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
+          import sys
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              content = f.read()
+
+          idx = content.find('buildscript')
+          if idx != -1:
+              brace_start = content.find('{', idx)
+              if brace_start != -1:
                   depth = 0
-                  i = start
+                  i = brace_start
                   while i < len(content):
                       if content[i] == '{':
                           depth += 1
@@ -1438,270 +1597,347 @@ jobs:
                           if depth == 0:
                               break
                       i += 1
-                  pm_block = content[start:i+1]
-                  if 'google()' not in pm_block:
-                      repo_match = re.search(r'repositories\s*\{', pm_block)
-                      if repo_match:
-                          insert_at = repo_match.end()
-                          new_pm_block = pm_block[:insert_at] + '
-        google()' + pm_block[insert_at:]
-                          content = content[:start] + new_pm_block + content[i+1:]
-                          changed_reason = "google() ajoute dans pluginManagement existant"
-              if content != original:
-                  with open(settings_for_plugins, 'w') as f:
+                  end = i + 1
+                  content = content[:idx] + content[end:]
+                  with open(path, 'w') as f:
                       f.write(content)
                   with open(fixes_log, 'a') as log:
-                      log.write(f"{changed_reason} dans {settings_for_plugins}.
-")
+                      log.write(f"Bloc buildscript{{}} obsolete retire de {path} (conflit avec la syntaxe plugins{{}} moderne)\n")
+          PYEOF
+            fi
+          done
 
-          for gradle_file in all_gradle_files:
-              if 'settings.gradle' in gradle_file:
-                  continue
-              if not os.path.isfile(gradle_file):
-                  continue
-              with open(gradle_file) as f:
-                  content = f.read()
-              has_literal_classpath = 'com.android.tools.build:gradle' in content
-              has_generic_conflict = False
-              if not has_literal_classpath and has_plugins_dsl_anywhere:
-                  if 'buildscript' in content.lower() and 'classpath' in content:
-                      has_generic_conflict = True
-              if has_plugins_dsl_anywhere and (has_literal_classpath or has_generic_conflict):
-                  idx = content.find('buildscript')
-                  if idx != -1:
-                      brace_start = content.find('{', idx)
-                      if brace_start != -1:
-                          depth = 0
-                          i = brace_start
-                          while i < len(content):
-                              if content[i] == '{':
-                                  depth += 1
-                              elif content[i] == '}':
-                                  depth -= 1
-                                  if depth == 0:
-                                      break
-                              i += 1
-                          end = i + 1
-                          content = content[:idx] + content[end:]
-                          with open(gradle_file, 'w') as f:
-                              f.write(content)
-                          with open(fixes_log, 'a') as log:
-                              log.write(f"Bloc buildscript{{}} obsolete retire de {gradle_file} (conflit avec plugins{{}} moderne)
-")
+          # FIX 2 : version de plugin declaree en double.
+          if [ -n "$ALL_GRADLE_FILES" ]; then
+            python3 - "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
+          import re
+          import sys
 
-          # FIX2 : versions dupliquees
-          if all_gradle_files:
-              pattern = re.compile(
-                  r'id\s*\(\s*(?P<q1>["'])(?P<id1>[\w.\-]+)(?P=q1)\s*\)\s*version\s*(?P<q1v>["'])(?P<ver1>[^"']+)(?P=q1v)'
-                  r'|'
-                  r'id\s+(?P<q2>["'])(?P<id2>[\w.\-]+)(?P=q2)\s+version\s+(?P<q2v>["'])(?P<ver2>[^"']+)(?P=q2v)'
-              )
-              seen_ids = set()
-              changed_files = []
-              for gradle_file in all_gradle_files:
-                  if not os.path.isfile(gradle_file):
-                      continue
-                  with open(gradle_file) as f:
-                      content = f.read()
-                  def repl(m):
-                      if m.group('id1') is not None:
-                          pid = m.group('id1')
-                          if pid in seen_ids:
-                              return f'id("{pid}")'
-                          seen_ids.add(pid)
-                          return m.group(0)
-                      else:
-                          pid = m.group('id2')
-                          quote = m.group('q2')
-                          if pid in seen_ids:
-                              return f'id {quote}{pid}{quote}'
-                          seen_ids.add(pid)
-                          return m.group(0)
-                  new_content = pattern.sub(repl, content)
-                  if new_content != content:
-                      with open(gradle_file, 'w') as f:
-                          f.write(new_content)
-                      changed_files.append(gradle_file)
-              if changed_files:
-                  with open(fixes_log, 'a') as log:
-                      log.write(f"Version de plugin dupliquee retiree dans : {', '.join(changed_files)}
-")
+          fixes_log = sys.argv[1]
+          files = sys.argv[2:]
 
-          # FIX11 : versions explicites dans modules non-racine
-          for gradle_file in all_gradle_files:
-              if 'settings.gradle' in gradle_file:
-                  continue
-              if '/' not in gradle_file:
-                  continue
-              if not os.path.isfile(gradle_file):
-                  continue
-              with open(gradle_file) as f:
-                  content = f.read()
-              original = content
-              KNOWN_PLUGINS = [
-                  'com.android.application',
-                  'com.android.library',
-                  'com.android.dynamic-feature',
-                  'org.jetbrains.kotlin.android',
-                  'org.jetbrains.kotlin.jvm',
-                  'com.google.gms.google-services',
-              ]
-              ids_pattern = '|'.join(re.escape(p) for p in KNOWN_PLUGINS)
-              kt_pattern = re.compile(
-                  r'(id\s*\(\s*["'](?:' + ids_pattern + r')["']\s*\))'
-                  r'\s*version\s*'
-                  r'(?:\(\s*["'][^"']+["']\s*\)|["'][^"']+["'])'
-              )
-              content = kt_pattern.sub(r'', content)
-              groovy_pattern = re.compile(
-                  r"(id\s+['"](?:" + ids_pattern + r")['"])"
-                  r"\s*version\s*"
-                  r"(?:\(\s*['"][^'"]+['"]\s*\)|['"][^'"]+['"])"
-              )
-              content = groovy_pattern.sub(r'', content)
-              if content != original:
-                  with open(gradle_file, 'w') as f:
-                      f.write(content)
-                  with open(fixes_log, 'a') as log:
-                      log.write(f"Version explicite retiree des plugins dans {gradle_file}.
-")
+          pattern = re.compile(
+              r'id\s*\(\s*(?P<q1>["\'])(?P<id1>[\w.\-]+)(?P=q1)\s*\)\s*version\s*(?P<q1v>["\'])(?P<ver1>[^"\']+)(?P=q1v)'
+              r'|'
+              r'id\s+(?P<q2>["\'])(?P<id2>[\w.\-]+)(?P=q2)\s+version\s+(?P<q2v>["\'])(?P<ver2>[^"\']+)(?P=q2v)'
+          )
 
-          # FIX3 : syntaxe DSL Sdk
-          for gradle_file in all_gradle_files:
-              if 'settings.gradle' in gradle_file:
-                  continue
-              if not os.path.isfile(gradle_file):
-                  continue
-              with open(gradle_file) as f:
-                  content = f.read()
-              pattern = re.compile(
-                  r'(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(\s*(\d+)\s*\)\s*(\{[^}]*\})?\s*\}'
-              )
-              matches = []
-              def repl(m):
-                  matches.append((m.group(1), m.group(2)))
-                  return f'{m.group(1)} = {m.group(2)}'
-              new_content = pattern.sub(repl, content)
-              if matches:
-                  with open(gradle_file, 'w') as f:
-                      f.write(new_content)
-                  details = ", ".join(f"{field} {{ version = release({ver}) }} -> {field} = {ver}" for field, ver in matches)
-                  with open(fixes_log, 'a') as log:
-                      log.write(f"Syntaxe DSL Sdk simplifiee dans {gradle_file} ({details})
-")
+          seen_ids = set()
+          changed_files = []
 
-          # FIX17 : versions par defaut pour plugins sans version
-          if settings_for_plugins:
-              module_files = [p for p in all_gradle_files if 'settings.gradle' not in p]
-              DEFAULT_VERSIONS = {
-                  'com.android.application': '8.5.0',
-                  'com.android.library': '8.5.0',
-                  'org.jetbrains.kotlin.android': '1.9.24',
-                  'org.jetbrains.kotlin.jvm': '1.9.24',
-                  'com.google.gms.google-services': '4.4.2',
-              }
-              ids_pattern = '|'.join(re.escape(p) for p in DEFAULT_VERSIONS)
-              bare_plugin_pattern = re.compile(
-                  r'id\s*\(\s*["'](?P<id1>' + ids_pattern + r')["']\s*\)(?!\s*version)|'
-                  r'id\s+["'](?P<id2>' + ids_pattern + r')["'](?!\s+version)'
-              )
-              needed = set()
-              for path in module_files:
-                  if not os.path.isfile(path):
-                      continue
+          for path in files:
+              try:
                   with open(path) as f:
                       content = f.read()
-                  for m in bare_plugin_pattern.finditer(content):
-                      pid = m.group('id1') or m.group('id2')
-                      needed.add(pid)
-              if not needed:
-                  pass
-              else:
-                  with open(settings_for_plugins) as f:
-                      settings_content = f.read()
-                  still_needed = sorted(
-                      pid for pid in needed
-                      if not re.search(re.escape(pid) + r'["'\)]\s*\)?\s*version\s*["']', settings_content)
-                  )
-                  if still_needed:
-                      pm_match = re.search(r'pluginManagement\s*\{', settings_content)
-                      if pm_match:
-                          pm_start = pm_match.end() - 1
-                          depth = 0
-                          i = pm_start
-                          while i < len(settings_content):
-                              if settings_content[i] == '{':
-                                  depth += 1
-                              elif settings_content[i] == '}':
-                                  depth -= 1
-                                  if depth == 0:
-                                      break
-                              i += 1
-                          pm_end = i
-                          pm_block = settings_content[pm_start:pm_end + 1]
-                          plugins_match = re.search(r'plugins\s*\{', pm_block)
-                          lines_to_add = "
-".join(
-                              f'        id("{pid}") version "{DEFAULT_VERSIONS[pid]}" apply false'
-                              for pid in still_needed
-                          )
-                          if plugins_match:
-                              insert_at = plugins_match.end()
-                              new_pm_block = pm_block[:insert_at] + "
-" + lines_to_add + pm_block[insert_at:]
-                          else:
-                              insertion = f"
-    plugins {{
-{lines_to_add}
-    }}
-"
-                              new_pm_block = pm_block[:-1] + insertion + "}"
-                          new_settings_content = settings_content[:pm_start] + new_pm_block + settings_content[pm_end + 1:]
-                          with open(settings_for_plugins, 'w') as f:
-                              f.write(new_settings_content)
-                          with open(fixes_log, 'a') as log:
-                              log.write("Version(s) par defaut injectee(s) pour " + ", ".join(still_needed) + " dans " + settings_for_plugins + ".
-")
+              except OSError:
+                  continue
 
-          # FIX18 : namespace manquant
-          for gradle_file in all_gradle_files:
-              if 'settings.gradle' in gradle_file:
-                  continue
-              if not os.path.isfile(gradle_file):
-                  continue
-              with open(gradle_file) as f:
-                  content = f.read()
-              if not re.search(r"id\s*\(\s*["']com\.android\.(application|library)["']|id\s+["']com\.android\.(application|library)["']|apply plugin:\s*["']com\.android\.(application|library)["']", content):
-                  continue
-              if re.search(r'^\s*namespace', content, re.MULTILINE):
-                  continue
-              module_dir = os.path.dirname(gradle_file)
-              manifest_path = None
-              for candidate in [f"{module_dir}/src/main/AndroidManifest.xml", f"{module_dir}/AndroidManifest.xml"]:
-                  if os.path.isfile(candidate):
-                      manifest_path = candidate
-                      break
-              namespace_value = None
-              if manifest_path:
-                  with open(manifest_path) as f:
-                      manifest_content = f.read()
-                  match = re.search(r'package\s*=\s*"([^"]+)"', manifest_content)
-                  if match:
-                      namespace_value = match.group(1)
-              if not namespace_value:
-                  namespace_value = "com.philtech.app"
-              m = re.search(r'android\s*\{', content)
-              if m:
-                  line = f'
-    namespace = "{namespace_value}"' if gradle_file.endswith('.kts') else f'
-    namespace "{namespace_value}"'
-                  insert_at = m.end()
-                  new_content = content[:insert_at] + line + content[insert_at:]
-                  with open(gradle_file, 'w') as f:
+              def repl(m):
+                  if m.group('id1') is not None:
+                      pid = m.group('id1')
+                      if pid in seen_ids:
+                          return f'id("{pid}")'
+                      seen_ids.add(pid)
+                      return m.group(0)
+                  else:
+                      pid = m.group('id2')
+                      quote = m.group('q2')
+                      if pid in seen_ids:
+                          return f'id {quote}{pid}{quote}'
+                      seen_ids.add(pid)
+                      return m.group(0)
+
+              new_content = pattern.sub(repl, content)
+              if new_content != content:
+                  with open(path, 'w') as f:
                       f.write(new_content)
-                  with open(fixes_log, 'a') as log:
-                      log.write(f'namespace "{namespace_value}" ajoute dans {gradle_file}.
-')
+                  changed_files.append(path)
+
+          if changed_files:
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Version de plugin dupliquee retiree dans : {', '.join(changed_files)}\n")
+          PYEOF
+          fi
+
+          # ------------------------------------------------------------
+          # FIX11 (NOUVEAU) : version explicite retiree des plugins Android/
+          # Kotlin dans les modules NON-racine (ex: app/build.gradle.kts).
+          # Cause reelle de "plugin is already on the classpath with an
+          # unknown version" : le root declare le plugin via un mecanisme
+          # que FIX2 ne peut pas comparer textuellement (ex: alias() de
+          # version catalog libs.versions.toml, ou apply plugin: legacy),
+          # puis le module app/ redeclare EN PLUS une version explicite
+          # pour le meme plugin. Un module non-racine ne doit jamais fixer
+          # sa propre version pour ces plugins - c'est le role exclusif du
+          # root/settings. On retire donc systematiquement toute version
+          # explicite (syntaxe "version \"X\"" ET "version(\"X\")") pour ces
+          # plugins bien connus, dans tout fichier situe hors de la racine
+          # du projet (chemin contenant un "/").
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            # Uniquement les fichiers de module (pas la racine du projet).
+            case "$GRADLE_FILE" in
+              */*) : ;;
+              *) continue ;;
+            esac
+            if [ -f "$GRADLE_FILE" ]; then
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+
+          path, fixes_log = sys.argv[1], sys.argv[2]
+          with open(path) as f:
+              content = f.read()
+
+          original = content
+
+          KNOWN_PLUGINS = [
+              'com.android.application',
+              'com.android.library',
+              'com.android.dynamic-feature',
+              'org.jetbrains.kotlin.android',
+              'org.jetbrains.kotlin.jvm',
+              'com.google.gms.google-services',
+          ]
+          ids_pattern = '|'.join(re.escape(p) for p in KNOWN_PLUGINS)
+
+          # Kotlin DSL, forme infixe : id("com.android.application") version "X"
+          # Kotlin DSL, forme fonction : id("com.android.application") version("X")
+          kt_pattern = re.compile(
+              r'(id\s*\(\s*["\'](?:' + ids_pattern + r')["\']\s*\))'
+              r'\s*version\s*'
+              r'(?:\(\s*["\'][^"\']+["\']\s*\)|["\'][^"\']+["\'])'
+          )
+          content = kt_pattern.sub(r'\1', content)
+
+          # Groovy DSL : id 'com.android.application' version 'X' (ou version('X'))
+          groovy_pattern = re.compile(
+              r"(id\s+['\"](?:" + ids_pattern + r")['\"])"
+              r"\s*version\s*"
+              r"(?:\(\s*['\"][^'\"]+['\"]\s*\)|['\"][^'\"]+['\"])"
+          )
+          content = groovy_pattern.sub(r'\1', content)
+
+          if content != original:
+              with open(path, 'w') as f:
+                  f.write(content)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Version explicite retiree des plugins Android/Kotlin dans {path} (un module non-racine ne doit pas fixer sa propre version - evite 'plugin already on classpath with unknown version').\n")
+          PYEOF
+            fi
+          done
+
+          # FIX 3 : syntaxe DSL AGP recente "compileSdk { version = release(N) {...} }"
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            if [ -f "$GRADLE_FILE" ] && grep -qE '(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(' "$GRADLE_FILE" 2>/dev/null; then
+              echo "Syntaxe DSL Sdk { version = release(...) } detectee dans $GRADLE_FILE - simplification..."
+              python3 - "$GRADLE_FILE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+          path, fixes_log = sys.argv[1], sys.argv[2]
+
+          with open(path) as f:
+              content = f.read()
+
+          pattern = re.compile(
+              r'(compileSdk|targetSdk|minSdk)\s*\{\s*version\s*=\s*release\(\s*(\d+)\s*\)\s*(\{[^}]*\})?\s*\}'
+          )
+
+          matches = []
+          def repl(m):
+              matches.append((m.group(1), m.group(2)))
+              return f'{m.group(1)} = {m.group(2)}'
+
+          new_content = pattern.sub(repl, content)
+
+          if matches:
+              with open(path, 'w') as f:
+                  f.write(new_content)
+              details = ", ".join(f"{field} {{ version = release({ver}) {{...}} }} -> {field} = {ver}" for field, ver in matches)
+              with open(fixes_log, 'a') as log:
+                  log.write(f"Syntaxe DSL Sdk simplifiee dans {path} ({details})\n")
+          PYEOF
+            fi
+          done
+
+          # ------------------------------------------------------------
+          # FIX17 (NOUVEAU) : "Plugin [id: 'com.android.application'] was
+          # not found ... plugin dependency must include a version number
+          # for this source". Se produit quand un module NON-racine (ex:
+          # app/build.gradle(.kts)) declare un plugin bien connu (com.
+          # android.application/library, org.jetbrains.kotlin.android/jvm,
+          # google-services) SANS version explicite - ce qui n'est valide
+          # QUE si settings.gradle(.kts) fixe la version via un bloc
+          # pluginManagement { plugins { id("...") version "X" apply
+          # false } }. Si ce bloc est absent ou incomplet, Gradle echoue
+          # avec ce message precis. C'est notamment un effet de bord
+          # possible de FIX11 ci-dessus (qui retire les versions explicites
+          # des modules non-racine en supposant qu'elles sont fixees
+          # ailleurs) quand cette hypothese ne tient pas. On execute ce fix
+          # en tout dernier, une fois l'etat final de tous les fichiers
+          # gradle connu, pour detecter tout plugin encore sans version et
+          # injecter une version par defaut dans pluginManagement.plugins.
+          # ------------------------------------------------------------
+          if [ -n "$SETTINGS_FOR_PLUGINS" ]; then
+            python3 - "$SETTINGS_FOR_PLUGINS" "$FIXES_LOG" $ALL_GRADLE_FILES << 'PYEOF'
+          import re
+          import sys
+
+          settings_path, fixes_log = sys.argv[1], sys.argv[2]
+          module_files = [p for p in sys.argv[3:] if 'settings.gradle' not in p]
+
+          DEFAULT_VERSIONS = {
+              'com.android.application': '8.5.0',
+              'com.android.library': '8.5.0',
+              'org.jetbrains.kotlin.android': '1.9.24',
+              'org.jetbrains.kotlin.jvm': '1.9.24',
+              'com.google.gms.google-services': '4.4.2',
+          }
+          ids_pattern = '|'.join(re.escape(p) for p in DEFAULT_VERSIONS)
+
+          bare_plugin_pattern = re.compile(
+              r'id\s*\(\s*["\'](?P<id1>' + ids_pattern + r')["\']\s*\)(?!\s*version)|'
+              r'id\s+["\'](?P<id2>' + ids_pattern + r')["\'](?!\s+version)'
+          )
+
+          needed = set()
+          for path in module_files:
+              try:
+                  with open(path) as f:
+                      content = f.read()
+              except OSError:
+                  continue
+              for m in bare_plugin_pattern.finditer(content):
+                  pid = m.group('id1') or m.group('id2')
+                  needed.add(pid)
+
+          if not needed:
+              sys.exit(0)
+
+          with open(settings_path) as f:
+              settings_content = f.read()
+
+          # Retire les plugins deja verses avec une version connue quelque
+          # part dans settings.gradle(.kts) (pluginManagement.plugins).
+          still_needed = sorted(
+              pid for pid in needed
+              if not re.search(re.escape(pid) + r'["\'\)]\s*\)?\s*version\s*["\']', settings_content)
+          )
+
+          if not still_needed:
+              sys.exit(0)
+
+          pm_match = re.search(r'pluginManagement\s*\{', settings_content)
+          if pm_match is None:
+              # Ne devrait normalement pas arriver (FIX16 garantit deja ce
+              # bloc plus haut), mais on ne prend aucun risque.
+              sys.exit(0)
+
+          pm_start = pm_match.end() - 1
+          depth = 0
+          i = pm_start
+          while i < len(settings_content):
+              if settings_content[i] == '{':
+                  depth += 1
+              elif settings_content[i] == '}':
+                  depth -= 1
+                  if depth == 0:
+                      break
+              i += 1
+          pm_end = i
+          pm_block = settings_content[pm_start:pm_end + 1]
+
+          plugins_match = re.search(r'plugins\s*\{', pm_block)
+          lines_to_add = "\n".join(
+              f'        id("{pid}") version "{DEFAULT_VERSIONS[pid]}" apply false'
+              for pid in still_needed
+          )
+
+          if plugins_match:
+              insert_at = plugins_match.end()
+              new_pm_block = pm_block[:insert_at] + "\n" + lines_to_add + pm_block[insert_at:]
+          else:
+              insertion = f"\n    plugins {{\n{lines_to_add}\n    }}\n"
+              new_pm_block = pm_block[:-1] + insertion + "}"
+
+          new_settings_content = settings_content[:pm_start] + new_pm_block + settings_content[pm_end + 1:]
+
+          with open(settings_path, 'w') as f:
+              f.write(new_settings_content)
+          with open(fixes_log, 'a') as log:
+              log.write("Version(s) par defaut injectee(s) pour " + ", ".join(still_needed) + " dans le bloc pluginManagement.plugins de " + settings_path + " (evite \"plugin dependency must include a version number\").\n")
+          PYEOF
+          fi
+
+          # ------------------------------------------------------------
+          # FIX18 (NOUVEAU) : "Namespace not specified. Specify a namespace
+          # in the module's build file". AGP 8+ n'accepte plus de deduire
+          # le namespace depuis l'attribut "package" du AndroidManifest.xml
+          # (mecanisme deprecie en AGP 7, retire en AGP 8.0.0). Tres
+          # frequent sur les vieux projets Android Studio (pre-2022) dont
+          # le build.gradle ne declare jamais explicitement "namespace" et
+          # comptait sur ce fallback. Comme ce pipeline bump systematiquement
+          # l'AGP vers une version recente (FIX15/FIX-AGP-DEEP), ce cas
+          # devient frequent. On detecte les modules avec le plugin
+          # com.android.application/library mais sans "namespace" declare,
+          # on recupere le "package" du AndroidManifest.xml correspondant
+          # (ou, a defaut, le package_id fourni par le client / un package
+          # genere), et on l'injecte dans le bloc android{}.
+          # ------------------------------------------------------------
+          for GRADLE_FILE in $ALL_GRADLE_FILES; do
+            case "$GRADLE_FILE" in
+              *settings.gradle*) continue ;;
+            esac
+            [ -f "$GRADLE_FILE" ] || continue
+
+            if ! grep -qE "id\s*\(\s*[\"']com\.android\.(application|library)[\"']|id\s+[\"']com\.android\.(application|library)[\"']|apply plugin:\s*[\"']com\.android\.(application|library)[\"']" "$GRADLE_FILE" 2>/dev/null; then
+              continue
+            fi
+            if grep -qE '^\s*namespace\b' "$GRADLE_FILE" 2>/dev/null; then
+              continue
+            fi
+
+            MODULE_DIR=$(dirname "$GRADLE_FILE")
+            MANIFEST_PATH=""
+            for candidate in "$MODULE_DIR/src/main/AndroidManifest.xml" "$MODULE_DIR/AndroidManifest.xml"; do
+              [ -f "$candidate" ] && MANIFEST_PATH="$candidate" && break
+            done
+
+            NAMESPACE_VALUE=""
+            if [ -n "$MANIFEST_PATH" ]; then
+              NAMESPACE_VALUE=$(grep -oE 'package\s*=\s*"[^"]+"' "$MANIFEST_PATH" 2>/dev/null | head -1 | sed -E 's/package\s*=\s*"([^"]+)"/\1/')
+            fi
+            [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="${{ github.event.inputs.package_id }}"
+            [ -z "$NAMESPACE_VALUE" ] && NAMESPACE_VALUE="com.philtech.app"
+
+            python3 - "$GRADLE_FILE" "$NAMESPACE_VALUE" "$FIXES_LOG" << 'PYEOF'
+          import re
+          import sys
+
+          path, namespace, fixes_log = sys.argv[1], sys.argv[2], sys.argv[3]
+          with open(path) as f:
+              content = f.read()
+
+          m = re.search(r'\bandroid\s*\{', content)
+          if m is None:
+              sys.exit(0)
+
+          line = f'\n    namespace = "{namespace}"' if path.endswith('.kts') else f'\n    namespace "{namespace}"'
+          insert_at = m.end()
+          new_content = content[:insert_at] + line + content[insert_at:]
+
+          with open(path, 'w') as f:
+              f.write(new_content)
+          with open(fixes_log, 'a') as log:
+              log.write(f'namespace "{namespace}" ajoute dans le bloc android{{}} de {path} (AGP 8+ n\'accepte plus le fallback sur l\'attribut package du AndroidManifest.xml).\n')
+          PYEOF
+          done
 
       - name: Build Kotlin/Java
         id: build
