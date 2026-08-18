@@ -950,8 +950,8 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-    # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - ULTIME CORRECTION
+     # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA - VERSION FINALE
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -1027,7 +1027,6 @@ jobs:
             AGP_VERSION=$(grep -o "com.android.tools.build:gradle:[0-9.]*" "$HAS_GRADLE" 2>/dev/null | head -1 | cut -d: -f3)
             if [ -n "$AGP_VERSION" ]; then
               echo "📦 Android Gradle Plugin version: $AGP_VERSION"
-              # Si AGP >= 8.5, utiliser Gradle 8.7+
               if [[ "$AGP_VERSION" == "8.5"* ]] || [[ "$AGP_VERSION" == "8.6"* ]] || [[ "$AGP_VERSION" == "8.7"* ]] || [[ "$AGP_VERSION" == "8.8"* ]]; then
                 GRADLE_VERSION="8.10.2"
               elif [[ "$AGP_VERSION" == "8.9"* ]] || [[ "$AGP_VERSION" == "8.10"* ]] || [[ "$AGP_VERSION" == "8.11"* ]]; then
@@ -1096,12 +1095,17 @@ jobs:
           GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
           echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
-          # Si pas de wrapper, le générer
-          if [ ! -f "gradlew" ]; then
+          # ✅ FORCER la régénération du wrapper avec la bonne version
+          if [ ! -f "gradlew" ] || ! grep -q "gradle-$GRADLE_VERSION" gradle/wrapper/gradle-wrapper.properties 2>/dev/null; then
             echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
+            rm -rf gradle/wrapper gradlew 2>/dev/null || true
             gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           fi
           chmod +x gradlew 2>/dev/null || true
+          
+          # Vérifier la version du wrapper
+          echo "📦 Version du wrapper :"
+          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
           
           # S'assurer que gradle.properties existe
           if [ ! -f "gradle.properties" ]; then
@@ -1117,6 +1121,26 @@ jobs:
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             echo "🔑 Build RELEASE..."
+            # Configurer le signing
+            cat > app/signing.gradle << GRADLE_EOF
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("$KEYSTORE_FILE")
+                      storePassword "${{ github.event.inputs.keystore_password }}"
+                      keyAlias "${{ github.event.inputs.keystore_alias }}"
+                      keyPassword "${{ github.event.inputs.keystore_password }}"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE_EOF
+            echo "apply from: 'signing.gradle'" >> app/build.gradle
+            
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
               ./gradlew assembleRelease --stacktrace || echo "⚠️ assembleRelease a échoué"
             fi
@@ -1253,10 +1277,14 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # ✅ FORCER l'utilisation du wrapper Gradle avec la bonne version
+          # ✅ FORCER la génération du wrapper avec la bonne version
           echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
           gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           chmod +x gradlew
+          
+          # Vérifier la version
+          echo "📦 Version du wrapper :"
+          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
@@ -1383,10 +1411,14 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # ✅ FORCER l'utilisation du wrapper Gradle avec la bonne version
+          # ✅ FORCER la génération du wrapper avec la bonne version
           echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
           gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           chmod +x gradlew
+          
+          # Vérifier la version
+          echo "📦 Version du wrapper :"
+          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
@@ -1509,10 +1541,14 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # ✅ FORCER l'utilisation du wrapper Gradle avec la bonne version
+          # ✅ FORCER la génération du wrapper avec la bonne version
           echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
           gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           chmod +x gradlew
+          
+          # Vérifier la version
+          echo "📦 Version du wrapper :"
+          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
@@ -1523,7 +1559,7 @@ jobs:
           
           echo "🔨 Lancement du build..."
           echo "📦 Utilisation du wrapper Gradle:"
-          ./gradlew --version | head -3
+          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
           
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
@@ -1595,7 +1631,8 @@ jobs:
           name: build-kotlin-java-${{ github.event.inputs.build_id }}
           path: ${{ github.workspace }}/output/
           retention-days: 1
-          if-no-files-found: warn
+          if-no-files-found: warn       
+
   
   # ============================================================
   # JOB 6: BUILD FLUTTER
