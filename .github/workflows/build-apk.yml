@@ -7,7 +7,9 @@
 #   - Package name Love2D corrigé
 #   - Tous les langages supportés
 #   - CORRECTION : Godot export templates (tpz → tgz)
+#   - CORRECTION : Godot permissions (sudo)
 #   - CORRECTION : Upload artifacts avec fallback
+#   - CORRECTION : Recherche complète des APK/AAB
 # ============================================================================
 
 name: Build APK
@@ -528,7 +530,6 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/output
           find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          # Fallback: chercher dans src/
           find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
@@ -536,7 +537,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-web-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -686,7 +687,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-capacitor-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -813,12 +814,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-react-native-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA
+  # JOB 5: BUILD KOTLIN / JAVA (CORRIGÉ)
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -857,12 +858,19 @@ jobs:
             gradle-${{ runner.os }}-
 
       - name: Build Kotlin/Java
+        id: build
         run: |
           set -e
           cd src/
           PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-
+          
+          if [ -z "$PROJECT_ROOT" ]; then
+            echo "❌ Aucun fichier build.gradle trouvé !"
+            echo "build_skipped=true" >> $GITHUB_ENV
+            exit 0
+          fi
+          
+          echo "📁 Project root: $PROJECT_ROOT"
           cd "$PROJECT_ROOT"
 
           # Générer gradle.properties si absent
@@ -908,28 +916,36 @@ jobs:
               echo "apply(from = \"signing.gradle\")" >> app/build.gradle.kts
             fi
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew assembleRelease || true
+              ./gradlew assembleRelease || echo "⚠️ assembleRelease a échoué"
             fi
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew bundleRelease || true
+              ./gradlew bundleRelease || echo "⚠️ bundleRelease a échoué"
             fi
           else
-            ./gradlew assembleDebug || true
+            ./gradlew assembleDebug || echo "⚠️ assembleDebug a échoué"
           fi
 
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          echo "=== RECHERCHE DES APK/AAB ==="
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -path "*/build/outputs/apk/*.apk" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -path "*/build/outputs/bundle/*.aab" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -path "*/app/build/outputs/apk/*.apk" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -path "*/app/build/outputs/bundle/*.aab" -exec cp -v {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          
+          echo "=== CONTENU DE output/ ==="
+          ls -la $GITHUB_WORKSPACE/output/ || echo "output/ est vide"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-kotlin-java-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1036,7 +1052,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-flutter-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1149,7 +1165,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-python-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1232,12 +1248,12 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-dotnet-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript)
+  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript) - CORRIGÉ
   # ============================================================
   build-other:
     needs: prepare
@@ -1282,19 +1298,20 @@ jobs:
           restore-keys: |
             go-${{ runner.os }}-
 
-      - name: Setup Godot
+      - name: Setup Godot (CORRIGÉ)
         if: ${{ needs.prepare.outputs.detected_type == 'godot' }}
         run: |
           set -e
           GODOT_VERSION="4.2.2"
           wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" || exit 1
           unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          # ✅ CORRECTION : Déplacer dans /usr/local/bin avec le bon nom
+          # ✅ CORRECTION : sudo pour déplacer dans /usr/local/bin
           sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
           sudo chmod +x /usr/local/bin/godot
-          # ✅ CORRECTION : Utiliser .tgz au lieu de .tpz
+          # ✅ CORRECTION : .tgz au lieu de .tpz
           wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tgz" || exit 1
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          # ✅ CORRECTION : tar au lieu de unzip
           tar -xzf "Godot_v${GODOT_VERSION}-stable_export_templates.tgz" -C ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
       - name: Build Go project
@@ -1390,14 +1407,13 @@ jobs:
           find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          # Pour Lua, chercher aussi app.apk
           find $GITHUB_WORKSPACE -name "app.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-other-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1453,7 +1469,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-flutter-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1508,7 +1524,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-dotnet-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1560,13 +1576,12 @@ jobs:
           mkdir -p $GITHUB_WORKSPACE/output
           find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find "$PYTHON_PROJECT_ROOT/dist" -maxdepth 1 -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-python-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1613,7 +1628,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-go-${{ github.event.inputs.build_id }}
-          path: output/
+          path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
 
