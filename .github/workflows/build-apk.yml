@@ -9,6 +9,7 @@
 #   - CORRECTION : Godot export templates (tpz → tgz)
 #   - CORRECTION : Godot permissions (sudo)
 #   - CORRECTION : Upload artifacts avec fallback
+#   - CORRECTION : Détection dans tous les sous-dossiers
 # ============================================================================
 
 name: Build APK
@@ -894,7 +895,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - AVEC DÉTECTION INTELLIGENTE
+  # JOB 5: BUILD KOTLIN / JAVA - AVEC DÉTECTION CORRIGÉE
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -936,9 +937,14 @@ jobs:
         id: analyze-kotlin
         run: |
           echo "=== ANALYSE DU CODE SOURCE KOTLIN/JAVA ==="
+          
           cd src/
           
-          # Détection des fichiers
+          # Afficher la structure complète
+          echo "📁 Structure complète de src/ :"
+          find . -type f -name "*.kt" -o -name "*.java" -o -name "*.gradle*" -o -name "AndroidManifest.xml" 2>/dev/null | head -20
+          
+          # Détection des fichiers dans TOUS les sous-dossiers
           HAS_GRADLE=$(find . -name "build.gradle*" -type f | head -1)
           HAS_ANDROID_MANIFEST=$(find . -name "AndroidManifest.xml" -type f | head -1)
           HAS_ACTIVITY=$(find . -name "*.kt" -o -name "*.java" | xargs grep -l "Activity" 2>/dev/null | head -1)
@@ -969,7 +975,7 @@ jobs:
           elif [ -n "$HAS_ANDROID_MANIFEST" ] && [ -n "$HAS_ACTIVITY" ]; then
             PROJECT_TYPE="android-simple"
             echo "✅ Projet Android simple détecté (avec activité)"
-          elif [ -n "$HAS_MAIN" ] && [ "$KT_COUNT" -gt 0 ] || [ "$JAVA_COUNT" -gt 0 ]; then
+          elif [ -n "$HAS_MAIN" ] && { [ "$KT_COUNT" -gt 0 ] || [ "$JAVA_COUNT" -gt 0 ]; }; then
             PROJECT_TYPE="kotlin-java-source"
             echo "✅ Code source Kotlin/Java pur détecté (avec main)"
           elif [ "$KT_COUNT" -gt 0 ] || [ "$JAVA_COUNT" -gt 0 ]; then
@@ -978,6 +984,8 @@ jobs:
           else
             PROJECT_TYPE="unknown"
             echo "❌ Type de projet non reconnu"
+            echo "📁 Contenu complet de src/ :"
+            ls -laR .
           fi
           
           echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
@@ -987,12 +995,14 @@ jobs:
           echo "has_main=${HAS_MAIN:+true}" >> $GITHUB_OUTPUT
           echo "kt_count=$KT_COUNT" >> $GITHUB_OUTPUT
           echo "java_count=$JAVA_COUNT" >> $GITHUB_OUTPUT
+          
+          echo "PROJECT_PATH=$PWD" >> $GITHUB_ENV
 
       - name: 🏗️ BUILD - Projet Android complet
         if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-full' || steps.analyze-kotlin.outputs.project_type == 'android-simple' }}
         run: |
           echo "=== BUILD PROJET ANDROID EXISTANT ==="
-          cd src/
+          cd "$PROJECT_PATH"
           
           # Trouver le projet root
           PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -exec dirname {} \; | head -1)
@@ -1001,7 +1011,6 @@ jobs:
           
           echo "📁 Project root: $PWD"
           
-          # Générer gradle.properties si absent
           if [ ! -f "gradle.properties" ]; then
             cat > gradle.properties << EOF
           org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
@@ -1010,7 +1019,6 @@ jobs:
           EOF
           fi
           
-          # Générer le wrapper Gradle si absent
           if [ ! -f "gradlew" ]; then
             gradle wrapper --gradle-version 8.11.1 || true
           fi
@@ -1037,11 +1045,9 @@ jobs:
         run: |
           echo "=== BUILD CODE KOTLIN/JAVA PUR AVEC main() ==="
           
-          # Créer un projet Android minimal
           mkdir -p android-project
           cd android-project
           
-          # 1. build.gradle (root)
           cat > build.gradle << 'EOF'
           buildscript {
               repositories { google(); mavenCentral() }
@@ -1050,17 +1056,14 @@ jobs:
           allprojects { repositories { google(); mavenCentral() } }
           EOF
           
-          # 2. settings.gradle
           echo 'include ":app"' > settings.gradle
           
-          # 3. gradle.properties
           cat > gradle.properties << 'EOF'
           org.gradle.jvmargs=-Xmx2048m
           android.useAndroidX=true
           android.enableJetifier=true
           EOF
           
-          # 4. app/build.gradle
           mkdir -p app
           cat > app/build.gradle << 'EOF'
           apply plugin: 'com.android.application'
@@ -1079,11 +1082,9 @@ jobs:
           dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
           EOF
           
-          # 5. Copier le code source
           mkdir -p app/src/main/java
-          cp -r $GITHUB_WORKSPACE/src/* app/src/main/java/ 2>/dev/null || true
+          cp -r "$PROJECT_PATH"/* app/src/main/java/ 2>/dev/null || true
           
-          # 6. AndroidManifest.xml
           mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml << 'EOF'
           <?xml version="1.0" encoding="utf-8"?>
@@ -1100,7 +1101,6 @@ jobs:
           </manifest>
           EOF
           
-          # 7. Créer une activité wrapper qui exécute le main()
           PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
           mkdir -p app/src/main/java/$PKG_PATH
           
@@ -1123,8 +1123,6 @@ jobs:
                   output.append("=== CODE KOTLIN/JAVA EXÉCUTÉ ===\n\n");
                   
                   try {
-                      // Essayer de trouver et exécuter la méthode main
-                      // Chercher dans tous les packages
                       String[] packages = {
                           "${{ github.event.inputs.package_id || 'com.example.app' }}",
                           "com.example",
@@ -1140,22 +1138,16 @@ jobs:
                               output.append("✅ main() exécuté depuis " + pkg + ".MainKt\n");
                               found = true;
                               break;
-                          } catch (ClassNotFoundException e) {
-                              // Continuer
-                          } catch (NoSuchMethodException e) {
-                              // Continuer
-                          }
+                          } catch (ClassNotFoundException e) {}
+                          catch (NoSuchMethodException e) {}
                       }
                       
                       if (!found) {
-                          // Chercher n'importe quelle classe avec main
-                          // (simplifié - en production on ferait une recherche plus complète)
                           output.append("ℹ️ Aucune méthode main() trouvée\n");
                           output.append("📝 Votre code source a été compilé dans l'APK\n");
                       }
                   } catch (Exception e) {
                       output.append("❌ Erreur: " + e.getMessage() + "\n");
-                      e.printStackTrace();
                   }
                   
                   TextView tv = new TextView(this);
@@ -1167,7 +1159,6 @@ jobs:
           }
           JAVA_EOF
           
-          # 8. Générer le wrapper Gradle
           gradle wrapper --gradle-version 8.11.1
           chmod +x gradlew
           
@@ -1179,11 +1170,9 @@ jobs:
         run: |
           echo "=== BUILD CODE KOTLIN/JAVA PUR (sans main) ==="
           
-          # Créer un projet Android minimal
           mkdir -p android-project
           cd android-project
           
-          # (même structure que ci-dessus, sans wrapper main)
           cat > build.gradle << 'EOF'
           buildscript {
               repositories { google(); mavenCentral() }
@@ -1217,6 +1206,9 @@ jobs:
           }
           dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
           EOF
+          
+          mkdir -p app/src/main/java
+          cp -r "$PROJECT_PATH"/* app/src/main/java/ 2>/dev/null || true
           
           mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml << 'EOF'
@@ -1269,8 +1261,50 @@ jobs:
         run: |
           echo "❌ Type de projet non reconnu"
           echo "📁 Contenu de src/ :"
-          ls -la src/
+          ls -laR src/
           exit 1
+
+      - name: 🔨 BUILD DU PROJET ANDROID CRÉÉ
+        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source' || steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source-no-main' }}
+        run: |
+          cd "$ANDROID_PROJECT_DIR"
+          
+          echo "🔨 Lancement du build..."
+          
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          FORMAT="${{ github.event.inputs.output_format }}"
+          
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            echo "🔑 Build RELEASE..."
+            cat > app/signing.gradle << GRADLE_EOF
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("$KEYSTORE_FILE")
+                      storePassword "${{ github.event.inputs.keystore_password }}"
+                      keyAlias "${{ github.event.inputs.keystore_alias }}"
+                      keyPassword "${{ github.event.inputs.keystore_password }}"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          GRADLE_EOF
+            echo "apply from: 'signing.gradle'" >> app/build.gradle
+            
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew assembleRelease || echo "⚠️ assembleRelease a échoué"
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew bundleRelease || echo "⚠️ bundleRelease a échoué"
+            fi
+          else
+            echo "🔨 Build DEBUG..."
+            ./gradlew assembleDebug || echo "⚠️ assembleDebug a échoué"
+          fi
 
       - name: 📦 COLLECTE DES ARTIFACTS
         run: |
@@ -1278,14 +1312,14 @@ jobs:
           
           mkdir -p $GITHUB_WORKSPACE/output
           
-          # Recherche dans tout le workspace
+          echo "🔍 Recherche dans tout le workspace..."
           find $GITHUB_WORKSPACE -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
             echo "📱 Fichier trouvé: $file"
             cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           done
           
-          # Recherche dans android-project si créé
           if [ -n "$ANDROID_PROJECT_DIR" ]; then
+            echo "🔍 Recherche dans android-project..."
             find $ANDROID_PROJECT_DIR -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
               echo "📱 Fichier trouvé dans android-project: $file"
               cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
@@ -1348,7 +1382,6 @@ jobs:
           echo "=== ANALYSE DU PROJET FLUTTER ==="
           cd src/
           
-          # Détecter la configuration
           HAS_PUBSPEC=$(find . -name "pubspec.yaml" -type f | head -1)
           HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
           HAS_LIB_DIR=$(find . -type d -name "lib" | head -1)
@@ -1462,7 +1495,6 @@ jobs:
           echo "=== ANALYSE DU PROJET PYTHON ==="
           cd src/
           
-          # Détecter les fichiers
           HAS_MAIN_PY=$(find . -name "main.py" -type f | head -1)
           HAS_APP_PY=$(find . -name "app.py" -type f | head -1)
           HAS_BUILDOZER=$(find . -name "buildozer.spec" -type f | head -1)
@@ -1593,7 +1625,6 @@ jobs:
           echo "=== ANALYSE DU PROJET .NET ==="
           cd src/
           
-          # Détecter les fichiers
           HAS_CSPROJ=$(find . -name "*.csproj" -type f | head -1)
           HAS_SLN=$(find . -name "*.sln" -type f | head -1)
           HAS_MAUI=$(grep -l "MauiApp" $HAS_CSPROJ 2>/dev/null | head -1)
@@ -1696,7 +1727,6 @@ jobs:
           echo "=== ANALYSE DU PROJET ==="
           cd src/
           
-          # Détecter le type précis
           HAS_GODOT=$(find . -name "project.godot" -type f | head -1)
           HAS_GO=$(find . -name "go.mod" -type f | head -1)
           HAS_LUA=$(find . -name "build.settings" -type f | head -1)
@@ -1732,13 +1762,10 @@ jobs:
           GODOT_VERSION="4.2.2"
           wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" || exit 1
           unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          # ✅ CORRECTION : sudo pour déplacer dans /usr/local/bin
           sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
           sudo chmod +x /usr/local/bin/godot
-          # ✅ CORRECTION : .tgz au lieu de .tpz
           wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tgz" || exit 1
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          # ✅ CORRECTION : tar au lieu de unzip
           tar -xzf "Godot_v${GODOT_VERSION}-stable_export_templates.tgz" -C ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
       - name: Build Go project
@@ -1789,28 +1816,22 @@ jobs:
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
 
-          # Créer le jeu .love
           zip -r app.love . -x "*.git*" -x "build.settings"
 
-          # Télécharger Love2D APK
           LOVE_APK_URL="https://github.com/love2d/love/releases/download/11.5/love-11.5-android.apk"
           curl -L -o love-base.apk "$LOVE_APK_URL"
 
-          # Préparer l'APK
           mkdir -p love_work
           cd love_work
           unzip -o ../love-base.apk
 
-          # Fix package name
           PKG_ID="${{ github.event.inputs.package_id }}"
           [ -z "$PKG_ID" ] && PKG_ID="com.philtech.love"
           sed -i "s/package=\"[^\"]*\"/package=\"$PKG_ID\"/" AndroidManifest.xml
           sed -i 's/<application[^>]*>/& android:label="${{ github.event.inputs.app_name }}"/' AndroidManifest.xml
 
-          # Copier le jeu
           cp ../app.love assets/game.love
 
-          # Recompresser
           zip -r ../app.apk .
           cd ..
 
