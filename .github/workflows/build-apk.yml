@@ -6,6 +6,8 @@
 #   - Splash screen désactivé partout
 #   - Package name Love2D corrigé
 #   - Tous les langages supportés
+#   - CORRECTION : Godot export templates (tpz → tgz)
+#   - CORRECTION : Upload artifacts avec fallback
 # ============================================================================
 
 name: Build APK
@@ -524,14 +526,17 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          # Fallback: chercher dans src/
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-web-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -672,14 +677,16 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-capacitor-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -797,14 +804,16 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-react-native-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -911,14 +920,16 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-kotlin-java-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1016,14 +1027,16 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-flutter-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1129,13 +1142,14 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-python-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1209,14 +1223,16 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-dotnet-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1273,11 +1289,13 @@ jobs:
           GODOT_VERSION="4.2.2"
           wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" || exit 1
           unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
-          chmod +x /usr/local/bin/godot
-          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" || exit 1
+          # ✅ CORRECTION : Déplacer dans /usr/local/bin avec le bon nom
+          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
+          sudo chmod +x /usr/local/bin/godot
+          # ✅ CORRECTION : Utiliser .tgz au lieu de .tpz
+          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tgz" || exit 1
           mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          unzip -q "Godot_v${GODOT_VERSION}-stable_export_templates.tpz" -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
+          tar -xzf "Godot_v${GODOT_VERSION}-stable_export_templates.tgz" -C ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
 
       - name: Build Go project
         if: ${{ needs.prepare.outputs.detected_type == 'go' }}
@@ -1368,14 +1386,18 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          # Pour Lua, chercher aussi app.apk
+          find $GITHUB_WORKSPACE -name "app.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-other-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1424,13 +1446,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-flutter-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1478,13 +1501,14 @@ jobs:
         shell: bash
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-dotnet-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1534,14 +1558,15 @@ jobs:
         shell: bash
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
           find "$PYTHON_PROJECT_ROOT/dist" -maxdepth 1 -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-python-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1581,13 +1606,14 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE/src/ -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; || true
+          find $GITHUB_WORKSPACE -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          find $GITHUB_WORKSPACE/src/ -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-windows-go-${{ github.event.inputs.build_id }}
-          path: output/*
+          path: output/
           retention-days: 1
           if-no-files-found: warn
 
@@ -1615,12 +1641,18 @@ jobs:
           path: keystore/
           continue-on-error: true
 
+      - name: List downloaded artifacts
+        run: |
+          echo "=== Artifacts trouves ==="
+          find artifacts/ -type f -name "*.apk" -o -name "*.aab" -o -name "*.exe" 2>/dev/null || echo "Aucun artifact trouve"
+
       - name: Upload APK to R2
         id: upload-apk
         run: |
           set -eu
           APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1)
-          if [ -n "$APK_FILE" ]; then
+          if [ -n "$APK_FILE" ] && [ -f "$APK_FILE" ]; then
+            echo "Upload APK: $APK_FILE"
             curl -sf -X POST -H "Content-Type: application/vnd.android.package-archive" --data-binary @"$APK_FILE" "${{ github.event.inputs.build_base_url }}/upload/apk" || echo "APK upload failed"
             echo "apk_uploaded=true" >> "$GITHUB_OUTPUT"
           else
@@ -1632,7 +1664,8 @@ jobs:
         run: |
           set -eu
           AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1)
-          if [ -n "$AAB_FILE" ]; then
+          if [ -n "$AAB_FILE" ] && [ -f "$AAB_FILE" ]; then
+            echo "Upload AAB: $AAB_FILE"
             curl -sf -X POST -H "Content-Type: application/octet-stream" --data-binary @"$AAB_FILE" "${{ github.event.inputs.build_base_url }}/upload/aab" || echo "AAB upload failed"
             echo "aab_uploaded=true" >> "$GITHUB_OUTPUT"
           else
@@ -1645,7 +1678,8 @@ jobs:
         run: |
           set -eu
           EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1)
-          if [ -n "$EXE_FILE" ]; then
+          if [ -n "$EXE_FILE" ] && [ -f "$EXE_FILE" ]; then
+            echo "Upload EXE: $EXE_FILE"
             curl -sf -X POST -H "Content-Type: application/octet-stream" --data-binary @"$EXE_FILE" "${{ github.event.inputs.build_base_url }}/upload/exe" || echo "EXE upload failed"
             echo "exe_uploaded=true" >> "$GITHUB_OUTPUT"
           else
@@ -1655,7 +1689,13 @@ jobs:
       - name: Determine build status
         id: build-status
         run: |
-          if [ "${{ steps.upload-apk.outputs.apk_uploaded }}" == "true" ] || [ "${{ steps.upload-aab.outputs.aab_uploaded }}" == "true" ] || [ "${{ steps.upload-exe.outputs.exe_uploaded }}" == "true" ]; then
+          APK_STATUS="${{ steps.upload-apk.outputs.apk_uploaded }}"
+          AAB_STATUS="${{ steps.upload-aab.outputs.aab_uploaded }}"
+          EXE_STATUS="${{ steps.upload-exe.outputs.exe_uploaded }}"
+          
+          echo "APK: $APK_STATUS, AAB: $AAB_STATUS, EXE: $EXE_STATUS"
+          
+          if [ "$APK_STATUS" == "true" ] || [ "$AAB_STATUS" == "true" ] || [ "$EXE_STATUS" == "true" ]; then
             echo "status=success" >> "$GITHUB_OUTPUT"
             echo "message=Build successful" >> "$GITHUB_OUTPUT"
           else
