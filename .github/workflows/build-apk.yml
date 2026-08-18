@@ -7,6 +7,7 @@
 #   - Cache APT pour ImageMagick
 #   - Messages d'erreur clairs pour le frontend
 #   - Gestion des erreurs avec set -e
+#   - Téléchargement manuel du wrapper Gradle
 #   - Tous les langages supportés
 # ============================================================================
 
@@ -116,7 +117,6 @@ jobs:
             sudo apt-get update -y
             sudo apt-get install -y --no-install-recommends imagemagick
           fi
-          # Créer un fichier pour le cache
           echo "imagemagick-installed" > apt-packages.txt
 
       - name: Download source zip
@@ -499,7 +499,6 @@ jobs:
           echo "Svelte: ${HAS_SVELTE:+✅ OUI}${HAS_SVELTE:-❌ NON}"
           echo "Angular: ${HAS_ANGULAR:+✅ OUI}${HAS_ANGULAR:-❌ NON}"
           
-          # Si aucun index.html, en créer un minimal
           if [ -z "$HAS_INDEX_HTML" ]; then
             echo "⚠️ Aucun index.html trouvé - création d'un fichier minimal"
             mkdir -p www
@@ -950,8 +949,8 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-     # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - VERSION FINALE
+  # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA - AVEC WRAPPER MANUEL
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -1095,17 +1094,37 @@ jobs:
           GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
           echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
-          # ✅ FORCER la régénération du wrapper avec la bonne version
-          if [ ! -f "gradlew" ] || ! grep -q "gradle-$GRADLE_VERSION" gradle/wrapper/gradle-wrapper.properties 2>/dev/null; then
-            echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
-            rm -rf gradle/wrapper gradlew 2>/dev/null || true
-            gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
+          # ✅ Télécharger manuellement le wrapper Gradle
+          if [ ! -f "gradlew" ]; then
+            echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
+            mkdir -p gradle/wrapper
+            cat > gradle/wrapper/gradle-wrapper.properties << EOF
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
+            
+            cat > gradlew << 'GRADLEW_SCRIPT'
+          #!/usr/bin/env bash
+          download_gradle() {
+              local version=$1
+              echo "📦 Téléchargement de Gradle $version..."
+              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
+              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              rm /tmp/gradle-$version-bin.zip
+          }
+          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
+          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
+              download_gradle "$GRADLE_VERSION"
           fi
-          chmod +x gradlew 2>/dev/null || true
-          
-          # Vérifier la version du wrapper
-          echo "📦 Version du wrapper :"
-          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
+          exec "$GRADLE_HOME/bin/gradle" "$@"
+          GRADLEW_SCRIPT
+            chmod +x gradlew
+          fi
           
           # S'assurer que gradle.properties existe
           if [ ! -f "gradle.properties" ]; then
@@ -1164,7 +1183,7 @@ jobs:
           mkdir -p android-project
           cd android-project
           
-          # build.gradle (root) - compatible avec Gradle 8+
+          # build.gradle (root)
           cat > build.gradle << 'EOF'
           buildscript {
               repositories {
@@ -1277,14 +1296,35 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # ✅ FORCER la génération du wrapper avec la bonne version
-          echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
-          gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
-          chmod +x gradlew
+          # ✅ TÉLÉCHARGER manuellement le wrapper Gradle
+          echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << EOF
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
           
-          # Vérifier la version
-          echo "📦 Version du wrapper :"
-          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
+          cat > gradlew << 'GRADLEW_SCRIPT'
+          #!/usr/bin/env bash
+          download_gradle() {
+              local version=$1
+              echo "📦 Téléchargement de Gradle $version..."
+              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
+              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              rm /tmp/gradle-$version-bin.zip
+          }
+          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
+          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
+              download_gradle "$GRADLE_VERSION"
+          fi
+          exec "$GRADLE_HOME/bin/gradle" "$@"
+          GRADLEW_SCRIPT
+          chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
@@ -1411,14 +1451,35 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # ✅ FORCER la génération du wrapper avec la bonne version
-          echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
-          gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
-          chmod +x gradlew
+          # ✅ TÉLÉCHARGER manuellement le wrapper Gradle
+          echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << EOF
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
           
-          # Vérifier la version
-          echo "📦 Version du wrapper :"
-          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
+          cat > gradlew << 'GRADLEW_SCRIPT'
+          #!/usr/bin/env bash
+          download_gradle() {
+              local version=$1
+              echo "📦 Téléchargement de Gradle $version..."
+              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
+              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              rm /tmp/gradle-$version-bin.zip
+          }
+          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
+          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
+              download_gradle "$GRADLE_VERSION"
+          fi
+          exec "$GRADLE_HOME/bin/gradle" "$@"
+          GRADLEW_SCRIPT
+          chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
@@ -1541,14 +1602,35 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # ✅ FORCER la génération du wrapper avec la bonne version
-          echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
-          gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
-          chmod +x gradlew
+          # ✅ TÉLÉCHARGER manuellement le wrapper Gradle
+          echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
+          mkdir -p gradle/wrapper
+          cat > gradle/wrapper/gradle-wrapper.properties << EOF
+          distributionBase=GRADLE_USER_HOME
+          distributionPath=wrapper/dists
+          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
+          zipStoreBase=GRADLE_USER_HOME
+          zipStorePath=wrapper/dists
+          EOF
           
-          # Vérifier la version
-          echo "📦 Version du wrapper :"
-          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
+          cat > gradlew << 'GRADLEW_SCRIPT'
+          #!/usr/bin/env bash
+          download_gradle() {
+              local version=$1
+              echo "📦 Téléchargement de Gradle $version..."
+              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
+              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              rm /tmp/gradle-$version-bin.zip
+          }
+          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
+          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
+              download_gradle "$GRADLE_VERSION"
+          fi
+          exec "$GRADLE_HOME/bin/gradle" "$@"
+          GRADLEW_SCRIPT
+          chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
@@ -1631,9 +1713,8 @@ jobs:
           name: build-kotlin-java-${{ github.event.inputs.build_id }}
           path: ${{ github.workspace }}/output/
           retention-days: 1
-          if-no-files-found: warn       
+          if-no-files-found: warn
 
-  
   # ============================================================
   # JOB 6: BUILD FLUTTER
   # ============================================================
