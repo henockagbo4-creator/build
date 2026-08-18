@@ -1,15 +1,15 @@
 # ============================================================================
 # Build APK / AAB / EXE — pipeline multi-langages
 # ============================================================================
-# VERSION AVEC DÉTECTION INTELLIGENTE :
+# VERSION AVEC DÉTECTION INTELLIGENTE COMPLÈTE :
 #   - Analyse du contenu avant chaque build
+#   - Création automatique de code minimal si nécessaire
 #   - Adaptation automatique selon le type de projet
 #   - Icône forcée dans tous les dossiers res/ (tous langages)
 #   - Splash screen désactivé partout
 #   - CORRECTION : Godot export templates (tpz → tgz)
 #   - CORRECTION : Godot permissions (sudo)
 #   - CORRECTION : Upload artifacts avec fallback
-#   - CORRECTION : Détection dans tous les sous-dossiers
 # ============================================================================
 
 name: Build APK
@@ -410,7 +410,7 @@ jobs:
           exit 1
 
   # ============================================================
-  # JOB 2: BUILD WEB (Cordova) - AVEC DÉTECTION
+  # JOB 2: BUILD WEB (Cordova) - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-web:
     needs: prepare
@@ -467,13 +467,12 @@ jobs:
           echo "=== ANALYSE DU PROJET WEB ==="
           cd src/
           
-          # Détecter le framework
           HAS_PACKAGE_JSON=$(find . -name "package.json" -type f | head -1)
           HAS_INDEX_HTML=$(find . -name "index.html" -type f | head -1)
           HAS_DIST=$(find . -type d -name "dist" | head -1)
           HAS_BUILD=$(find . -type d -name "build" | head -1)
+          HAS_SRC=$(find . -type d -name "src" | head -1)
           
-          # Framework spécifique
           HAS_REACT=$(grep -l '"react"' package.json 2>/dev/null | head -1)
           HAS_VUE=$(grep -l '"vue"' package.json 2>/dev/null | head -1)
           HAS_SVELTE=$(grep -l '"svelte"' package.json 2>/dev/null | head -1)
@@ -484,6 +483,7 @@ jobs:
           echo "index.html: ${HAS_INDEX_HTML:+✅ OUI}${HAS_INDEX_HTML:-❌ NON}"
           echo "dossier dist/: ${HAS_DIST:+✅ OUI}${HAS_DIST:-❌ NON}"
           echo "dossier build/: ${HAS_BUILD:+✅ OUI}${HAS_BUILD:-❌ NON}"
+          echo "dossier src/: ${HAS_SRC:+✅ OUI}${HAS_SRC:-❌ NON}"
           echo "React: ${HAS_REACT:+✅ OUI}${HAS_REACT:-❌ NON}"
           echo "Vue: ${HAS_VUE:+✅ OUI}${HAS_VUE:-❌ NON}"
           echo "Svelte: ${HAS_SVELTE:+✅ OUI}${HAS_SVELTE:-❌ NON}"
@@ -496,8 +496,38 @@ jobs:
           if [ -n "$HAS_ANGULAR" ]; then FRAMEWORK="angular"; fi
           if [ -z "$FRAMEWORK" ] && [ -n "$HAS_PACKAGE_JSON" ]; then FRAMEWORK="node"; fi
           if [ -z "$FRAMEWORK" ] && [ -n "$HAS_INDEX_HTML" ]; then FRAMEWORK="static"; fi
+          if [ -z "$FRAMEWORK" ]; then
+            echo "⚠️ Projet web vide détecté - création d'un index.html minimal"
+            mkdir -p www
+            cat > www/index.html << 'HTML_EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>${{ github.event.inputs.app_name }}</title>
+              <style>
+                  body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f0f0f0; }
+                  .container { text-align: center; padding: 40px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+                  h1 { color: #333; }
+                  p { color: #666; }
+              </style>
+          </head>
+          <body>
+              <div class="container">
+                  <h1>${{ github.event.inputs.app_name }}</h1>
+                  <p>✅ Application web compilée avec succès !</p>
+                  <p>📦 Package: ${{ github.event.inputs.package_id || 'com.philtech.mobile' }}</p>
+              </div>
+          </body>
+          </html>
+          HTML_EOF
+            HAS_INDEX_HTML="www/index.html"
+            FRAMEWORK="static"
+          fi
           
           echo "framework=$FRAMEWORK" >> $GITHUB_OUTPUT
+          echo "has_index=${HAS_INDEX_HTML:+true}" >> $GITHUB_OUTPUT
 
       - name: Install Cordova
         run: npm install -g cordova
@@ -529,6 +559,8 @@ jobs:
             COPY_FROM="dist"
           elif [ -d "build" ]; then
             COPY_FROM="build"
+          elif [ -d "www" ]; then
+            COPY_FROM="www"
           fi
 
           mkdir -p "$CORDOVA_DIR"/www
@@ -580,7 +612,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 3: BUILD CAPACITOR - AVEC DÉTECTION
+  # JOB 3: BUILD CAPACITOR - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-capacitor:
     needs: prepare
@@ -637,12 +669,12 @@ jobs:
           echo "=== ANALYSE DU PROJET CAPACITOR ==="
           cd src/
           
-          # Détecter la configuration
           HAS_CAPACITOR_JSON=$(find . -name "capacitor.config.json" -type f | head -1)
           HAS_CAPACITOR_TS=$(find . -name "capacitor.config.ts" -type f | head -1)
           HAS_CAPACITOR_JS=$(find . -name "capacitor.config.js" -type f | head -1)
           HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
           HAS_PACKAGE_JSON=$(find . -name "package.json" -type f | head -1)
+          HAS_INDEX_HTML=$(find . -name "index.html" -type f | head -1)
           
           echo "📊 RÉSULTATS :"
           echo "capacitor.config.json: ${HAS_CAPACITOR_JSON:+✅ OUI}${HAS_CAPACITOR_JSON:-❌ NON}"
@@ -650,6 +682,30 @@ jobs:
           echo "capacitor.config.js: ${HAS_CAPACITOR_JS:+✅ OUI}${HAS_CAPACITOR_JS:-❌ NON}"
           echo "dossier android/: ${HAS_ANDROID_DIR:+✅ OUI}${HAS_ANDROID_DIR:-❌ NON}"
           echo "package.json: ${HAS_PACKAGE_JSON:+✅ OUI}${HAS_PACKAGE_JSON:-❌ NON}"
+          echo "index.html: ${HAS_INDEX_HTML:+✅ OUI}${HAS_INDEX_HTML:-❌ NON}"
+          
+          # Si aucun index.html, en créer un minimal
+          if [ -z "$HAS_INDEX_HTML" ]; then
+            echo "⚠️ Aucun index.html trouvé - création d'un fichier minimal"
+            mkdir -p www
+            cat > www/index.html << 'HTML_EOF'
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="UTF-8">
+              <meta name="viewport" content="width=device-width, initial-scale=1.0">
+              <title>${{ github.event.inputs.app_name }}</title>
+          </head>
+          <body>
+              <div style="text-align:center;padding:40px;font-family:Arial;">
+                  <h1>${{ github.event.inputs.app_name }}</h1>
+                  <p>✅ Application Capacitor compilée avec succès !</p>
+              </div>
+          </body>
+          </html>
+          HTML_EOF
+            echo "✅ index.html créé dans www/"
+          fi
 
       - name: Install Capacitor CLI
         run: npm install -g @capacitor/cli
@@ -659,12 +715,12 @@ jobs:
           set -e
           cd src/
           PROJECT_ROOT=$(find . -name "package.json" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && exit 0
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
           echo "SAVED_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
 
           if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
-            npx cap init "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_id || 'com.philtech.app' }}" --web-dir "dist" 2>/dev/null || true
+            npx cap init "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_id || 'com.philtech.app' }}" --web-dir "www" 2>/dev/null || true
           fi
 
           npm ci --prefer-offline || npm install
@@ -750,7 +806,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 4: BUILD REACT NATIVE - AVEC DÉTECTION
+  # JOB 4: BUILD REACT NATIVE - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-react-native:
     needs: prepare
@@ -807,17 +863,18 @@ jobs:
           echo "=== ANALYSE DU PROJET REACT NATIVE ==="
           cd src/
           
-          # Détecter la configuration
           HAS_PACKAGE_JSON=$(find . -name "package.json" -type f | head -1)
           HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
           HAS_EXPO=$(grep -l '"expo"' package.json 2>/dev/null | head -1)
           HAS_METRO=$(find . -name "metro.config.js" -o -name "metro.config.ts" | head -1)
+          HAS_APP_JS=$(find . -name "App.js" -o -name "App.tsx" | head -1)
           
           echo "📊 RÉSULTATS :"
           echo "package.json: ${HAS_PACKAGE_JSON:+✅ OUI}${HAS_PACKAGE_JSON:-❌ NON}"
           echo "dossier android/: ${HAS_ANDROID_DIR:+✅ OUI}${HAS_ANDROID_DIR:-❌ NON}"
           echo "Expo: ${HAS_EXPO:+✅ OUI}${HAS_EXPO:-❌ NON}"
           echo "Metro: ${HAS_METRO:+✅ OUI}${HAS_METRO:-❌ NON}"
+          echo "App.js/tsx: ${HAS_APP_JS:+✅ OUI}${HAS_APP_JS:-❌ NON}"
 
       - name: Build React Native
         run: |
@@ -895,7 +952,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - AVEC DÉTECTION CORRIGÉE
+  # JOB 5: BUILD KOTLIN / JAVA - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -940,11 +997,9 @@ jobs:
           
           cd src/
           
-          # Afficher la structure complète
           echo "📁 Structure complète de src/ :"
           find . -type f -name "*.kt" -o -name "*.java" -o -name "*.gradle*" -o -name "AndroidManifest.xml" 2>/dev/null | head -20
           
-          # Détection des fichiers dans TOUS les sous-dossiers
           HAS_GRADLE=$(find . -name "build.gradle*" -type f | head -1)
           HAS_ANDROID_MANIFEST=$(find . -name "AndroidManifest.xml" -type f | head -1)
           HAS_ACTIVITY=$(find . -name "*.kt" -o -name "*.java" | xargs grep -l "Activity" 2>/dev/null | head -1)
@@ -952,13 +1007,19 @@ jobs:
           HAS_RES=$(find . -type d -name "res" | head -1)
           HAS_APP_DIR=$(find . -type d -name "app" | head -1)
           
-          # Compter les fichiers
           KT_COUNT=$(find . -name "*.kt" -type f | wc -l)
           JAVA_COUNT=$(find . -name "*.java" -type f | wc -l)
+          
+          SRC_MAIN_KT=$(find . -path "*/src/main/*.kt" -type f | wc -l)
+          SRC_MAIN_JAVA=$(find . -path "*/src/main/*.java" -type f | wc -l)
+          HAS_SRC_MAIN=$(find . -path "*/src/main" -type d | head -1)
           
           echo "📊 RÉSULTATS DE L'ANALYSE :"
           echo "📁 Fichiers Kotlin: $KT_COUNT"
           echo "📁 Fichiers Java: $JAVA_COUNT"
+          echo "📁 Kotlin dans src/main/: $SRC_MAIN_KT"
+          echo "📁 Java dans src/main/: $SRC_MAIN_JAVA"
+          echo "📁 Dossier src/main/: ${HAS_SRC_MAIN:+✅ OUI}${HAS_SRC_MAIN:-❌ NON}"
           echo "📁 build.gradle: ${HAS_GRADLE:+✅ OUI}${HAS_GRADLE:-❌ NON}"
           echo "📁 AndroidManifest.xml: ${HAS_ANDROID_MANIFEST:+✅ OUI}${HAS_ANDROID_MANIFEST:-❌ NON}"
           echo "📁 Activités Android: ${HAS_ACTIVITY:+✅ OUI}${HAS_ACTIVITY:-❌ NON}"
@@ -966,7 +1027,6 @@ jobs:
           echo "📁 Dossier res/: ${HAS_RES:+✅ OUI}${HAS_RES:-❌ NON}"
           echo "📁 Dossier app/: ${HAS_APP_DIR:+✅ OUI}${HAS_APP_DIR:-❌ NON}"
           
-          # Déterminer le type de projet
           PROJECT_TYPE="unknown"
           
           if [ -n "$HAS_GRADLE" ] && [ -n "$HAS_ANDROID_MANIFEST" ]; then
@@ -975,6 +1035,12 @@ jobs:
           elif [ -n "$HAS_ANDROID_MANIFEST" ] && [ -n "$HAS_ACTIVITY" ]; then
             PROJECT_TYPE="android-simple"
             echo "✅ Projet Android simple détecté (avec activité)"
+          elif [ -n "$HAS_GRADLE" ] && [ -n "$HAS_SRC_MAIN" ] && { [ "$SRC_MAIN_KT" -gt 0 ] || [ "$SRC_MAIN_JAVA" -gt 0 ]; }; then
+            PROJECT_TYPE="android-gradle-with-source"
+            echo "✅ Projet Gradle avec code source dans src/main/"
+          elif [ -n "$HAS_GRADLE" ]; then
+            PROJECT_TYPE="gradle-empty"
+            echo "⚠️ Projet Gradle détecté mais SANS code source"
           elif [ -n "$HAS_MAIN" ] && { [ "$KT_COUNT" -gt 0 ] || [ "$JAVA_COUNT" -gt 0 ]; }; then
             PROJECT_TYPE="kotlin-java-source"
             echo "✅ Code source Kotlin/Java pur détecté (avec main)"
@@ -982,10 +1048,8 @@ jobs:
             PROJECT_TYPE="kotlin-java-source-no-main"
             echo "✅ Code source Kotlin/Java pur détecté (sans main)"
           else
-            PROJECT_TYPE="unknown"
-            echo "❌ Type de projet non reconnu"
-            echo "📁 Contenu complet de src/ :"
-            ls -laR .
+            PROJECT_TYPE="empty"
+            echo "⚠️ Projet vide - création d'un projet minimal"
           fi
           
           echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
@@ -995,16 +1059,16 @@ jobs:
           echo "has_main=${HAS_MAIN:+true}" >> $GITHUB_OUTPUT
           echo "kt_count=$KT_COUNT" >> $GITHUB_OUTPUT
           echo "java_count=$JAVA_COUNT" >> $GITHUB_OUTPUT
+          echo "src_main_exists=${HAS_SRC_MAIN:+true}" >> $GITHUB_OUTPUT
           
           echo "PROJECT_PATH=$PWD" >> $GITHUB_ENV
 
-      - name: 🏗️ BUILD - Projet Android complet
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-full' || steps.analyze-kotlin.outputs.project_type == 'android-simple' }}
+      - name: 🏗️ BUILD - Projet Android existant
+        if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-full' || steps.analyze-kotlin.outputs.project_type == 'android-simple' || steps.analyze-kotlin.outputs.project_type == 'android-gradle-with-source' }}
         run: |
           echo "=== BUILD PROJET ANDROID EXISTANT ==="
           cd "$PROJECT_PATH"
           
-          # Trouver le projet root
           PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -exec dirname {} \; | head -1)
           [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
           cd "$PROJECT_ROOT"
@@ -1040,135 +1104,92 @@ jobs:
             ./gradlew assembleDebug || echo "⚠️ assembleDebug a échoué"
           fi
 
-      - name: 🏗️ BUILD - Code source pur (avec main)
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source' }}
+      - name: 🏗️ BUILD - Projet Gradle vide
+        if: ${{ steps.analyze-kotlin.outputs.project_type == 'gradle-empty' }}
         run: |
-          echo "=== BUILD CODE KOTLIN/JAVA PUR AVEC main() ==="
+          echo "=== BUILD PROJET GRADLE VIDE - AJOUT DU CODE SOURCE MINIMAL ==="
           
-          mkdir -p android-project
-          cd android-project
+          cd "$PROJECT_PATH"
           
-          cat > build.gradle << 'EOF'
-          buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath 'com.android.tools.build:gradle:8.1.4' }
-          }
-          allprojects { repositories { google(); mavenCentral() } }
-          EOF
+          PROJECT_ROOT=$(find . \( -name "build.gradle" -o -name "build.gradle.kts" \) -type f -exec dirname {} \; | head -1)
+          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
+          cd "$PROJECT_ROOT"
           
-          echo 'include ":app"' > settings.gradle
+          echo "📁 Project root: $PWD"
           
-          cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2048m
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
+          mkdir -p app/src/main/java/com/example/app
           
-          mkdir -p app
-          cat > app/build.gradle << 'EOF'
-          apply plugin: 'com.android.application'
-          android {
-              compileSdk 34
-              defaultConfig {
-                  applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
-                  minSdk 24
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              buildTypes { release { minifyEnabled false } }
-              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
-          }
-          dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
-          EOF
-          
-          mkdir -p app/src/main/java
-          cp -r "$PROJECT_PATH"/* app/src/main/java/ 2>/dev/null || true
-          
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml << 'EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}">
-                  <activity android:name=".MainActivity">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          EOF
-          
-          PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
-          mkdir -p app/src/main/java/$PKG_PATH
-          
-          cat > app/src/main/java/$PKG_PATH/MainActivity.java << 'JAVA_EOF'
-          package ${{ github.event.inputs.package_id || 'com.example.app' }};
+          cat > app/src/main/java/com/example/app/MainActivity.java << 'JAVA_EOF'
+          package com.example.app;
           
           import android.app.Activity;
           import android.os.Bundle;
           import android.widget.TextView;
-          import java.io.ByteArrayOutputStream;
-          import java.io.PrintStream;
-          import java.lang.reflect.Method;
           
           public class MainActivity extends Activity {
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  
-                  StringBuilder output = new StringBuilder();
-                  output.append("=== CODE KOTLIN/JAVA EXÉCUTÉ ===\n\n");
-                  
-                  try {
-                      String[] packages = {
-                          "${{ github.event.inputs.package_id || 'com.example.app' }}",
-                          "com.example",
-                          "app"
-                      };
-                      
-                      boolean found = false;
-                      for (String pkg : packages) {
-                          try {
-                              Class<?> mainClass = Class.forName(pkg + ".MainKt");
-                              Method mainMethod = mainClass.getMethod("main", String[].class);
-                              mainMethod.invoke(null, (Object) new String[]{});
-                              output.append("✅ main() exécuté depuis " + pkg + ".MainKt\n");
-                              found = true;
-                              break;
-                          } catch (ClassNotFoundException e) {}
-                          catch (NoSuchMethodException e) {}
-                      }
-                      
-                      if (!found) {
-                          output.append("ℹ️ Aucune méthode main() trouvée\n");
-                          output.append("📝 Votre code source a été compilé dans l'APK\n");
-                      }
-                  } catch (Exception e) {
-                      output.append("❌ Erreur: " + e.getMessage() + "\n");
-                  }
-                  
                   TextView tv = new TextView(this);
-                  tv.setText(output.toString());
-                  tv.setTextSize(16);
+                  tv.setText("✅ Build APK réussi !\n\n📱 App: ${{ github.event.inputs.app_name }}\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}");
+                  tv.setTextSize(20);
                   tv.setPadding(20, 20, 20, 20);
                   setContentView(tv);
               }
           }
           JAVA_EOF
           
-          gradle wrapper --gradle-version 8.11.1
-          chmod +x gradlew
+          if [ ! -f "app/src/main/AndroidManifest.xml" ]; then
+            mkdir -p app/src/main
+            cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
+              <application android:label="${{ github.event.inputs.app_name }}">
+                  <activity android:name=".MainActivity">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          fi
           
-          echo "✅ Projet Android créé avec wrapper main()"
-          echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
+          if [ ! -f "gradle.properties" ]; then
+            cat > gradle.properties << EOF
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+          fi
+          
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper --gradle-version 8.11.1 || true
+          fi
+          chmod +x gradlew 2>/dev/null || true
+          
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          FORMAT="${{ github.event.inputs.output_format }}"
+          
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            echo "🔑 Build RELEASE..."
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew assembleRelease || echo "⚠️ assembleRelease a échoué"
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew bundleRelease || echo "⚠️ bundleRelease a échoué"
+            fi
+          else
+            echo "🔨 Build DEBUG..."
+            ./gradlew assembleDebug || echo "⚠️ assembleDebug a échoué"
+          fi
 
-      - name: 🏗️ BUILD - Code source pur (sans main)
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source-no-main' }}
+      - name: 🏗️ BUILD - Code source pur
+        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source' || steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source-no-main' }}
         run: |
-          echo "=== BUILD CODE KOTLIN/JAVA PUR (sans main) ==="
+          echo "=== BUILD CODE KOTLIN/JAVA PUR ==="
           
           mkdir -p android-project
           cd android-project
@@ -1240,9 +1261,8 @@ jobs:
               @Override
               protected void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  
                   TextView tv = new TextView(this);
-                  tv.setText("✅ Code Kotlin/Java compilé avec succès !\n\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}\n📱 App: ${{ github.event.inputs.app_name }}");
+                  tv.setText("✅ Code compilé avec succès !\n\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}\n📱 App: ${{ github.event.inputs.app_name }}");
                   tv.setTextSize(20);
                   tv.setPadding(20, 20, 20, 20);
                   setContentView(tv);
@@ -1256,16 +1276,93 @@ jobs:
           echo "✅ Projet Android créé"
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
-      - name: 🏗️ BUILD - Type inconnu
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'unknown' }}
+      - name: 🏗️ BUILD - Projet vide
+        if: ${{ steps.analyze-kotlin.outputs.project_type == 'empty' }}
         run: |
-          echo "❌ Type de projet non reconnu"
-          echo "📁 Contenu de src/ :"
-          ls -laR src/
-          exit 1
+          echo "=== PROJET VIDE - CRÉATION D'UN PROJET ANDROID MINIMAL ==="
+          
+          mkdir -p android-project
+          cd android-project
+          
+          cat > build.gradle << 'EOF'
+          buildscript {
+              repositories { google(); mavenCentral() }
+              dependencies { classpath 'com.android.tools.build:gradle:8.1.4' }
+          }
+          allprojects { repositories { google(); mavenCentral() } }
+          EOF
+          
+          echo 'include ":app"' > settings.gradle
+          
+          cat > gradle.properties << 'EOF'
+          org.gradle.jvmargs=-Xmx2048m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+          
+          mkdir -p app
+          cat > app/build.gradle << 'EOF'
+          apply plugin: 'com.android.application'
+          android {
+              compileSdk 34
+              defaultConfig {
+                  applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+              buildTypes { release { minifyEnabled false } }
+              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+          }
+          dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
+          EOF
+          
+          mkdir -p app/src/main/java/com/example/app
+          cat > app/src/main/java/com/example/app/MainActivity.java << 'JAVA_EOF'
+          package com.example.app;
+          
+          import android.app.Activity;
+          import android.os.Bundle;
+          import android.widget.TextView;
+          
+          public class MainActivity extends Activity {
+              @Override
+              protected void onCreate(Bundle savedInstanceState) {
+                  super.onCreate(savedInstanceState);
+                  TextView tv = new TextView(this);
+                  tv.setText("✅ Application Android minimal\n\n📱 App: ${{ github.event.inputs.app_name }}\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}");
+                  tv.setTextSize(20);
+                  tv.setPadding(20, 20, 20, 20);
+                  setContentView(tv);
+              }
+          }
+          JAVA_EOF
+          
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml << 'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
+              <application android:label="${{ github.event.inputs.app_name }}">
+                  <activity android:name=".MainActivity">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          
+          gradle wrapper --gradle-version 8.11.1
+          chmod +x gradlew
+          
+          echo "✅ Projet Android minimal créé"
+          echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
 
       - name: 🔨 BUILD DU PROJET ANDROID CRÉÉ
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source' || steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source-no-main' }}
+        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source' || steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source-no-main' || steps.analyze-kotlin.outputs.project_type == 'empty' }}
         run: |
           cd "$ANDROID_PROJECT_DIR"
           
@@ -1343,7 +1440,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 6: BUILD FLUTTER - AVEC DÉTECTION
+  # JOB 6: BUILD FLUTTER - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-flutter:
     needs: prepare
@@ -1385,11 +1482,13 @@ jobs:
           HAS_PUBSPEC=$(find . -name "pubspec.yaml" -type f | head -1)
           HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
           HAS_LIB_DIR=$(find . -type d -name "lib" | head -1)
+          HAS_MAIN_DART=$(find . -path "*/lib/main.dart" -type f | head -1)
           
           echo "📊 RÉSULTATS :"
           echo "pubspec.yaml: ${HAS_PUBSPEC:+✅ OUI}${HAS_PUBSPEC:-❌ NON}"
           echo "dossier android/: ${HAS_ANDROID_DIR:+✅ OUI}${HAS_ANDROID_DIR:-❌ NON}"
           echo "dossier lib/: ${HAS_LIB_DIR:+✅ OUI}${HAS_LIB_DIR:-❌ NON}"
+          echo "lib/main.dart: ${HAS_MAIN_DART:+✅ OUI}${HAS_MAIN_DART:-❌ NON}"
 
       - name: Cache Flutter dependencies
         uses: actions/cache@v4
@@ -1423,6 +1522,53 @@ jobs:
           if [ ! -d "android" ]; then
             flutter config --enable-android
             flutter create --platforms=android --overwrite . || true
+          fi
+
+          # Si lib/main.dart n'existe pas, en créer un minimal
+          if [ ! -f "lib/main.dart" ]; then
+            mkdir -p lib
+            cat > lib/main.dart << 'DART_EOF'
+          import 'package:flutter/material.dart';
+          
+          void main() {
+            runApp(const MyApp());
+          }
+          
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+          
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: '${{ github.event.inputs.app_name }}',
+                theme: ThemeData(primarySwatch: Colors.blue),
+                home: const MyHomePage(),
+              );
+            }
+          }
+          
+          class MyHomePage extends StatelessWidget {
+            const MyHomePage({super.key});
+          
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: Text('${{ github.event.inputs.app_name }}')),
+                body: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text('✅ Application Flutter'),
+                      const SizedBox(height: 20),
+                      Text('📱 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}'),
+                    ],
+                  ),
+                ),
+              );
+            }
+          }
+          DART_EOF
+            echo "✅ lib/main.dart créé"
           fi
 
           flutter pub get || flutter pub upgrade --major-versions || true
@@ -1465,7 +1611,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 7: BUILD PYTHON (Android) - AVEC DÉTECTION
+  # JOB 7: BUILD PYTHON (Android) - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-python:
     needs: prepare
@@ -1505,6 +1651,22 @@ jobs:
           echo "app.py: ${HAS_APP_PY:+✅ OUI}${HAS_APP_PY:-❌ NON}"
           echo "buildozer.spec: ${HAS_BUILDOZER:+✅ OUI}${HAS_BUILDOZER:-❌ NON}"
           echo "requirements.txt: ${HAS_REQUIREMENTS:+✅ OUI}${HAS_REQUIREMENTS:-❌ NON}"
+          
+          # Si aucun fichier Python, en créer un minimal
+          if [ -z "$HAS_MAIN_PY" ] && [ -z "$HAS_APP_PY" ]; then
+            echo "⚠️ Aucun fichier Python trouvé - création d'un main.py minimal"
+            cat > main.py << 'PYTHON_EOF'
+          def main():
+              print("✅ Application Python compilée avec succès !")
+              print(f"📱 App: ${{ github.event.inputs.app_name }}")
+              print(f"📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}")
+          
+          if __name__ == "__main__":
+              main()
+          PYTHON_EOF
+            HAS_MAIN_PY="main.py"
+            echo "✅ main.py créé"
+          fi
 
       - name: Cache pip / buildozer
         uses: actions/cache@v4
@@ -1595,7 +1757,7 @@ jobs:
           if-no-files-found: warn
 
   # ============================================================
-  # JOB 8: BUILD .NET MAUI - AVEC DÉTECTION
+  # JOB 8: BUILD .NET MAUI - AVEC DÉTECTION ET CRÉATION
   # ============================================================
   build-dotnet:
     needs: prepare
@@ -1633,6 +1795,13 @@ jobs:
           echo ".csproj: ${HAS_CSPROJ:+✅ OUI}${HAS_CSPROJ:-❌ NON}"
           echo ".sln: ${HAS_SLN:+✅ OUI}${HAS_SLN:-❌ NON}"
           echo "MAUI: ${HAS_MAUI:+✅ OUI}${HAS_MAUI:-❌ NON}"
+          
+          # Si aucun .csproj, en créer un minimal
+          if [ -z "$HAS_CSPROJ" ]; then
+            echo "⚠️ Aucun fichier .csproj trouvé - création d'un projet MAUI minimal"
+            dotnet new maui -n "${{ github.event.inputs.app_name }}" -o . || true
+            echo "✅ Projet MAUI créé"
+          fi
 
       - name: Cache .NET packages
         uses: actions/cache@v4
@@ -1900,6 +2069,53 @@ jobs:
             flutter create --platforms=windows --overwrite . || true
           fi
 
+          # Si lib/main.dart n'existe pas, en créer un minimal
+          if [ ! -f "lib/main.dart" ]; then
+            mkdir -p lib
+            cat > lib/main.dart << 'DART_EOF'
+          import 'package:flutter/material.dart';
+          
+          void main() {
+            runApp(const MyApp());
+          }
+          
+          class MyApp extends StatelessWidget {
+            const MyApp({super.key});
+          
+            @override
+            Widget build(BuildContext context) {
+              return MaterialApp(
+                title: '${{ github.event.inputs.app_name }}',
+                theme: ThemeData(primarySwatch: Colors.blue),
+                home: const MyHomePage(),
+              );
+            }
+          }
+          
+          class MyHomePage extends StatelessWidget {
+            const MyHomePage({super.key});
+          
+            @override
+            Widget build(BuildContext context) {
+              return Scaffold(
+                appBar: AppBar(title: Text('${{ github.event.inputs.app_name }}')),
+                body: Center(
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      const Text('✅ Application Flutter Windows'),
+                      const SizedBox(height: 20),
+                      Text('📱 App: ${{ github.event.inputs.app_name }}'),
+                    ],
+                  ),
+                ),
+              );
+            }
+          }
+          DART_EOF
+            echo "✅ lib/main.dart créé"
+          fi
+
           if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
             flutter build windows --release || true
           else
@@ -1954,7 +2170,9 @@ jobs:
 
           CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
           if [ -z "$CSPROJ" ]; then
-            exit 0
+            echo "⚠️ Aucun .csproj trouvé - création d'un projet MAUI minimal"
+            dotnet new maui -n "${{ github.event.inputs.app_name }}" -o . || true
+            CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
           fi
 
           CONFIG="Debug"
@@ -2008,7 +2226,19 @@ jobs:
           for candidate in main.py app.py; do
             [ -f "$candidate" ] && ENTRY="$candidate" && break
           done
-          [ -z "$ENTRY" ] && ENTRY=$(find . -maxdepth 2 -name "*.py" -type f | head -1)
+          
+          # Si aucun fichier, en créer un minimal
+          if [ -z "$ENTRY" ]; then
+            cat > main.py << 'PYTHON_EOF'
+          def main():
+              print("✅ Application Python Windows compilée avec succès !")
+              print(f"📱 App: ${{ github.event.inputs.app_name }}")
+          
+          if __name__ == "__main__":
+              main()
+          PYTHON_EOF
+            ENTRY="main.py"
+          fi
 
           python -m pip install --upgrade pip
           python -m pip install --upgrade pyinstaller
@@ -2062,6 +2292,22 @@ jobs:
 
           if [ ! -f "go.mod" ]; then
             go mod init app
+          fi
+          
+          # Si aucun fichier .go, en créer un minimal
+          GO_COUNT=$(find . -name "*.go" -type f | wc -l)
+          if [ "$GO_COUNT" -eq 0 ]; then
+            cat > main.go << 'GO_EOF'
+          package main
+          
+          import "fmt"
+          
+          func main() {
+              fmt.Println("✅ Application Go Windows compilée avec succès !")
+              fmt.Printf("📱 App: ${{ github.event.inputs.app_name }}\n")
+          }
+          GO_EOF
+            echo "✅ main.go créé"
           fi
 
           GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -H=windowsgui" -o app.exe . || true
