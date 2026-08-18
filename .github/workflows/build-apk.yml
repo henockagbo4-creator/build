@@ -949,8 +949,8 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-  # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - AVEC WRAPPER MANUEL
+    # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA - VERSION FINALE ROBUSTE
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -1108,20 +1108,57 @@ jobs:
             
             cat > gradlew << 'GRADLEW_SCRIPT'
           #!/usr/bin/env bash
+          
+          # Fonction pour télécharger Gradle avec unzip non-interactif
           download_gradle() {
               local version=$1
+              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              local gradle_home="$gradle_dir/gradle-$version"
+              
+              # Vérifier si déjà téléchargé
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version déjà téléchargé"
+                  return 0
+              fi
+              
               echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              mkdir -p "$gradle_dir"
+              
+              # Télécharger le zip
               curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              
+              # Extraire avec unzip non-interactif (-q pour quiet, -o pour overwrite)
+              echo "📦 Extraction de Gradle $version..."
+              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
+              
+              # Nettoyer
               rm /tmp/gradle-$version-bin.zip
+              
+              # Vérifier
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version installé avec succès"
+              else
+                  echo "❌ Échec de l'installation de Gradle $version"
+                  return 1
+              fi
           }
+          
+          # Extraire la version du wrapper
           GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          
+          # Télécharger Gradle
+          download_gradle "$GRADLE_VERSION"
+          
+          # Définir GRADLE_HOME
           GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
-              download_gradle "$GRADLE_VERSION"
+          
+          # Vérifier et exécuter Gradle
+          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
+              exec "$GRADLE_HOME/bin/gradle" "$@"
+          else
+              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
+              exit 1
           fi
-          exec "$GRADLE_HOME/bin/gradle" "$@"
           GRADLEW_SCRIPT
             chmod +x gradlew
           fi
@@ -1309,20 +1346,43 @@ jobs:
           
           cat > gradlew << 'GRADLEW_SCRIPT'
           #!/usr/bin/env bash
+          
+          # Fonction pour télécharger Gradle avec unzip non-interactif
           download_gradle() {
               local version=$1
+              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              local gradle_home="$gradle_dir/gradle-$version"
+              
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version déjà téléchargé"
+                  return 0
+              fi
+              
               echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              mkdir -p "$gradle_dir"
               curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              echo "📦 Extraction de Gradle $version..."
+              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
               rm /tmp/gradle-$version-bin.zip
+              
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version installé avec succès"
+              else
+                  echo "❌ Échec de l'installation de Gradle $version"
+                  return 1
+              fi
           }
+          
           GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          download_gradle "$GRADLE_VERSION"
+          
           GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
-              download_gradle "$GRADLE_VERSION"
+          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
+              exec "$GRADLE_HOME/bin/gradle" "$@"
+          else
+              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
+              exit 1
           fi
-          exec "$GRADLE_HOME/bin/gradle" "$@"
           GRADLEW_SCRIPT
           chmod +x gradlew
           
@@ -1464,20 +1524,42 @@ jobs:
           
           cat > gradlew << 'GRADLEW_SCRIPT'
           #!/usr/bin/env bash
+          
           download_gradle() {
               local version=$1
+              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              local gradle_home="$gradle_dir/gradle-$version"
+              
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version déjà téléchargé"
+                  return 0
+              fi
+              
               echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              mkdir -p "$gradle_dir"
               curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              echo "📦 Extraction de Gradle $version..."
+              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
               rm /tmp/gradle-$version-bin.zip
+              
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version installé avec succès"
+              else
+                  echo "❌ Échec de l'installation de Gradle $version"
+                  return 1
+              fi
           }
+          
           GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          download_gradle "$GRADLE_VERSION"
+          
           GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
-              download_gradle "$GRADLE_VERSION"
+          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
+              exec "$GRADLE_HOME/bin/gradle" "$@"
+          else
+              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
+              exit 1
           fi
-          exec "$GRADLE_HOME/bin/gradle" "$@"
           GRADLEW_SCRIPT
           chmod +x gradlew
           
@@ -1615,20 +1697,42 @@ jobs:
           
           cat > gradlew << 'GRADLEW_SCRIPT'
           #!/usr/bin/env bash
+          
           download_gradle() {
               local version=$1
+              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              local gradle_home="$gradle_dir/gradle-$version"
+              
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version déjà téléchargé"
+                  return 0
+              fi
+              
               echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$HOME/.gradle/wrapper/dists/gradle-$version-bin"
+              mkdir -p "$gradle_dir"
               curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              unzip -q /tmp/gradle-$version-bin.zip -d "$HOME/.gradle/wrapper/dists/"
+              echo "📦 Extraction de Gradle $version..."
+              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
               rm /tmp/gradle-$version-bin.zip
+              
+              if [ -f "$gradle_home/bin/gradle" ]; then
+                  echo "✅ Gradle $version installé avec succès"
+              else
+                  echo "❌ Échec de l'installation de Gradle $version"
+                  return 1
+              fi
           }
+          
           GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+          download_gradle "$GRADLE_VERSION"
+          
           GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ ! -f "$GRADLE_HOME/bin/gradle" ]; then
-              download_gradle "$GRADLE_VERSION"
+          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
+              exec "$GRADLE_HOME/bin/gradle" "$@"
+          else
+              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
+              exit 1
           fi
-          exec "$GRADLE_HOME/bin/gradle" "$@"
           GRADLEW_SCRIPT
           chmod +x gradlew
           
@@ -1715,6 +1819,7 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
+  
   # ============================================================
   # JOB 6: BUILD FLUTTER
   # ============================================================
