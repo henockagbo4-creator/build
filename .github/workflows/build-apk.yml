@@ -950,8 +950,8 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-  # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - ULTIME CORRECTION
+     # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA - DÉTECTION DE LA VERSION GRADLE
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -999,7 +999,6 @@ jobs:
           echo "📁 Structure complète de src/ :"
           find . -type f -name "*.kt" -o -name "*.java" -o -name "*.gradle*" -o -name "AndroidManifest.xml" 2>/dev/null | head -20
           
-          # Détection des fichiers
           HAS_ROOT_GRADLE=$(find . -maxdepth 1 -name "build.gradle*" -type f | head -1)
           HAS_ROOT_SETTINGS=$(find . -maxdepth 1 -name "settings.gradle*" -type f | head -1)
           HAS_GRADLE=$(find . -name "build.gradle*" -type f | head -1)
@@ -1011,7 +1010,50 @@ jobs:
           HAS_APP_DIR=$(find . -type d -name "app" | head -1)
           HAS_GRADLE_WRAPPER=$(find . -name "gradlew" -type f | head -1)
           
-          # Compter les fichiers
+          # ✅ Détection de la version Gradle requise
+          GRADLE_VERSION="8.6"  # Version par défaut (compatible avec AGP 8.x)
+          
+          # Vérifier si le projet utilise des fonctionnalités Gradle 9
+          if [ -n "$HAS_GRADLE" ]; then
+            # Vérifier dans les fichiers gradle s'il y a des indices
+            if grep -q "gradle-9" "$HAS_GRADLE" 2>/dev/null || grep -q "Gradle 9" "$HAS_GRADLE" 2>/dev/null; then
+              GRADLE_VERSION="9.0"
+              echo "⚠️ Projet configuré pour Gradle 9 détecté"
+            fi
+            
+            # Vérifier la version du plugin Android Gradle
+            if grep -q "com.android.application" "$HAS_GRADLE" 2>/dev/null; then
+              # Vérifier la version du plugin
+              AGP_VERSION=$(grep -o "com.android.tools.build:gradle:[0-9.]*" "$HAS_GRADLE" 2>/dev/null | head -1 | cut -d: -f3)
+              if [ -n "$AGP_VERSION" ]; then
+                echo "📦 Plugin Android Gradle version: $AGP_VERSION"
+                # Si AGP >= 8.5, utiliser Gradle 8.7+
+                if [[ "$AGP_VERSION" == "8.5"* ]] || [[ "$AGP_VERSION" == "8.6"* ]] || [[ "$AGP_VERSION" == "8.7"* ]] || [[ "$AGP_VERSION" == "8.8"* ]]; then
+                  GRADLE_VERSION="8.10.2"
+                elif [[ "$AGP_VERSION" == "8.9"* ]] || [[ "$AGP_VERSION" == "8.10"* ]] || [[ "$AGP_VERSION" == "8.11"* ]]; then
+                  GRADLE_VERSION="9.0"
+                fi
+              fi
+            fi
+            
+            # Vérifier si le projet utilise Gradle 9 via le wrapper
+            if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+              WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+              if [ -n "$WRAPPER_VERSION" ]; then
+                echo "📦 Gradle wrapper version: $WRAPPER_VERSION"
+                if [[ "$WRAPPER_VERSION" == "9."* ]]; then
+                  GRADLE_VERSION="9.0"
+                elif [[ "$WRAPPER_VERSION" == "8.10"* ]] || [[ "$WRAPPER_VERSION" == "8.11"* ]]; then
+                  GRADLE_VERSION="8.11"
+                elif [[ "$WRAPPER_VERSION" == "8.6"* ]] || [[ "$WRAPPER_VERSION" == "8.7"* ]] || [[ "$WRAPPER_VERSION" == "8.8"* ]] || [[ "$WRAPPER_VERSION" == "8.9"* ]]; then
+                  GRADLE_VERSION="$WRAPPER_VERSION"
+                fi
+              fi
+            fi
+          fi
+          
+          echo "✅ Version Gradle sélectionnée: $GRADLE_VERSION"
+          
           KT_COUNT=$(find . -name "*.kt" -type f | wc -l)
           JAVA_COUNT=$(find . -name "*.java" -type f | wc -l)
           SRC_MAIN_KT=$(find . -path "*/src/main/*.kt" -type f | wc -l)
@@ -1035,7 +1077,6 @@ jobs:
           echo "📁 Dossier app/: ${HAS_APP_DIR:+✅ OUI}${HAS_APP_DIR:-❌ NON}"
           echo "📁 Gradle wrapper: ${HAS_GRADLE_WRAPPER:+✅ OUI}${HAS_GRADLE_WRAPPER:-❌ NON}"
           
-          # Déterminer le type de projet
           PROJECT_TYPE="unknown"
           
           if [ -n "$HAS_ROOT_GRADLE" ] && [ -n "$HAS_ROOT_SETTINGS" ] && [ -n "$HAS_ANDROID_MANIFEST" ]; then
@@ -1059,6 +1100,7 @@ jobs:
           fi
           
           echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
+          echo "gradle_version=$GRADLE_VERSION" >> $GITHUB_OUTPUT
           echo "PROJECT_PATH=$PWD" >> $GITHUB_ENV
 
       - name: 🏗️ BUILD - Projet Android valide
@@ -1066,12 +1108,48 @@ jobs:
         run: |
           echo "=== BUILD PROJET ANDROID VALIDE ==="
           cd "$PROJECT_PATH"
-          ./gradlew assembleDebug || echo "⚠️ Build échoué"
+          
+          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
+          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
+          
+          # S'assurer que gradle.properties existe
+          if [ ! -f "gradle.properties" ]; then
+            cat > gradle.properties << EOF
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
+          android.useAndroidX=true
+          android.enableJetifier=true
+          EOF
+          fi
+          
+          # Générer le wrapper Gradle avec la bonne version
+          if [ ! -f "gradlew" ]; then
+            gradle wrapper --gradle-version "$GRADLE_VERSION"
+          fi
+          chmod +x gradlew 2>/dev/null || true
+          
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          FORMAT="${{ github.event.inputs.output_format }}"
+          
+          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            echo "🔑 Build RELEASE..."
+            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew assembleRelease --stacktrace || echo "⚠️ assembleRelease a échoué"
+            fi
+            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
+              ./gradlew bundleRelease --stacktrace || echo "⚠️ bundleRelease a échoué"
+            fi
+          else
+            echo "🔨 Build DEBUG..."
+            ./gradlew assembleDebug --stacktrace || echo "⚠️ assembleDebug a échoué"
+          fi
 
       - name: 🏗️ RECONSTRUCTION - Projet Android incomplet ou Gradle seul
         if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-incomplete' || steps.analyze-kotlin.outputs.project_type == 'gradle-only' }}
         run: |
           echo "=== RECONSTRUCTION D'UN PROJET ANDROID COMPLET ==="
+          
+          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
+          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
           # Créer un nouveau projet Android propre
           mkdir -p android-project
@@ -1162,8 +1240,8 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # Générer le wrapper Gradle
-          gradle wrapper --gradle-version 8.11.1
+          # Générer le wrapper Gradle avec la bonne version
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
@@ -1173,10 +1251,12 @@ jobs:
         run: |
           echo "=== BUILD CODE KOTLIN/JAVA PUR ==="
           
+          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
+          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
+          
           mkdir -p android-project
           cd android-project
           
-          # Même structure que ci-dessus
           cat > build.gradle << 'EOF'
           buildscript {
               repositories { google(); mavenCentral() }
@@ -1252,7 +1332,7 @@ jobs:
           }
           ACTIVITY_EOF
           
-          gradle wrapper --gradle-version 8.11.1
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
@@ -1261,6 +1341,9 @@ jobs:
         if: ${{ steps.analyze-kotlin.outputs.project_type == 'empty' }}
         run: |
           echo "=== PROJET VIDE - CRÉATION D'UN PROJET ANDROID MINIMAL ==="
+          
+          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
+          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
           mkdir -p android-project
           cd android-project
@@ -1336,7 +1419,7 @@ jobs:
           </manifest>
           MANIFEST_EOF
           
-          gradle wrapper --gradle-version 8.11.1
+          gradle wrapper --gradle-version "$GRADLE_VERSION"
           chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
@@ -1347,20 +1430,22 @@ jobs:
           cd "$ANDROID_PROJECT_DIR"
           
           echo "🔨 Lancement du build..."
+          echo "📦 Gradle version: $(./gradlew --version | head -1)"
           
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
           
           if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
             echo "🔑 Build RELEASE..."
-            cat > app/signing.gradle << 'GRADLE_EOF'
+            # Configurer le signing
+            cat > app/signing.gradle << GRADLE_EOF
           android {
               signingConfigs {
                   release {
-                      storeFile file("KEYSTORE_PLACEHOLDER")
-                      storePassword "PASSWORD_PLACEHOLDER"
-                      keyAlias "ALIAS_PLACEHOLDER"
-                      keyPassword "PASSWORD_PLACEHOLDER"
+                      storeFile file("$KEYSTORE_FILE")
+                      storePassword "${{ github.event.inputs.keystore_password }}"
+                      keyAlias "${{ github.event.inputs.keystore_alias }}"
+                      keyPassword "${{ github.event.inputs.keystore_password }}"
                   }
               }
               buildTypes {
@@ -1370,10 +1455,6 @@ jobs:
               }
           }
           GRADLE_EOF
-            # Remplacer les placeholders
-            sed -i "s|KEYSTORE_PLACEHOLDER|$KEYSTORE_FILE|g" app/signing.gradle
-            sed -i "s|PASSWORD_PLACEHOLDER|${{ github.event.inputs.keystore_password }}|g" app/signing.gradle
-            sed -i "s|ALIAS_PLACEHOLDER|${{ github.event.inputs.keystore_alias }}|g" app/signing.gradle
             echo "apply from: 'signing.gradle'" >> app/build.gradle
             
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
@@ -1399,15 +1480,13 @@ jobs:
             cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
           done
           
-          # Recherche dans les projets créés
-          for dir in android-project; do
-            if [ -d "$dir" ]; then
-              find "$dir" -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
-                echo "📱 Fichier trouvé dans $dir: $file"
-                cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-              done
-            fi
-          done
+          if [ -n "$ANDROID_PROJECT_DIR" ]; then
+            echo "🔍 Recherche dans android-project..."
+            find $ANDROID_PROJECT_DIR -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
+              echo "📱 Fichier trouvé dans android-project: $file"
+              cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
+            done
+          fi
           
           echo "=== CONTENU DE output/ ==="
           ls -la $GITHUB_WORKSPACE/output/ || echo "❌ output/ est vide"
@@ -1425,6 +1504,8 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
+
+  
   # ============================================================
   # JOB 6: BUILD FLUTTER
   # ============================================================
