@@ -950,8 +950,8 @@ jobs:
           retention-days: 1
           if-no-files-found: warn
 
-     # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - DÉTECTION DE LA VERSION GRADLE
+    # ============================================================
+  # JOB 5: BUILD KOTLIN / JAVA - ULTIME CORRECTION
   # ============================================================
   build-kotlin-java:
     needs: prepare
@@ -1011,43 +1011,27 @@ jobs:
           HAS_GRADLE_WRAPPER=$(find . -name "gradlew" -type f | head -1)
           
           # ✅ Détection de la version Gradle requise
-          GRADLE_VERSION="8.6"  # Version par défaut (compatible avec AGP 8.x)
+          GRADLE_VERSION="8.6"
           
-          # Vérifier si le projet utilise des fonctionnalités Gradle 9
+          # Vérifier dans gradle-wrapper.properties
+          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
+            WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
+            if [ -n "$WRAPPER_VERSION" ]; then
+              echo "📦 Gradle wrapper version: $WRAPPER_VERSION"
+              GRADLE_VERSION="$WRAPPER_VERSION"
+            fi
+          fi
+          
+          # Vérifier la version du plugin Android Gradle
           if [ -n "$HAS_GRADLE" ]; then
-            # Vérifier dans les fichiers gradle s'il y a des indices
-            if grep -q "gradle-9" "$HAS_GRADLE" 2>/dev/null || grep -q "Gradle 9" "$HAS_GRADLE" 2>/dev/null; then
-              GRADLE_VERSION="9.0"
-              echo "⚠️ Projet configuré pour Gradle 9 détecté"
-            fi
-            
-            # Vérifier la version du plugin Android Gradle
-            if grep -q "com.android.application" "$HAS_GRADLE" 2>/dev/null; then
-              # Vérifier la version du plugin
-              AGP_VERSION=$(grep -o "com.android.tools.build:gradle:[0-9.]*" "$HAS_GRADLE" 2>/dev/null | head -1 | cut -d: -f3)
-              if [ -n "$AGP_VERSION" ]; then
-                echo "📦 Plugin Android Gradle version: $AGP_VERSION"
-                # Si AGP >= 8.5, utiliser Gradle 8.7+
-                if [[ "$AGP_VERSION" == "8.5"* ]] || [[ "$AGP_VERSION" == "8.6"* ]] || [[ "$AGP_VERSION" == "8.7"* ]] || [[ "$AGP_VERSION" == "8.8"* ]]; then
-                  GRADLE_VERSION="8.10.2"
-                elif [[ "$AGP_VERSION" == "8.9"* ]] || [[ "$AGP_VERSION" == "8.10"* ]] || [[ "$AGP_VERSION" == "8.11"* ]]; then
-                  GRADLE_VERSION="9.0"
-                fi
-              fi
-            fi
-            
-            # Vérifier si le projet utilise Gradle 9 via le wrapper
-            if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-              WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
-              if [ -n "$WRAPPER_VERSION" ]; then
-                echo "📦 Gradle wrapper version: $WRAPPER_VERSION"
-                if [[ "$WRAPPER_VERSION" == "9."* ]]; then
-                  GRADLE_VERSION="9.0"
-                elif [[ "$WRAPPER_VERSION" == "8.10"* ]] || [[ "$WRAPPER_VERSION" == "8.11"* ]]; then
-                  GRADLE_VERSION="8.11"
-                elif [[ "$WRAPPER_VERSION" == "8.6"* ]] || [[ "$WRAPPER_VERSION" == "8.7"* ]] || [[ "$WRAPPER_VERSION" == "8.8"* ]] || [[ "$WRAPPER_VERSION" == "8.9"* ]]; then
-                  GRADLE_VERSION="$WRAPPER_VERSION"
-                fi
+            AGP_VERSION=$(grep -o "com.android.tools.build:gradle:[0-9.]*" "$HAS_GRADLE" 2>/dev/null | head -1 | cut -d: -f3)
+            if [ -n "$AGP_VERSION" ]; then
+              echo "📦 Android Gradle Plugin version: $AGP_VERSION"
+              # Si AGP >= 8.5, utiliser Gradle 8.7+
+              if [[ "$AGP_VERSION" == "8.5"* ]] || [[ "$AGP_VERSION" == "8.6"* ]] || [[ "$AGP_VERSION" == "8.7"* ]] || [[ "$AGP_VERSION" == "8.8"* ]]; then
+                GRADLE_VERSION="8.10.2"
+              elif [[ "$AGP_VERSION" == "8.9"* ]] || [[ "$AGP_VERSION" == "8.10"* ]] || [[ "$AGP_VERSION" == "8.11"* ]]; then
+                GRADLE_VERSION="9.0"
               fi
             fi
           fi
@@ -1112,6 +1096,13 @@ jobs:
           GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
           echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
+          # Si pas de wrapper, le générer
+          if [ ! -f "gradlew" ]; then
+            echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
+            gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
+          fi
+          chmod +x gradlew 2>/dev/null || true
+          
           # S'assurer que gradle.properties existe
           if [ ! -f "gradle.properties" ]; then
             cat > gradle.properties << EOF
@@ -1120,12 +1111,6 @@ jobs:
           android.enableJetifier=true
           EOF
           fi
-          
-          # Générer le wrapper Gradle avec la bonne version
-          if [ ! -f "gradlew" ]; then
-            gradle wrapper --gradle-version "$GRADLE_VERSION"
-          fi
-          chmod +x gradlew 2>/dev/null || true
           
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
@@ -1143,7 +1128,7 @@ jobs:
             ./gradlew assembleDebug --stacktrace || echo "⚠️ assembleDebug a échoué"
           fi
 
-      - name: 🏗️ RECONSTRUCTION - Projet Android incomplet ou Gradle seul
+      - name: 🏗️ RECONSTRUCTION - Projet Android complet
         if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-incomplete' || steps.analyze-kotlin.outputs.project_type == 'gradle-only' }}
         run: |
           echo "=== RECONSTRUCTION D'UN PROJET ANDROID COMPLET ==="
@@ -1155,14 +1140,26 @@ jobs:
           mkdir -p android-project
           cd android-project
           
-          # build.gradle (root)
+          # build.gradle (root) - compatible avec Gradle 8+
           cat > build.gradle << 'EOF'
           buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath 'com.android.tools.build:gradle:8.1.4' }
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.4'
+              }
           }
-          allprojects { repositories { google(); mavenCentral() } }
-          task clean(type: Delete) { delete rootProject.buildDir }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
           EOF
           
           # settings.gradle
@@ -1179,8 +1176,10 @@ jobs:
           mkdir -p app
           cat > app/build.gradle << 'APP_EOF'
           apply plugin: 'com.android.application'
+          
           android {
               compileSdk 34
+              
               defaultConfig {
                   applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
                   minSdk 24
@@ -1188,10 +1187,23 @@ jobs:
                   versionCode 1
                   versionName "1.0"
               }
-              buildTypes { release { minifyEnabled false } }
-              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+              
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+              
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
           }
-          dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
+          
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
           APP_EOF
           
           # Copier le code source s'il existe
@@ -1206,7 +1218,8 @@ jobs:
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}">
+              <application android:label="${{ github.event.inputs.app_name }}"
+                  android:icon="@mipmap/ic_launcher">
                   <activity android:name=".MainActivity">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -1240,8 +1253,9 @@ jobs:
           }
           ACTIVITY_EOF
           
-          # Générer le wrapper Gradle avec la bonne version
-          gradle wrapper --gradle-version "$GRADLE_VERSION"
+          # ✅ FORCER l'utilisation du wrapper Gradle avec la bonne version
+          echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
+          gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
@@ -1254,30 +1268,50 @@ jobs:
           GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
           echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
+          # Créer un nouveau projet Android propre
           mkdir -p android-project
           cd android-project
           
+          # build.gradle (root)
           cat > build.gradle << 'EOF'
           buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath 'com.android.tools.build:gradle:8.1.4' }
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.4'
+              }
           }
-          allprojects { repositories { google(); mavenCentral() } }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
           EOF
           
+          # settings.gradle
           echo 'include ":app"' > settings.gradle
           
+          # gradle.properties
           cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2048m
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
           android.useAndroidX=true
           android.enableJetifier=true
           EOF
           
+          # app/build.gradle
           mkdir -p app
           cat > app/build.gradle << 'APP_EOF'
           apply plugin: 'com.android.application'
+          
           android {
               compileSdk 34
+              
               defaultConfig {
                   applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
                   minSdk 24
@@ -1285,21 +1319,37 @@ jobs:
                   versionCode 1
                   versionName "1.0"
               }
-              buildTypes { release { minifyEnabled false } }
-              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+              
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+              
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
           }
-          dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
+          
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
           APP_EOF
           
+          # Copier le code source
           mkdir -p app/src/main/java
           cp -r "$PROJECT_PATH"/* app/src/main/java/ 2>/dev/null || true
           
+          # AndroidManifest.xml
           mkdir -p app/src/main
           cat > app/src/main/AndroidManifest.xml << 'MANIFEST_EOF'
           <?xml version="1.0" encoding="utf-8"?>
           <manifest xmlns:android="http://schemas.android.com/apk/res/android"
               package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}">
+              <application android:label="${{ github.event.inputs.app_name }}"
+                  android:icon="@mipmap/ic_launcher">
                   <activity android:name=".MainActivity">
                       <intent-filter>
                           <action android:name="android.intent.action.MAIN" />
@@ -1310,6 +1360,7 @@ jobs:
           </manifest>
           MANIFEST_EOF
           
+          # MainActivity
           PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
           mkdir -p app/src/main/java/$PKG_PATH
           cat > app/src/main/java/$PKG_PATH/MainActivity.java << 'ACTIVITY_EOF'
@@ -1332,7 +1383,9 @@ jobs:
           }
           ACTIVITY_EOF
           
-          gradle wrapper --gradle-version "$GRADLE_VERSION"
+          # ✅ FORCER l'utilisation du wrapper Gradle avec la bonne version
+          echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
+          gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
@@ -1345,30 +1398,50 @@ jobs:
           GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
           echo "📦 Utilisation de Gradle $GRADLE_VERSION"
           
+          # Créer un nouveau projet Android propre
           mkdir -p android-project
           cd android-project
           
+          # build.gradle (root)
           cat > build.gradle << 'EOF'
           buildscript {
-              repositories { google(); mavenCentral() }
-              dependencies { classpath 'com.android.tools.build:gradle:8.1.4' }
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+              dependencies {
+                  classpath 'com.android.tools.build:gradle:8.1.4'
+              }
           }
-          allprojects { repositories { google(); mavenCentral() } }
+          allprojects {
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          task clean(type: Delete) {
+              delete rootProject.buildDir
+          }
           EOF
           
+          # settings.gradle
           echo 'include ":app"' > settings.gradle
           
+          # gradle.properties
           cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2048m
+          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
           android.useAndroidX=true
           android.enableJetifier=true
           EOF
           
+          # app/build.gradle
           mkdir -p app
           cat > app/build.gradle << 'APP_EOF'
           apply plugin: 'com.android.application'
+          
           android {
               compileSdk 34
+              
               defaultConfig {
                   applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
                   minSdk 24
@@ -1376,15 +1449,48 @@ jobs:
                   versionCode 1
                   versionName "1.0"
               }
-              buildTypes { release { minifyEnabled false } }
-              compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
+              
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+                  }
+              }
+              
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
           }
-          dependencies { implementation 'androidx.appcompat:appcompat:1.6.1' }
+          
+          dependencies {
+              implementation 'androidx.appcompat:appcompat:1.6.1'
+          }
           APP_EOF
           
-          mkdir -p app/src/main/java/com/example/app
-          cat > app/src/main/java/com/example/app/MainActivity.java << 'ACTIVITY_EOF'
-          package com.example.app;
+          # AndroidManifest.xml
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml << 'MANIFEST_EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
+              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
+              <application android:label="${{ github.event.inputs.app_name }}"
+                  android:icon="@mipmap/ic_launcher">
+                  <activity android:name=".MainActivity">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          MANIFEST_EOF
+          
+          # MainActivity
+          PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
+          mkdir -p app/src/main/java/$PKG_PATH
+          cat > app/src/main/java/$PKG_PATH/MainActivity.java << 'ACTIVITY_EOF'
+          package ${{ github.event.inputs.package_id || 'com.example.app' }};
           
           import android.app.Activity;
           import android.os.Bundle;
@@ -1403,23 +1509,9 @@ jobs:
           }
           ACTIVITY_EOF
           
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml << 'MANIFEST_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}">
-                  <activity android:name=".MainActivity">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          MANIFEST_EOF
-          
-          gradle wrapper --gradle-version "$GRADLE_VERSION"
+          # ✅ FORCER l'utilisation du wrapper Gradle avec la bonne version
+          echo "📦 Génération du wrapper Gradle $GRADLE_VERSION..."
+          gradle wrapper --gradle-version "$GRADLE_VERSION" --distribution-type bin
           chmod +x gradlew
           
           echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
@@ -1430,7 +1522,8 @@ jobs:
           cd "$ANDROID_PROJECT_DIR"
           
           echo "🔨 Lancement du build..."
-          echo "📦 Gradle version: $(./gradlew --version | head -1)"
+          echo "📦 Utilisation du wrapper Gradle:"
+          ./gradlew --version | head -3
           
           KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
           FORMAT="${{ github.event.inputs.output_format }}"
@@ -1503,8 +1596,6 @@ jobs:
           path: ${{ github.workspace }}/output/
           retention-days: 1
           if-no-files-found: warn
-
-
   
   # ============================================================
   # JOB 6: BUILD FLUTTER
