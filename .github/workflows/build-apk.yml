@@ -1,462 +1,125 @@
-# ============================================================================
-# Build APK / AAB / EXE — pipeline multi-langages
-# ============================================================================
-# VERSION ULTIME :
-#   - Détection intelligente pour tous les jobs
-#   - Reconstruction automatique des projets mal structurés
-#   - Cache APT pour ImageMagick
-#   - Messages d'erreur clairs pour le frontend
-#   - Gestion des erreurs avec set -e
-#   - Téléchargement manuel du wrapper Gradle
-#   - Tous les langages supportés
-# ============================================================================
-
-name: Build APK
+name: Build Web APK
 
 on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: 'URL du zip source'
+        description: "URL du ZIP contenant le site web (index.html à la racine ou dans un seul sous-dossier)"
         required: true
         type: string
       app_name:
-        description: 'Nom de l application'
+        description: "Nom de l'application"
         required: true
         type: string
       package_id:
-        description: 'Package ID'
+        description: "Package ID (ex: com.philtech.monapp)"
         required: false
         type: string
+        default: "com.philtech.webapp"
       build_id:
-        description: 'ID du build'
+        description: "ID unique du build"
         required: true
         type: string
       build_type:
-        description: 'Type de build'
-        required: true
+        description: "debug ou release"
+        required: false
         type: string
+        default: "debug"
       output_format:
-        description: 'Format de sortie (apk, aab, both)'
+        description: "apk, aab ou both"
         required: false
         type: string
-        default: 'apk'
-      project_type:
-        description: 'Type de projet (optionnel - auto-detecte si vide)'
-        required: false
-        type: string
-        default: ''
-      platform:
-        description: 'Plateforme cible (android, windows)'
-        required: false
-        type: string
-        default: 'android'
+        default: "apk"
       icon_url:
-        description: 'URL de l icone personnalisee (optionnel)'
+        description: "URL de l'icône (optionnel)"
         required: false
         type: string
-        default: ''
+        default: ""
       keystore_mode:
-        description: 'Mode keystore'
-        required: true
+        description: "generate ou upload"
+        required: false
         type: string
+        default: "generate"
       keystore_url:
-        description: 'URL du keystore'
+        description: "URL du keystore si keystore_mode = upload"
         required: false
         type: string
+        default: ""
       keystore_password:
-        description: 'Mot de passe du keystore'
+        description: "Mot de passe du keystore"
         required: false
         type: string
+        default: "philtech2024"
       keystore_alias:
-        description: 'Alias du keystore'
+        description: "Alias du keystore"
         required: false
         type: string
+        default: "myapp"
       callback_url:
-        description: 'URL de callback (notification finale, avec /callback)'
+        description: "URL de notification en fin de build"
         required: true
         type: string
-      build_base_url:
-        description: 'URL de base du build sur le Worker (sans /callback)'
-        required: false
-        type: string
-
-env:
-  NODE_VERSION: '24'
 
 jobs:
-  # ============================================================
-  # JOB 1: PREPARE
-  # ============================================================
-  prepare:
+  build-web:
     runs-on: ubuntu-latest
-    outputs:
-      source_dir: ${{ steps.detect.outputs.source_dir }}
-      src_path: ${{ steps.detect.outputs.src_path }}
-      detected_type: ${{ steps.detect-project.outputs.detected_type }}
-      has_keystore: ${{ steps.keystore.outputs.has_keystore || steps.keystore-download.outputs.has_keystore }}
-      keystore_path: ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }}
-      keystore_filename: ${{ steps.keystore.outputs.keystore_filename || steps.keystore-download.outputs.keystore_filename }}
-      build_should_run: ${{ steps.detect-project.outputs.build_should_run }}
-      error_message: ${{ steps.detect-project.outputs.error_message }}
-      error_code: ${{ steps.detect-project.outputs.error_code }}
-      error_hint: ${{ steps.detect-project.outputs.error_hint }}
+
     steps:
-      - name: Cache APT packages (ImageMagick)
-        uses: actions/cache@v4
-        with:
-          path: /var/cache/apt/archives
-          key: apt-${{ runner.os }}-imagemagick-${{ hashFiles('**/apt-packages.txt') }}
-          restore-keys: |
-            apt-${{ runner.os }}-imagemagick-
-            apt-${{ runner.os }}-
-
-      - name: Install ImageMagick (avec cache)
+      # ----- 1. Outils de base -----
+      - name: Installer ImageMagick (icônes)
         run: |
-          if ! command -v convert >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y --no-install-recommends imagemagick
-          fi
-          echo "imagemagick-installed" > apt-packages.txt
+          sudo apt-get update -y
+          sudo apt-get install -y --no-install-recommends imagemagick
 
-      - name: Download source zip
-        id: download
+      # ----- 2. Télécharger et extraire le ZIP -----
+      - name: Télécharger le ZIP source
         run: |
           set -e
+          echo "📥 Téléchargement du ZIP..."
           curl -f -L -o source.zip "${{ github.event.inputs.zip_url }}"
-          echo "=== Taille du fichier telecharge ==="
-          ls -la source.zip
-          SIZE=$(stat -c%s source.zip 2>/dev/null || stat -f%z source.zip)
+
+          SIZE=$(stat -c%s source.zip 2>/dev/null || stat -f%z source.zip 2>/dev/null || echo "0")
           if [ "$SIZE" -lt 100 ]; then
-            echo "ERREUR: le fichier source.zip est suspicieusement petit ($SIZE octets)."
-            cat source.zip
+            echo "❌ ERREUR: fichier trop petit ($SIZE octets), probablement invalide"
             exit 1
           fi
+
           mkdir -p src
           unzip -o source.zip -d src/
+          echo "✅ ZIP extrait"
 
-      - name: Fix source file permissions
+      # ----- 3. Trouver index.html où qu'il soit (builder permissif) -----
+      - name: Localiser index.html et déterminer le dossier source
+        id: analyze
         run: |
-          set -e
-          echo "Normalisation des permissions dans src/..."
-          chmod -R u+rwX,go+rX src/ 2>/dev/null || true
-          find src/ -type f ! -readable -exec chmod u+r {} \; 2>/dev/null || true
-          find src/ -type d ! -readable -exec chmod u+rx {} \; 2>/dev/null || true
+          cd src/
+          echo "📁 Contenu du ZIP :"
+          find . -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | head -30
 
-      - name: Detect source directory
-        id: detect
-        run: |
-          cd src
-          ITEM_COUNT=$(ls -1 | wc -l)
-          FIRST_ITEM=$(ls -1 | head -1)
-          if [ "$ITEM_COUNT" -eq 1 ] && [ -d "$FIRST_ITEM" ]; then
-            echo "source_dir=$FIRST_ITEM" >> "$GITHUB_OUTPUT"
-            echo "src_path=src/$FIRST_ITEM" >> "$GITHUB_OUTPUT"
+          INDEX_PATH=$(find . -iname "index.html" -type f | head -1)
+
+          if [ -z "$INDEX_PATH" ]; then
+            echo "⚠️ Aucun index.html trouvé — génération d'une page minimale de secours"
+            echo "has_index=false" >> $GITHUB_OUTPUT
+            echo "source_dir=." >> $GITHUB_OUTPUT
           else
-            echo "source_dir=." >> "$GITHUB_OUTPUT"
-            echo "src_path=src" >> "$GITHUB_OUTPUT"
+            echo "✅ index.html trouvé : $INDEX_PATH"
+            SOURCE_DIR=$(dirname "$INDEX_PATH")
+            echo "has_index=true" >> $GITHUB_OUTPUT
+            echo "source_dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
           fi
 
-      - name: Auto-detect project type
-        id: detect-project
-        run: |
-          set -e
-          cd src/${{ steps.detect.outputs.source_dir }}
-
-          find_file() {
-            find . -iname "$1" -type f \
-              -not -path "*/node_modules/*" \
-              -not -path "*/.git/*" \
-              -not -path "*/build/*" \
-              -not -path "*/dist/*" \
-              -not -path "*/bin/*" \
-              -not -path "*/obj/*" \
-              2>/dev/null | head -1
-          }
-
-          DETECTED="unknown"
-          BUILD_SHOULD_RUN="true"
-          ERROR_MSG=""
-          ERROR_CODE=""
-          ERROR_HINT=""
-
-          if [ -n "$(find_file "pubspec.yaml")" ]; then
-            DETECTED="flutter"
-          elif [ -n "$(find_file "*.csproj")" ]; then
-            DETECTED="dotnet-maui"
-          elif [ -n "$(find_file "metro.config.js")" ] || [ -n "$(find_file "metro.config.ts")" ]; then
-            DETECTED="react-native"
-          elif [ -n "$(find_file "capacitor.config.ts")" ] || [ -n "$(find_file "capacitor.config.json")" ] || [ -n "$(find_file "capacitor.config.js")" ] || ( [ -n "$(find_file "package.json")" ] && grep -q "@capacitor/core" "$(find_file "package.json")" 2>/dev/null ); then
-            DETECTED="capacitor"
-          elif [ -n "$(find_file "package.json")" ] && grep -q '"expo"' "$(find_file "package.json")" 2>/dev/null; then
-            DETECTED="react-native"
-          elif { [ -n "$(find_file "build.gradle")" ] || [ -n "$(find_file "build.gradle.kts")" ]; } && [ -z "$(find_file "package.json")" ]; then
-            DETECTED="kotlin"
-          elif [ -n "$(find_file "go.mod")" ]; then
-            DETECTED="go"
-          elif [ -n "$(find_file "setup.py")" ] || [ -n "$(find_file "pyproject.toml")" ] || [ -n "$(find_file "buildozer.spec")" ] || ( [ -n "$(find_file "main.py")" ] && [ -z "$(find_file "go.mod")" ] ) || ( [ -n "$(find_file "app.py")" ] && [ -z "$(find_file "go.mod")" ] ); then
-            DETECTED="python"
-          elif [ -n "$(find_file "project.godot")" ]; then
-            DETECTED="godot"
-          elif [ -n "$(find_file "build.settings")" ]; then
-            DETECTED="lua"
-          elif [ -n "$(find_file "package.json")" ] && grep -q "nativescript" "$(find_file "package.json")" 2>/dev/null; then
-            DETECTED="nativescript"
-          elif [ -n "$(find_file "package.json")" ]; then
-            PKG_JSON="$(find_file "package.json")"
-            if grep -q '"react"' "$PKG_JSON" 2>/dev/null; then
-              DETECTED="react"
-            elif grep -q '"vue"' "$PKG_JSON" 2>/dev/null; then
-              DETECTED="vue"
-            elif grep -q '"svelte"' "$PKG_JSON" 2>/dev/null; then
-              DETECTED="svelte"
-            else
-              DETECTED="web"
-            fi
-          elif [ -n "$(find_file "index.html")" ]; then
-            DETECTED="web"
-          else
-            # Fallback par extension
-            PY_COUNT=$(find . -name "*.py" -type f | wc -l)
-            KT_JAVA_COUNT=$(find . -name "*.kt" -o -name "*.java" -type f | wc -l)
-            JS_TS_COUNT=$(find . -name "*.js" -o -name "*.ts" -o -name "*.jsx" -o -name "*.tsx" -type f | wc -l)
-
-            if [ "$PY_COUNT" -gt 0 ]; then
-              DETECTED="python"
-            elif [ "$KT_JAVA_COUNT" -gt 0 ]; then
-              DETECTED="kotlin"
-            elif [ "$JS_TS_COUNT" -gt 0 ]; then
-              DETECTED="web"
-            else
-              DETECTED="unknown"
-              BUILD_SHOULD_RUN="false"
-              ERROR_CODE="project_type_not_detected"
-              ERROR_HINT="Aucun marqueur de projet reconnu"
-              ERROR_MSG="Impossible de detecter le type de projet"
-            fi
-          fi
-
-          CLIENT_TYPE="${{ github.event.inputs.project_type }}"
-          if [ "$CLIENT_TYPE" != "" ] && [ "$CLIENT_TYPE" != "web" ]; then
-            echo "Client force: $CLIENT_TYPE"
-            DETECTED="$CLIENT_TYPE"
-          fi
-
-          echo "detected_type=$DETECTED" >> "$GITHUB_OUTPUT"
-          echo "build_should_run=$BUILD_SHOULD_RUN" >> "$GITHUB_OUTPUT"
-          echo "error_message=$ERROR_MSG" >> "$GITHUB_OUTPUT"
-          echo "error_code=$ERROR_CODE" >> "$GITHUB_OUTPUT"
-          echo "error_hint=$ERROR_HINT" >> "$GITHUB_OUTPUT"
-          echo "=== TYPE FINAL: $DETECTED ==="
-
-      # ============================================================
-      # CORRECTION UNIVERSELLE : ICONE + SPLASH SCREEN
-      # ============================================================
-      - name: Universal icon & splash screen fix
-        run: |
-          set -e
-
-          # Télécharger l'icône si fournie
-          if [ -n "${{ github.event.inputs.icon_url }}" ]; then
-            curl -f -L -o /tmp/icon.png "${{ github.event.inputs.icon_url }}"
-
-            # Forcer l'icône dans tous les dossiers res/
-            find src/ -type d -name "res" 2>/dev/null | while read res_dir; do
-              for density in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi drawable-mdpi drawable-hdpi drawable-xhdpi drawable-xxhdpi drawable-xxxhdpi; do
-                target_dir="$res_dir/$density"
-                mkdir -p "$target_dir"
-                SIZE=48
-                case "$density" in
-                  *mdpi) SIZE=48 ;;
-                  *hdpi) SIZE=72 ;;
-                  *xhdpi) SIZE=96 ;;
-                  *xxhdpi) SIZE=144 ;;
-                  *xxxhdpi) SIZE=192 ;;
-                esac
-                convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$target_dir/ic_launcher.png" 2>/dev/null || true
-                convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$target_dir/ic_launcher_round.png" 2>/dev/null || true
-                cp "$target_dir/ic_launcher.png" "$target_dir/ic_launcher" 2>/dev/null || true
-              done
-            done
-
-            # Flutter — assets/icon.png
-            find src/ -name "pubspec.yaml" -exec dirname {} \; | while read dir; do
-              mkdir -p "$dir/assets"
-              cp /tmp/icon.png "$dir/assets/icon.png" 2>/dev/null || true
-            done
-
-            # React Native — android/app/src/main/res
-            find src/ -path "*/android/app/src/main/res" -type d 2>/dev/null | while read res_dir; do
-              for density in mipmap-mdpi mipmap-hdpi mipmap-xhdpi mipmap-xxhdpi mipmap-xxxhdpi; do
-                target_dir="$res_dir/$density"
-                mkdir -p "$target_dir"
-                SIZE=48
-                case "$density" in
-                  *mdpi) SIZE=48 ;;
-                  *hdpi) SIZE=72 ;;
-                  *xhdpi) SIZE=96 ;;
-                  *xxhdpi) SIZE=144 ;;
-                  *xxxhdpi) SIZE=192 ;;
-                esac
-                convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$target_dir/ic_launcher.png" 2>/dev/null || true
-                convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$target_dir/ic_launcher_round.png" 2>/dev/null || true
-              done
-            done
-
-            echo "✅ Icone forcee dans tous les dossiers res/"
-          fi
-
-          # ============================================================
-          # DÉSACTIVER LE SPLASH SCREEN PARTOUT
-          # ============================================================
-
-          # Cordova
-          find src/ -name "config.xml" -exec sed -i \
-            -e '/<preference name="SplashScreen"/d' \
-            -e '/<preference name="SplashScreenDelay"/d' \
-            -e '/<preference name="AutoHideSplashScreen"/d' \
-            -e 's/<\/widget>/  <preference name="SplashScreen" value="none" \/>\n  <preference name="AutoHideSplashScreen" value="false" \/>\n<\/widget>/' {} \; 2>/dev/null || true
-
-          # Capacitor
-          find src/ -name "capacitor.config.json" -exec node -e "
-            const fs = require('fs');
-            const path = '{}';
-            try {
-              const cfg = JSON.parse(fs.readFileSync(path));
-              cfg.plugins = cfg.plugins || {};
-              cfg.plugins.SplashScreen = { launchShowDuration: 0, launchAutoHide: false };
-              fs.writeFileSync(path, JSON.stringify(cfg, null, 2));
-            } catch(e) {}
-          " \; 2>/dev/null || true
-
-          # Flutter — styles.xml
-          find src/ -name "styles.xml" -exec sed -i \
-            -e 's/<item name="android:windowBackground">@drawable\/launch_background<\/item>/<item name="android:windowBackground">@android:color\/black<\/item>/' {} \; 2>/dev/null || true
-          find src/ -name "launch_background.xml" -exec rm -f {} \; 2>/dev/null || true
-
-          # React Native / Kotlin / Java
-          find src/ -name "styles.xml" -exec sed -i \
-            -e 's/<item name="android:windowBackground">@drawable\/launch_screen<\/item>/<item name="android:windowBackground">@android:color\/black<\/item>/' {} \; 2>/dev/null || true
-          find src/ -name "launch_screen.xml" -exec rm -f {} \; 2>/dev/null || true
-
-          # Godot
-          find src/ -name "export_presets.cfg" -exec sed -i \
-            -e 's/\(android\/custom_icon\/.*=\)[^,]*/\1/' \
-            -e 's/\(android\/custom_icon\/.*=\)false/\1true/' {} \; 2>/dev/null || true
-
-          echo "✅ Splash screen desactive partout"
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Generate keystore
-        id: keystore
-        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
-        run: |
-          set -e
-          KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
-          keytool -genkeypair -v \
-            -keystore "$KEYSTORE_NAME" \
-            -alias "${{ github.event.inputs.keystore_alias }}" \
-            -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \
-            -storetype PKCS12 \
-            -storepass "${{ github.event.inputs.keystore_password }}" \
-            -keypass "${{ github.event.inputs.keystore_password }}" \
-            -dname "CN=${{ github.event.inputs.app_name }}, O=${{ github.event.inputs.app_name }} Developer, C=CI"
-          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
-          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
-          echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Download user keystore
-        id: keystore-download
-        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
-        run: |
-          set -e
-          KEYSTORE_NAME="my-release-key-${{ github.event.inputs.build_id }}.keystore"
-          curl -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}"
-          echo "has_keystore=true" >> "$GITHUB_OUTPUT"
-          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
-          echo "keystore_filename=$KEYSTORE_NAME" >> "$GITHUB_OUTPUT"
-
-      - name: Upload source artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-          retention-days: 1
-
-      - name: Upload keystore artifact
-        if: ${{ steps.keystore.outputs.has_keystore == 'true' || steps.keystore-download.outputs.has_keystore == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-          path: ${{ steps.keystore.outputs.keystore_path || steps.keystore-download.outputs.keystore_path }}
-          retention-days: 7
-
-      - name: Notify error if project not detected
-        if: ${{ steps.detect-project.outputs.build_should_run == 'false' }}
-        run: |
-          set -e
-          JSON_PAYLOAD=$(jq -n \
-              --arg build_id "${{ github.event.inputs.build_id }}" \
-              --arg message "${{ steps.detect-project.outputs.error_message }}" \
-              --arg error_code "${{ steps.detect-project.outputs.error_code }}" \
-              --arg hint "${{ steps.detect-project.outputs.error_hint }}" \
-              '{
-                build_id: $build_id,
-                state: "error",
-                detected_type: "unknown",
-                error_code: $error_code,
-                message: $message,
-                hint: $hint
-              }')
-          curl -sf -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "${{ github.event.inputs.callback_url }}" || true
-          exit 1
-
-  # ============================================================
-  # JOB 2: BUILD WEB (Cordova)
-  # ============================================================
-  build-web:
-    needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["web","react","vue","svelte"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup Node
+      # ----- 4. Setup Node / Java / Android SDK -----
+      - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Cache Node modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
+          node-version: "20"
 
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: "17"
+          distribution: "temurin"
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
@@ -467,2338 +130,185 @@ jobs:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          key: gradle-${{ runner.os }}-web-${{ hashFiles('**/gradle-wrapper.properties') }}
           restore-keys: |
-            gradle-${{ runner.os }}-
+            gradle-${{ runner.os }}-web-
 
-      - name: 🔍 ANALYSE DU PROJET WEB
-        id: analyze-web
+      # ----- 5. Keystore (release uniquement) -----
+      - name: Générer le keystore
+        id: keystore-gen
+        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
         run: |
-          echo "=== ANALYSE DU PROJET WEB ==="
-          cd src/
-          
-          HAS_PACKAGE_JSON=$(find . -name "package.json" -type f | head -1)
-          HAS_INDEX_HTML=$(find . -name "index.html" -type f | head -1)
-          HAS_DIST=$(find . -type d -name "dist" | head -1)
-          HAS_BUILD=$(find . -type d -name "build" | head -1)
-          HAS_SRC=$(find . -type d -name "src" | head -1)
-          
-          HAS_REACT=$(grep -l '"react"' package.json 2>/dev/null | head -1)
-          HAS_VUE=$(grep -l '"vue"' package.json 2>/dev/null | head -1)
-          HAS_SVELTE=$(grep -l '"svelte"' package.json 2>/dev/null | head -1)
-          HAS_ANGULAR=$(grep -l '"@angular/core"' package.json 2>/dev/null | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo "package.json: ${HAS_PACKAGE_JSON:+✅ OUI}${HAS_PACKAGE_JSON:-❌ NON}"
-          echo "index.html: ${HAS_INDEX_HTML:+✅ OUI}${HAS_INDEX_HTML:-❌ NON}"
-          echo "dossier dist/: ${HAS_DIST:+✅ OUI}${HAS_DIST:-❌ NON}"
-          echo "dossier build/: ${HAS_BUILD:+✅ OUI}${HAS_BUILD:-❌ NON}"
-          echo "dossier src/: ${HAS_SRC:+✅ OUI}${HAS_SRC:-❌ NON}"
-          echo "React: ${HAS_REACT:+✅ OUI}${HAS_REACT:-❌ NON}"
-          echo "Vue: ${HAS_VUE:+✅ OUI}${HAS_VUE:-❌ NON}"
-          echo "Svelte: ${HAS_SVELTE:+✅ OUI}${HAS_SVELTE:-❌ NON}"
-          echo "Angular: ${HAS_ANGULAR:+✅ OUI}${HAS_ANGULAR:-❌ NON}"
-          
-          if [ -z "$HAS_INDEX_HTML" ]; then
-            echo "⚠️ Aucun index.html trouvé - création d'un fichier minimal"
-            mkdir -p www
-            cat > www/index.html << 'HTML_EOF'
+          set -e
+          KEYSTORE_NAME="keystore-${{ github.event.inputs.build_id }}.keystore"
+          ALIAS="${{ github.event.inputs.keystore_alias }}"
+          PASSWORD="${{ github.event.inputs.keystore_password }}"
+
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE_NAME" \
+            -alias "$ALIAS" \
+            -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \
+            -storetype PKCS12 \
+            -storepass "$PASSWORD" \
+            -keypass "$PASSWORD" \
+            -dname "CN=${{ github.event.inputs.app_name }}, OU=PhilTech, O=PhilTech, C=CI"
+
+          echo "has_keystore=true" >> $GITHUB_OUTPUT
+          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Télécharger le keystore utilisateur
+        id: keystore-dl
+        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
+        run: |
+          set -e
+          KEYSTORE_NAME="user-keystore-${{ github.event.inputs.build_id }}.keystore"
+          curl -f -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}"
+          echo "has_keystore=true" >> $GITHUB_OUTPUT
+          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> $GITHUB_OUTPUT
+
+      # ----- 6. Créer le projet Cordova et copier le site -----
+      - name: Installer Cordova
+        run: npm install -g cordova
+
+      - name: Créer le projet Cordova et copier le site web
+        run: |
+          set -e
+          SOURCE_DIR="${{ steps.analyze.outputs.source_dir }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          PKG_ID="${{ github.event.inputs.package_id }}"
+          CORDOVA_DIR="$GITHUB_WORKSPACE/cordova-app"
+
+          cordova create "$CORDOVA_DIR" "$PKG_ID" "$APP_NAME"
+          rm -rf "$CORDOVA_DIR"/www/*
+
+          cp -r "src/$SOURCE_DIR"/. "$CORDOVA_DIR"/www/
+
+          if [ "${{ steps.analyze.outputs.has_index }}" == "false" ]; then
+            cat > "$CORDOVA_DIR/www/index.html" << HTML_EOF
           <!DOCTYPE html>
           <html>
           <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>${{ github.event.inputs.app_name }}</title>
-              <style>
-                  body { font-family: Arial, sans-serif; display: flex; justify-content: center; align-items: center; height: 100vh; margin: 0; background: #f0f0f0; }
-                  .container { text-align: center; padding: 40px; background: white; border-radius: 10px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-                  h1 { color: #333; }
-                  p { color: #666; }
-              </style>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>$APP_NAME</title>
           </head>
           <body>
-              <div class="container">
-                  <h1>${{ github.event.inputs.app_name }}</h1>
-                  <p>✅ Application web compilée avec succès !</p>
-                  <p>📦 Package: ${{ github.event.inputs.package_id || 'com.philtech.mobile' }}</p>
-              </div>
+            <h1>$APP_NAME</h1>
+            <p>✅ Site compilé en application</p>
           </body>
           </html>
           HTML_EOF
-            echo "✅ index.html créé"
           fi
 
-      - name: Install Cordova
-        run: npm install -g cordova
+          cd "$CORDOVA_DIR"
+          sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="SplashScreen" value="none" />\n</widget>#' config.xml
 
-      - name: Build web project
+          echo "CORDOVA_DIR=$CORDOVA_DIR" >> $GITHUB_ENV
+
+      # ----- 7. Icône personnalisée -----
+      - name: Ajouter l'icône personnalisée
+        if: ${{ github.event.inputs.icon_url != '' }}
         run: |
           set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "package.json" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
+          curl -f -L -o /tmp/icon.png "${{ github.event.inputs.icon_url }}"
+          cd "$CORDOVA_DIR"
+          cordova platform add android > /dev/null 2>&1 || true
+          find . -type d -path "*res*" -name "mipmap-*" | while read dir; do
+            density=$(basename "$dir")
+            case "$density" in
+              *mdpi) SIZE=48 ;;
+              *hdpi) SIZE=72 ;;
+              *xhdpi) SIZE=96 ;;
+              *xxhdpi) SIZE=144 ;;
+              *xxxhdpi) SIZE=192 ;;
+              *) SIZE=96 ;;
+            esac
+            convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$dir/ic_launcher.png" 2>/dev/null || true
+            convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$dir/ic_launcher_round.png" 2>/dev/null || true
+          done
 
-          if [ -f "package.json" ]; then
-            npm ci --prefer-offline || npm install
-            if grep -q '"build"' package.json; then
-              npm run build
-            fi
-          fi
+      # ----- 8. Ajouter Android -----
+      - name: Ajouter la plateforme Android
+        run: |
+          cd "$CORDOVA_DIR"
+          cordova platform add android || true
 
-          PKG_ID="${{ github.event.inputs.package_id }}"
-          [ -z "$PKG_ID" ] && PKG_ID="com.philtech.mobile"
-
-          CORDOVA_DIR="cordova-project-${{ github.event.inputs.build_id }}"
-          cordova create "$CORDOVA_DIR" "$PKG_ID" "${{ github.event.inputs.app_name }}"
-          rm -rf "$CORDOVA_DIR"/www/*
-
-          COPY_FROM="."
-          if [ -d "dist" ]; then
-            COPY_FROM="dist"
-          elif [ -d "build" ]; then
-            COPY_FROM="build"
-          elif [ -d "www" ]; then
-            COPY_FROM="www"
-          fi
-
-          mkdir -p "$CORDOVA_DIR"/www
-          find "$COPY_FROM" -maxdepth 1 -mindepth 1 ! -name node_modules ! -name .git \
-            -exec cp -r {} "$CORDOVA_DIR"/www/ \; 2>/dev/null || true
-
-          sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="SplashScreen" value="none" />\n</widget>#' "$CORDOVA_DIR"/config.xml
-
-          echo "SAVED_CORDOVA_DIR=$PWD/$CORDOVA_DIR" >> "$GITHUB_ENV"
-
-      - name: Add Cordova Android platform
+      # ----- 9. Build -----
+      - name: Builder l'APK / AAB
         run: |
           set -e
-          cd "$SAVED_CORDOVA_DIR"
-          cordova platform add android
+          cd "$CORDOVA_DIR"
 
-      - name: Build Cordova
-        run: |
-          set -e
-          cd "$SAVED_CORDOVA_DIR"
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
+          BUILD_TYPE="${{ github.event.inputs.build_type }}"
           FORMAT="${{ github.event.inputs.output_format }}"
+          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name "*.keystore" | head -1)
 
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+          if [ "$BUILD_TYPE" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
+            PASSWORD="${{ github.event.inputs.keystore_password }}"
+            ALIAS="${{ github.event.inputs.keystore_alias }}"
+
             if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              cordova build android --release -- --packageType=apk --keystore="$KEYSTORE_FILE" --storePassword="${{ github.event.inputs.keystore_password }}" --alias="${{ github.event.inputs.keystore_alias }}" --password="${{ github.event.inputs.keystore_password }}"
+              cordova build android --release -- --packageType=apk \
+                --keystore="$KEYSTORE_FILE" --storePassword="$PASSWORD" \
+                --alias="$ALIAS" --password="$PASSWORD"
             fi
             if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              cordova build android --release -- --packageType=bundle --keystore="$KEYSTORE_FILE" --storePassword="${{ github.event.inputs.keystore_password }}" --alias="${{ github.event.inputs.keystore_alias }}" --password="${{ github.event.inputs.keystore_password }}"
+              cordova build android --release -- --packageType=bundle \
+                --keystore="$KEYSTORE_FILE" --storePassword="$PASSWORD" \
+                --alias="$ALIAS" --password="$PASSWORD"
             fi
           else
             cordova build android --debug
           fi
 
-      - name: Collect artifacts
+      # ----- 10. Collecte des artefacts -----
+      - name: Collecter APK / AAB
+        id: collect
         run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
+          mkdir -p "$GITHUB_WORKSPACE/output"
+          find "$CORDOVA_DIR" -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          find "$CORDOVA_DIR" -name "*.aab" -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
+          ls -la "$GITHUB_WORKSPACE/output/" || echo "Aucun artefact"
 
-      - name: Upload build artifacts
+      - name: Upload des artefacts
         uses: actions/upload-artifact@v4
         with:
-          name: build-web-${{ github.event.inputs.build_id }}
+          name: web-apk-${{ github.event.inputs.build_id }}
           path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
+          retention-days: 7
 
-  # ============================================================
-  # JOB 3: BUILD CAPACITOR
-  # ============================================================
-  build-capacitor:
-    needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["angular","svelte","solidjs","preact","ionic","capacitor"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
+      - name: Upload du keystore généré
+        if: ${{ steps.keystore-gen.outputs.has_keystore == 'true' }}
+        uses: actions/upload-artifact@v4
         with:
           name: keystore-${{ github.event.inputs.build_id }}
+          path: ${{ steps.keystore-gen.outputs.keystore_path }}
+          retention-days: 30
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Cache Node modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: 🔍 ANALYSE DU PROJET CAPACITOR
-        id: analyze-capacitor
+      # ----- 11. Callback de notification -----
+      - name: Notifier le callback
+        if: always()
         run: |
-          echo "=== ANALYSE DU PROJET CAPACITOR ==="
-          cd src/
-          
-          HAS_CAPACITOR_JSON=$(find . -name "capacitor.config.json" -type f | head -1)
-          HAS_CAPACITOR_TS=$(find . -name "capacitor.config.ts" -type f | head -1)
-          HAS_CAPACITOR_JS=$(find . -name "capacitor.config.js" -type f | head -1)
-          HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
-          HAS_PACKAGE_JSON=$(find . -name "package.json" -type f | head -1)
-          HAS_INDEX_HTML=$(find . -name "index.html" -type f | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo "capacitor.config.json: ${HAS_CAPACITOR_JSON:+✅ OUI}${HAS_CAPACITOR_JSON:-❌ NON}"
-          echo "capacitor.config.ts: ${HAS_CAPACITOR_TS:+✅ OUI}${HAS_CAPACITOR_TS:-❌ NON}"
-          echo "capacitor.config.js: ${HAS_CAPACITOR_JS:+✅ OUI}${HAS_CAPACITOR_JS:-❌ NON}"
-          echo "dossier android/: ${HAS_ANDROID_DIR:+✅ OUI}${HAS_ANDROID_DIR:-❌ NON}"
-          echo "package.json: ${HAS_PACKAGE_JSON:+✅ OUI}${HAS_PACKAGE_JSON:-❌ NON}"
-          echo "index.html: ${HAS_INDEX_HTML:+✅ OUI}${HAS_INDEX_HTML:-❌ NON}"
-          
-          if [ -z "$HAS_INDEX_HTML" ]; then
-            echo "⚠️ Aucun index.html trouvé - création d'un fichier minimal"
-            mkdir -p www
-            cat > www/index.html << 'HTML_EOF'
-          <!DOCTYPE html>
-          <html>
-          <head>
-              <meta charset="UTF-8">
-              <meta name="viewport" content="width=device-width, initial-scale=1.0">
-              <title>${{ github.event.inputs.app_name }}</title>
-          </head>
-          <body>
-              <div style="text-align:center;padding:40px;font-family:Arial;">
-                  <h1>${{ github.event.inputs.app_name }}</h1>
-                  <p>✅ Application Capacitor compilée avec succès !</p>
-              </div>
-          </body>
-          </html>
-          HTML_EOF
-            echo "✅ index.html créé"
-          fi
+          APK_COUNT=$(find "$GITHUB_WORKSPACE/output/" -name "*.apk" 2>/dev/null | wc -l)
+          AAB_COUNT=$(find "$GITHUB_WORKSPACE/output/" -name "*.aab" 2>/dev/null | wc -l)
 
-      - name: Install Capacitor CLI
-        run: npm install -g @capacitor/cli
-
-      - name: Prepare Capacitor project
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "package.json" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-          echo "SAVED_PROJECT_ROOT=$PWD" >> "$GITHUB_ENV"
-
-          if [ ! -f "capacitor.config.ts" ] && [ ! -f "capacitor.config.json" ] && [ ! -f "capacitor.config.js" ]; then
-            npx cap init "${{ github.event.inputs.app_name }}" "${{ github.event.inputs.package_id || 'com.philtech.app' }}" --web-dir "www" 2>/dev/null || true
-          fi
-
-          npm ci --prefer-offline || npm install
-          if grep -q '"build"' package.json 2>/dev/null; then
-            npm run build
-          fi
-
-          if [ ! -d "android" ]; then
-            npx cap add android || true
-          fi
-
-      - name: Disable splash screen (Capacitor)
-        run: |
-          cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
-          if [ -f "capacitor.config.json" ]; then
-            node -e "
-              const fs = require('fs');
-              const cfg = JSON.parse(fs.readFileSync('capacitor.config.json'));
-              cfg.plugins = cfg.plugins || {};
-              cfg.plugins.SplashScreen = { launchShowDuration: 0, launchAutoHide: false };
-              fs.writeFileSync('capacitor.config.json', JSON.stringify(cfg, null, 2));
-            " || true
-          fi
-
-      - name: Sync and build Capacitor Android
-        run: |
-          set -e
-          cd "$SAVED_PROJECT_ROOT" 2>/dev/null || exit 0
-          npx cap sync android || true
-          if [ -d "android" ]; then
-            cd android
-            chmod +x gradlew
-            KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-            FORMAT="${{ github.event.inputs.output_format }}"
-
-            if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-              mkdir -p app
-              cat > app/signing.gradle << GRADLE_EOF
-          android {
-            signingConfigs {
-              release {
-                storeFile file("$KEYSTORE_FILE")
-                storePassword "${{ github.event.inputs.keystore_password }}"
-                keyAlias "${{ github.event.inputs.keystore_alias }}"
-                keyPassword "${{ github.event.inputs.keystore_password }}"
-              }
-            }
-            buildTypes {
-              release {
-                signingConfig signingConfigs.release
-              }
-            }
-          }
-          GRADLE_EOF
-              if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
-                echo "apply from: 'signing.gradle'" >> app/build.gradle
-              fi
-              if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-                ./gradlew assembleRelease
-              fi
-              if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-                ./gradlew bundleRelease
-              fi
-            else
-              ./gradlew assembleDebug
-            fi
-          fi
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-capacitor-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 4: BUILD REACT NATIVE
-  # ============================================================
-  build-react-native:
-    needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && needs.prepare.outputs.detected_type == 'react-native' && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-
-      - name: Cache Node modules
-        uses: actions/cache@v4
-        with:
-          path: ~/.npm
-          key: npm-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
-          restore-keys: |
-            npm-${{ runner.os }}-
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: 🔍 ANALYSE DU PROJET REACT NATIVE
-        id: analyze-rn
-        run: |
-          echo "=== ANALYSE DU PROJET REACT NATIVE ==="
-          cd src/
-          
-          HAS_PACKAGE_JSON=$(find . -name "package.json" -type f | head -1)
-          HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
-          HAS_EXPO=$(grep -l '"expo"' package.json 2>/dev/null | head -1)
-          HAS_METRO=$(find . -name "metro.config.js" -o -name "metro.config.ts" | head -1)
-          HAS_APP_JS=$(find . -name "App.js" -o -name "App.tsx" | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo "package.json: ${HAS_PACKAGE_JSON:+✅ OUI}${HAS_PACKAGE_JSON:-❌ NON}"
-          echo "dossier android/: ${HAS_ANDROID_DIR:+✅ OUI}${HAS_ANDROID_DIR:-❌ NON}"
-          echo "Expo: ${HAS_EXPO:+✅ OUI}${HAS_EXPO:-❌ NON}"
-          echo "Metro: ${HAS_METRO:+✅ OUI}${HAS_METRO:-❌ NON}"
-          echo "App.js/tsx: ${HAS_APP_JS:+✅ OUI}${HAS_APP_JS:-❌ NON}"
-
-      - name: Build React Native
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "package.json" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          npm ci --prefer-offline || npm install
-
-          if [ ! -d "android" ]; then
-            echo "android/ manquant - tentative de regeneration..."
-            if [ -f "package.json" ] && grep -q '"expo"' package.json; then
-              npx expo prebuild --platform android || true
-            else
-              npx react-native eject || npx react-native init app --skip-install || true
-            fi
-          fi
-
-          if [ -d "android" ]; then
-            cd android
-            chmod +x gradlew
-
-            KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-            FORMAT="${{ github.event.inputs.output_format }}"
-
-            if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-              mkdir -p app
-              cat > app/signing.gradle << GRADLE_EOF
-          android {
-            signingConfigs {
-              release {
-                storeFile file("$KEYSTORE_FILE")
-                storePassword "${{ github.event.inputs.keystore_password }}"
-                keyAlias "${{ github.event.inputs.keystore_alias }}"
-                keyPassword "${{ github.event.inputs.keystore_password }}"
-              }
-            }
-            buildTypes {
-              release {
-                signingConfig signingConfigs.release
-              }
-            }
-          }
-          GRADLE_EOF
-              if ! grep -q "signing.gradle" app/build.gradle 2>/dev/null; then
-                echo "apply from: 'signing.gradle'" >> app/build.gradle
-              fi
-              if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-                ./gradlew assembleRelease
-              fi
-              if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-                ./gradlew bundleRelease
-              fi
-            else
-              ./gradlew assembleDebug
-            fi
-          fi
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-react-native-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-    # ============================================================
-  # JOB 5: BUILD KOTLIN / JAVA - VERSION FINALE ROBUSTE
-  # ============================================================
-  build-kotlin-java:
-    needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["kotlin","java","kotlin-multiplatform"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: 🔍 ANALYSE DU PROJET KOTLIN/JAVA
-        id: analyze-kotlin
-        run: |
-          echo "=== ANALYSE DU CODE SOURCE KOTLIN/JAVA ==="
-          
-          cd src/
-          
-          echo "📁 Structure complète de src/ :"
-          find . -type f -name "*.kt" -o -name "*.java" -o -name "*.gradle*" -o -name "AndroidManifest.xml" 2>/dev/null | head -20
-          
-          HAS_ROOT_GRADLE=$(find . -maxdepth 1 -name "build.gradle*" -type f | head -1)
-          HAS_ROOT_SETTINGS=$(find . -maxdepth 1 -name "settings.gradle*" -type f | head -1)
-          HAS_GRADLE=$(find . -name "build.gradle*" -type f | head -1)
-          HAS_SETTINGS=$(find . -name "settings.gradle*" -type f | head -1)
-          HAS_ANDROID_MANIFEST=$(find . -name "AndroidManifest.xml" -type f | head -1)
-          HAS_ACTIVITY=$(find . -name "*.kt" -o -name "*.java" | xargs grep -l "Activity" 2>/dev/null | head -1)
-          HAS_MAIN=$(find . -name "*.kt" -o -name "*.java" | xargs grep -l "main" 2>/dev/null | head -1)
-          HAS_RES=$(find . -type d -name "res" | head -1)
-          HAS_APP_DIR=$(find . -type d -name "app" | head -1)
-          HAS_GRADLE_WRAPPER=$(find . -name "gradlew" -type f | head -1)
-          
-          # ✅ Détection de la version Gradle requise
-          GRADLE_VERSION="8.6"
-          
-          # Vérifier dans gradle-wrapper.properties
-          if [ -f "gradle/wrapper/gradle-wrapper.properties" ]; then
-            WRAPPER_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
-            if [ -n "$WRAPPER_VERSION" ]; then
-              echo "📦 Gradle wrapper version: $WRAPPER_VERSION"
-              GRADLE_VERSION="$WRAPPER_VERSION"
-            fi
-          fi
-          
-          # Vérifier la version du plugin Android Gradle
-          if [ -n "$HAS_GRADLE" ]; then
-            AGP_VERSION=$(grep -o "com.android.tools.build:gradle:[0-9.]*" "$HAS_GRADLE" 2>/dev/null | head -1 | cut -d: -f3)
-            if [ -n "$AGP_VERSION" ]; then
-              echo "📦 Android Gradle Plugin version: $AGP_VERSION"
-              if [[ "$AGP_VERSION" == "8.5"* ]] || [[ "$AGP_VERSION" == "8.6"* ]] || [[ "$AGP_VERSION" == "8.7"* ]] || [[ "$AGP_VERSION" == "8.8"* ]]; then
-                GRADLE_VERSION="8.10.2"
-              elif [[ "$AGP_VERSION" == "8.9"* ]] || [[ "$AGP_VERSION" == "8.10"* ]] || [[ "$AGP_VERSION" == "8.11"* ]]; then
-                GRADLE_VERSION="9.0"
-              fi
-            fi
-          fi
-          
-          echo "✅ Version Gradle sélectionnée: $GRADLE_VERSION"
-          
-          KT_COUNT=$(find . -name "*.kt" -type f | wc -l)
-          JAVA_COUNT=$(find . -name "*.java" -type f | wc -l)
-          SRC_MAIN_KT=$(find . -path "*/src/main/*.kt" -type f | wc -l)
-          SRC_MAIN_JAVA=$(find . -path "*/src/main/*.java" -type f | wc -l)
-          HAS_SRC_MAIN=$(find . -path "*/src/main" -type d | head -1)
-          
-          echo "📊 RÉSULTATS DE L'ANALYSE :"
-          echo "📁 Fichiers Kotlin: $KT_COUNT"
-          echo "📁 Fichiers Java: $JAVA_COUNT"
-          echo "📁 Kotlin dans src/main/: $SRC_MAIN_KT"
-          echo "📁 Java dans src/main/: $SRC_MAIN_JAVA"
-          echo "📁 Dossier src/main/: ${HAS_SRC_MAIN:+✅ OUI}${HAS_SRC_MAIN:-❌ NON}"
-          echo "📁 build.gradle root: ${HAS_ROOT_GRADLE:+✅ OUI}${HAS_ROOT_GRADLE:-❌ NON}"
-          echo "📁 settings.gradle root: ${HAS_ROOT_SETTINGS:+✅ OUI}${HAS_ROOT_SETTINGS:-❌ NON}"
-          echo "📁 build.gradle: ${HAS_GRADLE:+✅ OUI}${HAS_GRADLE:-❌ NON}"
-          echo "📁 settings.gradle: ${HAS_SETTINGS:+✅ OUI}${HAS_SETTINGS:-❌ NON}"
-          echo "📁 AndroidManifest.xml: ${HAS_ANDROID_MANIFEST:+✅ OUI}${HAS_ANDROID_MANIFEST:-❌ NON}"
-          echo "📁 Activités Android: ${HAS_ACTIVITY:+✅ OUI}${HAS_ACTIVITY:-❌ NON}"
-          echo "📁 Méthode main(): ${HAS_MAIN:+✅ OUI}${HAS_MAIN:-❌ NON}"
-          echo "📁 Dossier res/: ${HAS_RES:+✅ OUI}${HAS_RES:-❌ NON}"
-          echo "📁 Dossier app/: ${HAS_APP_DIR:+✅ OUI}${HAS_APP_DIR:-❌ NON}"
-          echo "📁 Gradle wrapper: ${HAS_GRADLE_WRAPPER:+✅ OUI}${HAS_GRADLE_WRAPPER:-❌ NON}"
-          
-          PROJECT_TYPE="unknown"
-          
-          if [ -n "$HAS_ROOT_GRADLE" ] && [ -n "$HAS_ROOT_SETTINGS" ] && [ -n "$HAS_ANDROID_MANIFEST" ]; then
-            PROJECT_TYPE="android-valid"
-            echo "✅ Projet Android valide"
-          elif [ -n "$HAS_GRADLE" ] && [ -n "$HAS_ANDROID_MANIFEST" ] && [ -n "$HAS_ACTIVITY" ]; then
-            PROJECT_TYPE="android-incomplete"
-            echo "⚠️ Projet Android incomplet"
-          elif [ -n "$HAS_GRADLE" ]; then
-            PROJECT_TYPE="gradle-only"
-            echo "⚠️ Projet Gradle seul"
-          elif [ -n "$HAS_MAIN" ] && { [ "$KT_COUNT" -gt 0 ] || [ "$JAVA_COUNT" -gt 0 ]; }; then
-            PROJECT_TYPE="kotlin-java-source"
-            echo "✅ Code source pur (avec main)"
-          elif [ "$KT_COUNT" -gt 0 ] || [ "$JAVA_COUNT" -gt 0 ]; then
-            PROJECT_TYPE="kotlin-java-source-no-main"
-            echo "✅ Code source pur (sans main)"
+          if [ "$APK_COUNT" -gt 0 ] || [ "$AAB_COUNT" -gt 0 ]; then
+            STATE="success"
+            MESSAGE="✅ Build terminé avec succès"
           else
-            PROJECT_TYPE="empty"
-            echo "⚠️ Projet vide"
-          fi
-          
-          echo "project_type=$PROJECT_TYPE" >> $GITHUB_OUTPUT
-          echo "gradle_version=$GRADLE_VERSION" >> $GITHUB_OUTPUT
-          echo "PROJECT_PATH=$PWD" >> $GITHUB_ENV
-
-      - name: 🏗️ BUILD - Projet Android valide
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-valid' }}
-        run: |
-          echo "=== BUILD PROJET ANDROID VALIDE ==="
-          cd "$PROJECT_PATH"
-          
-          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
-          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
-          
-          # ✅ Télécharger manuellement le wrapper Gradle
-          if [ ! -f "gradlew" ]; then
-            echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
-            mkdir -p gradle/wrapper
-            cat > gradle/wrapper/gradle-wrapper.properties << EOF
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-            
-            cat > gradlew << 'GRADLEW_SCRIPT'
-          #!/usr/bin/env bash
-          
-          # Fonction pour télécharger Gradle avec unzip non-interactif
-          download_gradle() {
-              local version=$1
-              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
-              local gradle_home="$gradle_dir/gradle-$version"
-              
-              # Vérifier si déjà téléchargé
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version déjà téléchargé"
-                  return 0
-              fi
-              
-              echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$gradle_dir"
-              
-              # Télécharger le zip
-              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              
-              # Extraire avec unzip non-interactif (-q pour quiet, -o pour overwrite)
-              echo "📦 Extraction de Gradle $version..."
-              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
-              
-              # Nettoyer
-              rm /tmp/gradle-$version-bin.zip
-              
-              # Vérifier
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version installé avec succès"
-              else
-                  echo "❌ Échec de l'installation de Gradle $version"
-                  return 1
-              fi
-          }
-          
-          # Extraire la version du wrapper
-          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
-          
-          # Télécharger Gradle
-          download_gradle "$GRADLE_VERSION"
-          
-          # Définir GRADLE_HOME
-          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          
-          # Vérifier et exécuter Gradle
-          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
-              exec "$GRADLE_HOME/bin/gradle" "$@"
-          else
-              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
-              exit 1
-          fi
-          GRADLEW_SCRIPT
-            chmod +x gradlew
-          fi
-          
-          # S'assurer que gradle.properties existe
-          if [ ! -f "gradle.properties" ]; then
-            cat > gradle.properties << EOF
-          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-          fi
-          
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-          FORMAT="${{ github.event.inputs.output_format }}"
-          
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            echo "🔑 Build RELEASE..."
-            # Configurer le signing
-            cat > app/signing.gradle << GRADLE_EOF
-          android {
-              signingConfigs {
-                  release {
-                      storeFile file("$KEYSTORE_FILE")
-                      storePassword "${{ github.event.inputs.keystore_password }}"
-                      keyAlias "${{ github.event.inputs.keystore_alias }}"
-                      keyPassword "${{ github.event.inputs.keystore_password }}"
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.release
-                  }
-              }
-          }
-          GRADLE_EOF
-            echo "apply from: 'signing.gradle'" >> app/build.gradle
-            
-            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew assembleRelease --stacktrace || echo "⚠️ assembleRelease a échoué"
-            fi
-            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew bundleRelease --stacktrace || echo "⚠️ bundleRelease a échoué"
-            fi
-          else
-            echo "🔨 Build DEBUG..."
-            ./gradlew assembleDebug --stacktrace || echo "⚠️ assembleDebug a échoué"
+            STATE="error"
+            MESSAGE="❌ Build échoué - aucun artefact généré"
           fi
 
-      - name: 🏗️ RECONSTRUCTION - Projet Android complet
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'android-incomplete' || steps.analyze-kotlin.outputs.project_type == 'gradle-only' }}
-        run: |
-          echo "=== RECONSTRUCTION D'UN PROJET ANDROID COMPLET ==="
-          
-          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
-          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
-          
-          # Créer un nouveau projet Android propre
-          mkdir -p android-project
-          cd android-project
-          
-          # build.gradle (root)
-          cat > build.gradle << 'EOF'
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.4'
-              }
-          }
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          task clean(type: Delete) {
-              delete rootProject.buildDir
-          }
-          EOF
-          
-          # settings.gradle
-          echo 'include ":app"' > settings.gradle
-          
-          # gradle.properties
-          cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-          
-          # app/build.gradle
-          mkdir -p app
-          cat > app/build.gradle << 'APP_EOF'
-          apply plugin: 'com.android.application'
-          
-          android {
-              compileSdk 34
-              
-              defaultConfig {
-                  applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
-                  minSdk 24
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              
-              buildTypes {
-                  release {
-                      minifyEnabled false
-                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-                  }
-              }
-              
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          
-          dependencies {
-              implementation 'androidx.appcompat:appcompat:1.6.1'
-          }
-          APP_EOF
-          
-          # Copier le code source s'il existe
-          mkdir -p app/src/main/java
-          if [ -d "$PROJECT_PATH/app/src" ]; then
-            cp -r "$PROJECT_PATH/app/src"/* app/src/main/java/ 2>/dev/null || true
-          fi
-          
-          # AndroidManifest.xml
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml << 'MANIFEST_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}"
-                  android:icon="@mipmap/ic_launcher">
-                  <activity android:name=".MainActivity">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          MANIFEST_EOF
-          
-          # MainActivity
-          PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
-          mkdir -p app/src/main/java/$PKG_PATH
-          cat > app/src/main/java/$PKG_PATH/MainActivity.java << 'ACTIVITY_EOF'
-          package ${{ github.event.inputs.package_id || 'com.example.app' }};
-          
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.widget.TextView;
-          
-          public class MainActivity extends Activity {
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  TextView tv = new TextView(this);
-                  tv.setText("✅ APK construit avec succès !\n\n📱 App: ${{ github.event.inputs.app_name }}\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}");
-                  tv.setTextSize(20);
-                  tv.setPadding(20, 20, 20, 20);
-                  setContentView(tv);
-              }
-          }
-          ACTIVITY_EOF
-          
-          # ✅ TÉLÉCHARGER manuellement le wrapper Gradle
-          echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
-          mkdir -p gradle/wrapper
-          cat > gradle/wrapper/gradle-wrapper.properties << EOF
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-          
-          cat > gradlew << 'GRADLEW_SCRIPT'
-          #!/usr/bin/env bash
-          
-          # Fonction pour télécharger Gradle avec unzip non-interactif
-          download_gradle() {
-              local version=$1
-              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
-              local gradle_home="$gradle_dir/gradle-$version"
-              
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version déjà téléchargé"
-                  return 0
-              fi
-              
-              echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$gradle_dir"
-              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              echo "📦 Extraction de Gradle $version..."
-              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
-              rm /tmp/gradle-$version-bin.zip
-              
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version installé avec succès"
-              else
-                  echo "❌ Échec de l'installation de Gradle $version"
-                  return 1
-              fi
-          }
-          
-          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
-          download_gradle "$GRADLE_VERSION"
-          
-          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
-              exec "$GRADLE_HOME/bin/gradle" "$@"
-          else
-              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
-              exit 1
-          fi
-          GRADLEW_SCRIPT
-          chmod +x gradlew
-          
-          echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
+          APK_LIST=$(find "$GITHUB_WORKSPACE/output/" -name "*.apk" -exec basename {} \; 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+          AAB_LIST=$(find "$GITHUB_WORKSPACE/output/" -name "*.aab" -exec basename {} \; 2>/dev/null | tr '\n' ',' | sed 's/,$//')
 
-      - name: 🏗️ BUILD - Code source pur
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source' || steps.analyze-kotlin.outputs.project_type == 'kotlin-java-source-no-main' }}
-        run: |
-          echo "=== BUILD CODE KOTLIN/JAVA PUR ==="
-          
-          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
-          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
-          
-          # Créer un nouveau projet Android propre
-          mkdir -p android-project
-          cd android-project
-          
-          # build.gradle (root)
-          cat > build.gradle << 'EOF'
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.4'
-              }
-          }
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          task clean(type: Delete) {
-              delete rootProject.buildDir
-          }
-          EOF
-          
-          # settings.gradle
-          echo 'include ":app"' > settings.gradle
-          
-          # gradle.properties
-          cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-          
-          # app/build.gradle
-          mkdir -p app
-          cat > app/build.gradle << 'APP_EOF'
-          apply plugin: 'com.android.application'
-          
-          android {
-              compileSdk 34
-              
-              defaultConfig {
-                  applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
-                  minSdk 24
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              
-              buildTypes {
-                  release {
-                      minifyEnabled false
-                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-                  }
-              }
-              
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          
-          dependencies {
-              implementation 'androidx.appcompat:appcompat:1.6.1'
-          }
-          APP_EOF
-          
-          # Copier le code source
-          mkdir -p app/src/main/java
-          cp -r "$PROJECT_PATH"/* app/src/main/java/ 2>/dev/null || true
-          
-          # AndroidManifest.xml
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml << 'MANIFEST_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}"
-                  android:icon="@mipmap/ic_launcher">
-                  <activity android:name=".MainActivity">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          MANIFEST_EOF
-          
-          # MainActivity
-          PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
-          mkdir -p app/src/main/java/$PKG_PATH
-          cat > app/src/main/java/$PKG_PATH/MainActivity.java << 'ACTIVITY_EOF'
-          package ${{ github.event.inputs.package_id || 'com.example.app' }};
-          
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.widget.TextView;
-          
-          public class MainActivity extends Activity {
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  TextView tv = new TextView(this);
-                  tv.setText("✅ Code compilé avec succès !\n\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}\n📱 App: ${{ github.event.inputs.app_name }}");
-                  tv.setTextSize(20);
-                  tv.setPadding(20, 20, 20, 20);
-                  setContentView(tv);
-              }
-          }
-          ACTIVITY_EOF
-          
-          # ✅ TÉLÉCHARGER manuellement le wrapper Gradle
-          echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
-          mkdir -p gradle/wrapper
-          cat > gradle/wrapper/gradle-wrapper.properties << EOF
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-          
-          cat > gradlew << 'GRADLEW_SCRIPT'
-          #!/usr/bin/env bash
-          
-          download_gradle() {
-              local version=$1
-              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
-              local gradle_home="$gradle_dir/gradle-$version"
-              
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version déjà téléchargé"
-                  return 0
-              fi
-              
-              echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$gradle_dir"
-              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              echo "📦 Extraction de Gradle $version..."
-              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
-              rm /tmp/gradle-$version-bin.zip
-              
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version installé avec succès"
-              else
-                  echo "❌ Échec de l'installation de Gradle $version"
-                  return 1
-              fi
-          }
-          
-          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
-          download_gradle "$GRADLE_VERSION"
-          
-          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
-              exec "$GRADLE_HOME/bin/gradle" "$@"
-          else
-              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
-              exit 1
-          fi
-          GRADLEW_SCRIPT
-          chmod +x gradlew
-          
-          echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
-
-      - name: 🏗️ BUILD - Projet vide
-        if: ${{ steps.analyze-kotlin.outputs.project_type == 'empty' }}
-        run: |
-          echo "=== PROJET VIDE - CRÉATION D'UN PROJET ANDROID MINIMAL ==="
-          
-          GRADLE_VERSION="${{ steps.analyze-kotlin.outputs.gradle_version }}"
-          echo "📦 Utilisation de Gradle $GRADLE_VERSION"
-          
-          # Créer un nouveau projet Android propre
-          mkdir -p android-project
-          cd android-project
-          
-          # build.gradle (root)
-          cat > build.gradle << 'EOF'
-          buildscript {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-              dependencies {
-                  classpath 'com.android.tools.build:gradle:8.1.4'
-              }
-          }
-          allprojects {
-              repositories {
-                  google()
-                  mavenCentral()
-              }
-          }
-          task clean(type: Delete) {
-              delete rootProject.buildDir
-          }
-          EOF
-          
-          # settings.gradle
-          echo 'include ":app"' > settings.gradle
-          
-          # gradle.properties
-          cat > gradle.properties << 'EOF'
-          org.gradle.jvmargs=-Xmx2048m -XX:MaxMetaspaceSize=512m
-          android.useAndroidX=true
-          android.enableJetifier=true
-          EOF
-          
-          # app/build.gradle
-          mkdir -p app
-          cat > app/build.gradle << 'APP_EOF'
-          apply plugin: 'com.android.application'
-          
-          android {
-              compileSdk 34
-              
-              defaultConfig {
-                  applicationId "${{ github.event.inputs.package_id || 'com.example.app' }}"
-                  minSdk 24
-                  targetSdk 34
-                  versionCode 1
-                  versionName "1.0"
-              }
-              
-              buildTypes {
-                  release {
-                      minifyEnabled false
-                      proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
-                  }
-              }
-              
-              compileOptions {
-                  sourceCompatibility JavaVersion.VERSION_17
-                  targetCompatibility JavaVersion.VERSION_17
-              }
-          }
-          
-          dependencies {
-              implementation 'androidx.appcompat:appcompat:1.6.1'
-          }
-          APP_EOF
-          
-          # AndroidManifest.xml
-          mkdir -p app/src/main
-          cat > app/src/main/AndroidManifest.xml << 'MANIFEST_EOF'
-          <?xml version="1.0" encoding="utf-8"?>
-          <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-              package="${{ github.event.inputs.package_id || 'com.example.app' }}">
-              <application android:label="${{ github.event.inputs.app_name }}"
-                  android:icon="@mipmap/ic_launcher">
-                  <activity android:name=".MainActivity">
-                      <intent-filter>
-                          <action android:name="android.intent.action.MAIN" />
-                          <category android:name="android.intent.category.LAUNCHER" />
-                      </intent-filter>
-                  </activity>
-              </application>
-          </manifest>
-          MANIFEST_EOF
-          
-          # MainActivity
-          PKG_PATH=$(echo "${{ github.event.inputs.package_id || 'com.example.app' }}" | tr '.' '/')
-          mkdir -p app/src/main/java/$PKG_PATH
-          cat > app/src/main/java/$PKG_PATH/MainActivity.java << 'ACTIVITY_EOF'
-          package ${{ github.event.inputs.package_id || 'com.example.app' }};
-          
-          import android.app.Activity;
-          import android.os.Bundle;
-          import android.widget.TextView;
-          
-          public class MainActivity extends Activity {
-              @Override
-              protected void onCreate(Bundle savedInstanceState) {
-                  super.onCreate(savedInstanceState);
-                  TextView tv = new TextView(this);
-                  tv.setText("✅ Application Android minimal\n\n📱 App: ${{ github.event.inputs.app_name }}\n📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}");
-                  tv.setTextSize(20);
-                  tv.setPadding(20, 20, 20, 20);
-                  setContentView(tv);
-              }
-          }
-          ACTIVITY_EOF
-          
-          # ✅ TÉLÉCHARGER manuellement le wrapper Gradle
-          echo "📦 Téléchargement manuel du wrapper Gradle $GRADLE_VERSION..."
-          mkdir -p gradle/wrapper
-          cat > gradle/wrapper/gradle-wrapper.properties << EOF
-          distributionBase=GRADLE_USER_HOME
-          distributionPath=wrapper/dists
-          distributionUrl=https\://services.gradle.org/distributions/gradle-$GRADLE_VERSION-bin.zip
-          zipStoreBase=GRADLE_USER_HOME
-          zipStorePath=wrapper/dists
-          EOF
-          
-          cat > gradlew << 'GRADLEW_SCRIPT'
-          #!/usr/bin/env bash
-          
-          download_gradle() {
-              local version=$1
-              local gradle_dir="$HOME/.gradle/wrapper/dists/gradle-$version-bin"
-              local gradle_home="$gradle_dir/gradle-$version"
-              
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version déjà téléchargé"
-                  return 0
-              fi
-              
-              echo "📦 Téléchargement de Gradle $version..."
-              mkdir -p "$gradle_dir"
-              curl -sSL "https://services.gradle.org/distributions/gradle-$version-bin.zip" -o /tmp/gradle-$version-bin.zip
-              echo "📦 Extraction de Gradle $version..."
-              unzip -q -o /tmp/gradle-$version-bin.zip -d "$gradle_dir"
-              rm /tmp/gradle-$version-bin.zip
-              
-              if [ -f "$gradle_home/bin/gradle" ]; then
-                  echo "✅ Gradle $version installé avec succès"
-              else
-                  echo "❌ Échec de l'installation de Gradle $version"
-                  return 1
-              fi
-          }
-          
-          GRADLE_VERSION=$(grep "distributionUrl" gradle/wrapper/gradle-wrapper.properties | grep -o "gradle-[0-9.]*" | head -1 | cut -d- -f2)
-          download_gradle "$GRADLE_VERSION"
-          
-          GRADLE_HOME="$HOME/.gradle/wrapper/dists/gradle-$GRADLE_VERSION-bin/gradle-$GRADLE_VERSION"
-          if [ -f "$GRADLE_HOME/bin/gradle" ]; then
-              exec "$GRADLE_HOME/bin/gradle" "$@"
-          else
-              echo "❌ Gradle $GRADLE_VERSION n'a pas pu être trouvé"
-              exit 1
-          fi
-          GRADLEW_SCRIPT
-          chmod +x gradlew
-          
-          echo "ANDROID_PROJECT_DIR=$PWD" >> $GITHUB_ENV
-
-      - name: 🔨 BUILD DU PROJET ANDROID RECONSTRUIT
-        if: ${{ steps.analyze-kotlin.outputs.project_type != 'android-valid' }}
-        run: |
-          cd "$ANDROID_PROJECT_DIR"
-          
-          echo "🔨 Lancement du build..."
-          echo "📦 Utilisation du wrapper Gradle:"
-          ./gradlew --version | head -3 || echo "⚠️ Erreur lors de la vérification du wrapper"
-          
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-          FORMAT="${{ github.event.inputs.output_format }}"
-          
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            echo "🔑 Build RELEASE..."
-            # Configurer le signing
-            cat > app/signing.gradle << GRADLE_EOF
-          android {
-              signingConfigs {
-                  release {
-                      storeFile file("$KEYSTORE_FILE")
-                      storePassword "${{ github.event.inputs.keystore_password }}"
-                      keyAlias "${{ github.event.inputs.keystore_alias }}"
-                      keyPassword "${{ github.event.inputs.keystore_password }}"
-                  }
-              }
-              buildTypes {
-                  release {
-                      signingConfig signingConfigs.release
-                  }
-              }
-          }
-          GRADLE_EOF
-            echo "apply from: 'signing.gradle'" >> app/build.gradle
-            
-            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew assembleRelease --stacktrace || echo "⚠️ assembleRelease a échoué"
-            fi
-            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              ./gradlew bundleRelease --stacktrace || echo "⚠️ bundleRelease a échoué"
-            fi
-          else
-            echo "🔨 Build DEBUG..."
-            ./gradlew assembleDebug --stacktrace || echo "⚠️ assembleDebug a échoué"
-          fi
-
-      - name: 📦 COLLECTE DES ARTIFACTS
-        run: |
-          echo "=== RECHERCHE DES APK/AAB ==="
-          
-          mkdir -p $GITHUB_WORKSPACE/output
-          
-          echo "🔍 Recherche dans tout le workspace..."
-          find $GITHUB_WORKSPACE -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
-            echo "📱 Fichier trouvé: $file"
-            cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-          done
-          
-          if [ -n "$ANDROID_PROJECT_DIR" ]; then
-            echo "🔍 Recherche dans android-project..."
-            find $ANDROID_PROJECT_DIR -name "*.apk" -o -name "*.aab" 2>/dev/null | while read file; do
-              echo "📱 Fichier trouvé dans android-project: $file"
-              cp -v "$file" $GITHUB_WORKSPACE/output/ 2>/dev/null || true
-            done
-          fi
-          
-          echo "=== CONTENU DE output/ ==="
-          ls -la $GITHUB_WORKSPACE/output/ || echo "❌ output/ est vide"
-          
-          if [ -z "$(ls -A $GITHUB_WORKSPACE/output/ 2>/dev/null)" ]; then
-            echo "⚠️ Aucun APK/AAB trouvé"
-            echo "Build executed but no APK/AAB were generated" > $GITHUB_WORKSPACE/output/build.log
-          fi
-
-      - name: 📤 Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-kotlin-java-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  
-  # ============================================================
-  # JOB 6: BUILD FLUTTER
-  # ============================================================
-  build-flutter:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-
-      - name: 🔍 ANALYSE DU PROJET FLUTTER
-        id: analyze-flutter
-        run: |
-          echo "=== ANALYSE DU PROJET FLUTTER ==="
-          cd src/
-          
-          HAS_PUBSPEC=$(find . -name "pubspec.yaml" -type f | head -1)
-          HAS_ANDROID_DIR=$(find . -type d -name "android" | head -1)
-          HAS_LIB_DIR=$(find . -type d -name "lib" | head -1)
-          HAS_MAIN_DART=$(find . -path "*/lib/main.dart" -type f | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo "pubspec.yaml: ${HAS_PUBSPEC:+✅ OUI}${HAS_PUBSPEC:-❌ NON}"
-          echo "dossier android/: ${HAS_ANDROID_DIR:+✅ OUI}${HAS_ANDROID_DIR:-❌ NON}"
-          echo "dossier lib/: ${HAS_LIB_DIR:+✅ OUI}${HAS_LIB_DIR:-❌ NON}"
-          echo "lib/main.dart: ${HAS_MAIN_DART:+✅ OUI}${HAS_MAIN_DART:-❌ NON}"
-
-      - name: Cache Flutter dependencies
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.pub-cache
-            ${{ github.workspace }}/src/**/.dart_tool
-            ${{ github.workspace }}/src/**/pubspec.lock
-          key: flutter-deps-${{ hashFiles('**/pubspec.lock') }}
-          restore-keys: |
-            flutter-deps-
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
-
-      - name: Build Flutter
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          if [ ! -d "android" ]; then
-            flutter config --enable-android
-            flutter create --platforms=android --overwrite . || true
-          fi
-
-          if [ ! -f "lib/main.dart" ]; then
-            mkdir -p lib
-            cat > lib/main.dart << 'DART_EOF'
-          import 'package:flutter/material.dart';
-          
-          void main() { runApp(const MyApp()); }
-          
-          class MyApp extends StatelessWidget {
-            const MyApp({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: '${{ github.event.inputs.app_name }}',
-                theme: ThemeData(primarySwatch: Colors.blue),
-                home: const MyHomePage(),
-              );
-            }
-          }
-          
-          class MyHomePage extends StatelessWidget {
-            const MyHomePage({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(title: Text('${{ github.event.inputs.app_name }}')),
-                body: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text('✅ Application Flutter'),
-                      const SizedBox(height: 20),
-                      Text('📱 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}'),
-                    ],
-                  ),
-                ),
-              );
-            }
-          }
-          DART_EOF
-            echo "✅ lib/main.dart créé"
-          fi
-
-          flutter pub get || flutter pub upgrade --major-versions || true
-
-          FORMAT="${{ github.event.inputs.output_format }}"
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            mkdir -p android
-            cat > android/key.properties << EOF
-          storePassword=${{ github.event.inputs.keystore_password }}
-          keyPassword=${{ github.event.inputs.keystore_password }}
-          keyAlias=${{ github.event.inputs.keystore_alias }}
-          storeFile=$KEYSTORE_FILE
-          EOF
-            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              flutter build apk --release || echo "⚠️ Build APK échoué"
-            fi
-            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              flutter build appbundle --release || echo "⚠️ Build AAB échoué"
-            fi
-          else
-            flutter build apk --debug || echo "⚠️ Build Debug échoué"
-          fi
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-flutter-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 7: BUILD PYTHON (Android)
-  # ============================================================
-  build-python:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'android' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 🔍 ANALYSE DU PROJET PYTHON
-        id: analyze-python
-        run: |
-          echo "=== ANALYSE DU PROJET PYTHON ==="
-          cd src/
-          
-          HAS_MAIN_PY=$(find . -name "main.py" -type f | head -1)
-          HAS_APP_PY=$(find . -name "app.py" -type f | head -1)
-          HAS_BUILDOZER=$(find . -name "buildozer.spec" -type f | head -1)
-          HAS_REQUIREMENTS=$(find . -name "requirements.txt" -type f | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo "main.py: ${HAS_MAIN_PY:+✅ OUI}${HAS_MAIN_PY:-❌ NON}"
-          echo "app.py: ${HAS_APP_PY:+✅ OUI}${HAS_APP_PY:-❌ NON}"
-          echo "buildozer.spec: ${HAS_BUILDOZER:+✅ OUI}${HAS_BUILDOZER:-❌ NON}"
-          echo "requirements.txt: ${HAS_REQUIREMENTS:+✅ OUI}${HAS_REQUIREMENTS:-❌ NON}"
-          
-          if [ -z "$HAS_MAIN_PY" ] && [ -z "$HAS_APP_PY" ]; then
-            echo "⚠️ Aucun fichier Python trouvé - création d'un main.py minimal"
-            cat > main.py << 'PYTHON_EOF'
-          def main():
-              print("✅ Application Python compilée avec succès !")
-              print(f"📱 App: ${{ github.event.inputs.app_name }}")
-              print(f"📦 Package: ${{ github.event.inputs.package_id || 'com.example.app' }}")
-          
-          if __name__ == "__main__":
-              main()
-          PYTHON_EOF
-            echo "✅ main.py créé"
-          fi
-
-      - name: Cache pip / buildozer
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cache/pip
-            ~/.buildozer
-          key: pip-buildozer-${{ runner.os }}-${{ hashFiles('**/requirements.txt', '**/pyproject.toml', '**/buildozer.spec') }}
-          restore-keys: |
-            pip-buildozer-${{ runner.os }}-
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install native build dependencies
-        run: |
-          sudo apt-get update -y
-          sudo apt-get install -y \
-            build-essential autoconf libtool pkg-config \
-            zlib1g-dev libncurses5-dev libncursesw5-dev \
-            cmake libffi-dev libssl-dev unzip
-
-      - name: Build with Buildozer
-        run: |
-          set -eu
-          cd src/
-          PROJECT_ROOT=$(find . -name "*.py" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          if [ ! -f "buildozer.spec" ]; then
-            PKG_ID="${{ github.event.inputs.package_id }}"
-            [ -z "$PKG_ID" ] && PKG_ID="com.philtech.app"
-            cat > buildozer.spec << SPEC_EOF
-          [app]
-          title = ${{ github.event.inputs.app_name }}
-          package.name = $(echo "$PKG_ID" | rev | cut -d. -f1 | rev)
-          package.domain = $(echo "$PKG_ID" | rev | cut -d. -f2- | rev)
-          source.dir = .
-          source.include_exts = py,png,jpg,kv,atlas,json,ttf
-          version = 1.0
-          requirements = python3
-          orientation = portrait
-          fullscreen = 0
-          android.permissions = INTERNET
-          android.api = 34
-          android.minapi = 24
-          android.archs = arm64-v8a
-          android.allow_backup = True
-          [buildozer]
-          log_level = 2
-          warn_on_root = 0
-          SPEC_EOF
-          fi
-
-          pip install --upgrade pip
-          pip install --upgrade buildozer cython
-
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            export P4A_RELEASE_KEYSTORE="$KEYSTORE_FILE"
-            export P4A_RELEASE_KEYSTORE_PASSWD="${{ github.event.inputs.keystore_password }}"
-            export P4A_RELEASE_KEYALIAS="${{ github.event.inputs.keystore_alias }}"
-            export P4A_RELEASE_KEYALIAS_PASSWD="${{ github.event.inputs.keystore_password }}"
-            yes | buildozer -v android release || echo "⚠️ Buildozer release échoué"
-          else
-            yes | buildozer -v android debug || echo "⚠️ Buildozer debug échoué"
-          fi
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-python-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 8: BUILD .NET MAUI
-  # ============================================================
-  build-dotnet:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'android' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: 🔍 ANALYSE DU PROJET .NET
-        id: analyze-dotnet
-        run: |
-          echo "=== ANALYSE DU PROJET .NET ==="
-          cd src/
-          
-          HAS_CSPROJ=$(find . -name "*.csproj" -type f | head -1)
-          HAS_SLN=$(find . -name "*.sln" -type f | head -1)
-          HAS_MAUI=$(grep -l "MauiApp" $HAS_CSPROJ 2>/dev/null | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo ".csproj: ${HAS_CSPROJ:+✅ OUI}${HAS_CSPROJ:-❌ NON}"
-          echo ".sln: ${HAS_SLN:+✅ OUI}${HAS_SLN:-❌ NON}"
-          echo "MAUI: ${HAS_MAUI:+✅ OUI}${HAS_MAUI:-❌ NON}"
-          
-          if [ -z "$HAS_CSPROJ" ]; then
-            echo "⚠️ Aucun .csproj trouvé - création d'un projet MAUI minimal"
-            dotnet new maui -n "${{ github.event.inputs.app_name }}" -o . || echo "⚠️ Création MAUI échouée"
-          fi
-
-      - name: Cache .NET packages
-        uses: actions/cache@v4
-        with:
-          path: ~/.nuget/packages
-          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj') }}
-          restore-keys: |
-            nuget-${{ runner.os }}-
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install MAUI workload
-        run: dotnet workload install maui-android
-
-      - name: Build .NET MAUI
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "*.csproj" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
-          if [ -z "$CSPROJ" ]; then
-            echo "❌ Aucun fichier .csproj trouvé"
-            exit 1
-          fi
-
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -name "*.keystore" -type f | head -1)
-
-          if [ "${{ github.event.inputs.build_type }}" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            dotnet publish "$CSPROJ" -f net8.0-android -c Release || echo "⚠️ Build Release échoué"
-          else
-            dotnet build "$CSPROJ" -f net8.0-android -c Debug || echo "⚠️ Build Debug échoué"
-          fi
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-dotnet-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 9: BUILD OTHER (Go / Godot / Lua / NativeScript)
-  # ============================================================
-  build-other:
-    needs: prepare
-    if: ${{ github.event.inputs.platform != 'windows' && contains(fromJson('["go","godot","lua","nativescript"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Download keystore
-        if: ${{ needs.prepare.outputs.has_keystore == 'true' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: '17'
-          distribution: 'temurin'
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: 🔍 ANALYSE DU PROJET OTHER
-        id: analyze-other
-        run: |
-          echo "=== ANALYSE DU PROJET ==="
-          cd src/
-          
-          HAS_GODOT=$(find . -name "project.godot" -type f | head -1)
-          HAS_GO=$(find . -name "go.mod" -type f | head -1)
-          HAS_LUA=$(find . -name "build.settings" -type f | head -1)
-          HAS_NATIVESCRIPT=$(find . -name "package.json" -type f | grep -l "nativescript" 2>/dev/null | head -1)
-          
-          echo "📊 RÉSULTATS :"
-          echo "Godot: ${HAS_GODOT:+✅ OUI}${HAS_GODOT:-❌ NON}"
-          echo "Go: ${HAS_GO:+✅ OUI}${HAS_GO:-❌ NON}"
-          echo "Lua: ${HAS_LUA:+✅ OUI}${HAS_LUA:-❌ NON}"
-          echo "NativeScript: ${HAS_NATIVESCRIPT:+✅ OUI}${HAS_NATIVESCRIPT:-❌ NON}"
-
-      - name: Setup Go
-        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Cache Go modules
-        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/go/pkg/mod
-            ~/.cache/go-build
-          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
-          restore-keys: |
-            go-${{ runner.os }}-
-
-      - name: Setup Godot (CORRIGÉ)
-        if: ${{ needs.prepare.outputs.detected_type == 'godot' }}
-        run: |
-          set -e
-          GODOT_VERSION="4.2.2"
-          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" || exit 1
-          unzip -q "Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip"
-          sudo mv "Godot_v${GODOT_VERSION}-stable_linux.x86_64" /usr/local/bin/godot
-          sudo chmod +x /usr/local/bin/godot
-          wget -q "https://downloads.tuxfamily.org/godotengine/${GODOT_VERSION}/Godot_v${GODOT_VERSION}-stable_export_templates.tgz" || exit 1
-          mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          tar -xzf "Godot_v${GODOT_VERSION}-stable_export_templates.tgz" -C ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable/
-
-      - name: Build Go project
-        if: ${{ needs.prepare.outputs.detected_type == 'go' }}
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          if [ ! -f "go.mod" ]; then
-            go mod init app
-          fi
-
-          GOOS=android GOARCH=arm64 CGO_ENABLED=1 go build -ldflags="-s -w" -o libapp.so . || echo "⚠️ Build Go échoué"
-
-      - name: Build Godot project
-        if: ${{ needs.prepare.outputs.detected_type == 'godot' }}
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "project.godot" -type f -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          if [ ! -f "export_presets.cfg" ]; then
-            cat > export_presets.cfg << 'EOF'
-          [preset.0]
-          name="Android"
-          platform="Android"
-          runnable=true
-          export_filter="all_resources"
-          android_architectures/arm64-v8a=true
-          EOF
-          fi
-
-          godot --headless --export-release "Android" build.apk || echo "⚠️ Build Godot échoué"
-
-      - name: Build Lua project
-        if: ${{ needs.prepare.outputs.detected_type == 'lua' }}
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "build.settings" -type f -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          zip -r app.love . -x "*.git*" -x "build.settings"
-
-          LOVE_APK_URL="https://github.com/love2d/love/releases/download/11.5/love-11.5-android.apk"
-          curl -L -o love-base.apk "$LOVE_APK_URL"
-
-          mkdir -p love_work
-          cd love_work
-          unzip -o ../love-base.apk
-
-          PKG_ID="${{ github.event.inputs.package_id }}"
-          [ -z "$PKG_ID" ] && PKG_ID="com.philtech.love"
-          sed -i "s/package=\"[^\"]*\"/package=\"$PKG_ID\"/" AndroidManifest.xml
-          sed -i 's/<application[^>]*>/& android:label="${{ github.event.inputs.app_name }}"/' AndroidManifest.xml
-
-          cp ../app.love assets/game.love
-
-          zip -r ../app.apk .
-          cd ..
-
-      - name: Build NativeScript project
-        if: ${{ needs.prepare.outputs.detected_type == 'nativescript' }}
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "package.json" -type f -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          npm install --prefer-offline || echo "⚠️ npm install échoué"
-          npx ns platform add android || echo "⚠️ ns platform add échoué"
-          npx ns build android --debug || echo "⚠️ ns build échoué"
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.aab" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE -name "app.apk" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-other-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 10: BUILD WINDOWS — Flutter
-  # ============================================================
-  build-windows-flutter:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'flutter' && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: windows-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: 'stable'
-
-      - name: Build Flutter for Windows
-        shell: bash
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "pubspec.yaml" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          flutter config --enable-windows-desktop
-          flutter pub get || true
-
-          if [ ! -d "windows" ]; then
-            flutter create --platforms=windows --overwrite . || true
-          fi
-
-          if [ ! -f "lib/main.dart" ]; then
-            mkdir -p lib
-            cat > lib/main.dart << 'DART_EOF'
-          import 'package:flutter/material.dart';
-          
-          void main() { runApp(const MyApp()); }
-          
-          class MyApp extends StatelessWidget {
-            const MyApp({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return MaterialApp(
-                title: '${{ github.event.inputs.app_name }}',
-                theme: ThemeData(primarySwatch: Colors.blue),
-                home: const MyHomePage(),
-              );
-            }
-          }
-          
-          class MyHomePage extends StatelessWidget {
-            const MyHomePage({super.key});
-            @override
-            Widget build(BuildContext context) {
-              return Scaffold(
-                appBar: AppBar(title: Text('${{ github.event.inputs.app_name }}')),
-                body: Center(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const Text('✅ Application Flutter Windows'),
-                      const SizedBox(height: 20),
-                      Text('📱 App: ${{ github.event.inputs.app_name }}'),
-                    ],
-                  ),
-                ),
-              );
-            }
-          }
-          DART_EOF
-            echo "✅ lib/main.dart créé"
-          fi
-
-          if [ "${{ github.event.inputs.build_type }}" == "release" ]; then
-            flutter build windows --release || echo "⚠️ Build Windows Release échoué"
-          else
-            flutter build windows --debug || echo "⚠️ Build Windows Debug échoué"
-          fi
-
-      - name: Collect artifacts
-        shell: bash
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-windows-flutter-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 11: BUILD WINDOWS — .NET MAUI
-  # ============================================================
-  build-windows-dotnet:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && contains(fromJson('["dotnet-maui","maui","csharp"]'), needs.prepare.outputs.detected_type) && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: windows-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-
-      - name: Install MAUI workload
-        run: dotnet workload install maui-windows
-
-      - name: Build .NET MAUI for Windows
-        shell: bash
-        run: |
-          set -e
-          cd src/
-          PROJECT_ROOT=$(find . -name "*.csproj" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
-          if [ -z "$CSPROJ" ]; then
-            echo "⚠️ Aucun .csproj trouvé - création d'un projet MAUI minimal"
-            dotnet new maui -n "${{ github.event.inputs.app_name }}" -o . || echo "⚠️ Création échouée"
-            CSPROJ=$(find . -maxdepth 2 -name "*.csproj" | head -1)
-          fi
-
-          CONFIG="Debug"
-          [ "${{ github.event.inputs.build_type }}" == "release" ] && CONFIG="Release"
-          dotnet publish "$CSPROJ" -f net8.0-windows10.0.19041.0 -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64 || echo "⚠️ Build .NET Windows échoué"
-
-      - name: Collect artifacts
-        shell: bash
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-windows-dotnet-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 12: BUILD WINDOWS — Python
-  # ============================================================
-  build-windows-python:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'python' && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: windows-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: Build with PyInstaller
-        shell: bash
-        run: |
-          set -eu
-          cd src/
-          PROJECT_ROOT=$(find . -name "*.py" -type f -not -path "*/node_modules/*" -not -path "*/.git/*" -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          ENTRY=""
-          for candidate in main.py app.py; do
-            [ -f "$candidate" ] && ENTRY="$candidate" && break
-          done
-          
-          if [ -z "$ENTRY" ]; then
-            cat > main.py << 'PYTHON_EOF'
-          def main():
-              print("✅ Application Python Windows compilée avec succès !")
-              print(f"📱 App: ${{ github.event.inputs.app_name }}")
-          
-          if __name__ == "__main__":
-              main()
-          PYTHON_EOF
-            ENTRY="main.py"
-          fi
-
-          python -m pip install --upgrade pip
-          python -m pip install --upgrade pyinstaller
-
-          APP_NAME_SAFE=$(echo "${{ github.event.inputs.app_name }}" | tr -cd '[:alnum:]_-')
-          [ -z "$APP_NAME_SAFE" ] && APP_NAME_SAFE="app"
-
-          pyinstaller --onefile --windowed --name "$APP_NAME_SAFE" "$ENTRY" || echo "⚠️ PyInstaller échoué"
-
-      - name: Collect artifacts
-        shell: bash
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "*.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-windows-python-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 13: BUILD WINDOWS — Go
-  # ============================================================
-  build-windows-go:
-    needs: prepare
-    if: ${{ github.event.inputs.platform == 'windows' && needs.prepare.outputs.detected_type == 'go' && needs.prepare.outputs.build_should_run == 'true' }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download source
-        uses: actions/download-artifact@v4
-        with:
-          name: source-${{ github.event.inputs.build_id }}
-          path: src/
-
-      - name: Setup Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.22'
-
-      - name: Cross-compile for Windows
-        run: |
-          set -eu
-          cd src/
-          PROJECT_ROOT=$(find . -name "go.mod" -type f -exec dirname {} \; | head -1)
-          [ -z "$PROJECT_ROOT" ] && PROJECT_ROOT="."
-          cd "$PROJECT_ROOT"
-
-          if [ ! -f "go.mod" ]; then
-            go mod init app
-          fi
-          
-          GO_COUNT=$(find . -name "*.go" -type f | wc -l)
-          if [ "$GO_COUNT" -eq 0 ]; then
-            cat > main.go << 'GO_EOF'
-          package main
-          
-          import "fmt"
-          
-          func main() {
-              fmt.Println("✅ Application Go Windows compilée avec succès !")
-              fmt.Printf("📱 App: ${{ github.event.inputs.app_name }}\n")
-          }
-          GO_EOF
-            echo "✅ main.go créé"
-          fi
-
-          GOOS=windows GOARCH=amd64 go build -ldflags="-s -w -H=windowsgui" -o app.exe . || echo "⚠️ Build Go Windows échoué"
-
-      - name: Collect artifacts
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          find $GITHUB_WORKSPACE -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-          find $GITHUB_WORKSPACE/src/ -name "app.exe" -exec cp {} $GITHUB_WORKSPACE/output/ \; 2>/dev/null || true
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-windows-go-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 1
-          if-no-files-found: warn
-
-  # ============================================================
-  # JOB 14: POST-BUILD
-  # ============================================================
-  post-build:
-    needs: [prepare, build-web, build-capacitor, build-react-native, build-kotlin-java, build-flutter, build-python, build-dotnet, build-other, build-windows-flutter, build-windows-dotnet, build-windows-python, build-windows-go]
-    if: always()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts/
-          pattern: build-*-${{ github.event.inputs.build_id }}
-          merge-multiple: true
-          continue-on-error: true
-
-      - name: Download keystore artifact
-        if: ${{ github.event.inputs.platform != 'windows' && github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
-        uses: actions/download-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-          path: keystore/
-          continue-on-error: true
-
-      - name: List downloaded artifacts
-        run: |
-          echo "=== Artifacts trouves ==="
-          find artifacts/ -type f -name "*.apk" -o -name "*.aab" -o -name "*.exe" 2>/dev/null || echo "Aucun artifact trouve"
-
-      - name: Upload APK to R2
-        id: upload-apk
-        run: |
-          set -eu
-          APK_FILE=$(find artifacts/ -name "*.apk" -type f | head -1)
-          if [ -n "$APK_FILE" ] && [ -f "$APK_FILE" ]; then
-            echo "Upload APK: $APK_FILE"
-            curl -sf -X POST -H "Content-Type: application/vnd.android.package-archive" --data-binary @"$APK_FILE" "${{ github.event.inputs.build_base_url }}/upload/apk" || echo "APK upload failed"
-            echo "apk_uploaded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "apk_uploaded=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload AAB to R2
-        id: upload-aab
-        run: |
-          set -eu
-          AAB_FILE=$(find artifacts/ -name "*.aab" -type f | head -1)
-          if [ -n "$AAB_FILE" ] && [ -f "$AAB_FILE" ]; then
-            echo "Upload AAB: $AAB_FILE"
-            curl -sf -X POST -H "Content-Type: application/octet-stream" --data-binary @"$AAB_FILE" "${{ github.event.inputs.build_base_url }}/upload/aab" || echo "AAB upload failed"
-            echo "aab_uploaded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "aab_uploaded=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload EXE to R2
-        id: upload-exe
-        if: ${{ github.event.inputs.platform == 'windows' }}
-        run: |
-          set -eu
-          EXE_FILE=$(find artifacts/ -name "*.exe" -type f | head -1)
-          if [ -n "$EXE_FILE" ] && [ -f "$EXE_FILE" ]; then
-            echo "Upload EXE: $EXE_FILE"
-            curl -sf -X POST -H "Content-Type: application/octet-stream" --data-binary @"$EXE_FILE" "${{ github.event.inputs.build_base_url }}/upload/exe" || echo "EXE upload failed"
-            echo "exe_uploaded=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "exe_uploaded=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Determine build status
-        id: build-status
-        run: |
-          APK_STATUS="${{ steps.upload-apk.outputs.apk_uploaded }}"
-          AAB_STATUS="${{ steps.upload-aab.outputs.aab_uploaded }}"
-          EXE_STATUS="${{ steps.upload-exe.outputs.exe_uploaded }}"
-          
-          echo "APK: $APK_STATUS, AAB: $AAB_STATUS, EXE: $EXE_STATUS"
-          
-          if [ "$APK_STATUS" == "true" ] || [ "$AAB_STATUS" == "true" ] || [ "$EXE_STATUS" == "true" ]; then
-            echo "status=success" >> "$GITHUB_OUTPUT"
-            echo "message=Build successful" >> "$GITHUB_OUTPUT"
-          else
-            echo "status=error" >> "$GITHUB_OUTPUT"
-            echo "message=Build failed: No artifacts produced" >> "$GITHUB_OUTPUT"
-            echo "error_details=Check individual job logs for specific errors" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Notify callback URL
-        if: ${{ needs.prepare.outputs.build_should_run != 'false' }}
-        run: |
-          set -eu
-          STATUS="${{ steps.build-status.outputs.status }}"
-          MESSAGE="${{ steps.build-status.outputs.message }}"
-          ERROR_DETAILS="${{ steps.build-status.outputs.error_details || '' }}"
-          
           JSON_PAYLOAD=$(jq -n \
-              --arg build_id "${{ github.event.inputs.build_id }}" \
-              --arg state "$STATUS" \
-              --arg message "$MESSAGE" \
-              --arg error_details "$ERROR_DETAILS" \
-              --arg detected_type "${{ needs.prepare.outputs.detected_type }}" \
-              '{
-                build_id: $build_id,
-                state: $state,
-                message: $message,
-                error_details: $error_details,
-                detected_type: $detected_type
-              }')
+            --arg build_id "${{ github.event.inputs.build_id }}" \
+            --arg state "$STATE" \
+            --arg message "$MESSAGE" \
+            --arg apks "$APK_LIST" \
+            --arg aabs "$AAB_LIST" \
+            '{build_id:$build_id, state:$state, message:$message, apk_files:$apks, aab_files:$aabs, detected_type:"web"}')
 
-          echo "Sending notification:"
-          echo "$JSON_PAYLOAD"
-
-          curl -sf -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "${{ github.event.inputs.callback_url }}" || echo "Callback notification failed"
+          curl -sf -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "${{ github.event.inputs.callback_url }}" || echo "⚠️ Callback échoué"
