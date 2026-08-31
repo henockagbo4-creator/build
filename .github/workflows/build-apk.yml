@@ -30,6 +30,16 @@ on:
         required: false
         type: string
         default: "apk"
+      project_type:
+        description: "Type de projet (web, react, vue, ...)"
+        required: false
+        type: string
+        default: "web"
+      platform:
+        description: "Plateforme cible (android, windows)"
+        required: false
+        type: string
+        default: "android"
       icon_url:
         description: "URL de l'icône (optionnel)"
         required: false
@@ -59,6 +69,16 @@ on:
         description: "URL de notification en fin de build"
         required: true
         type: string
+      build_base_url:
+        description: "URL de base du build sur le Worker"
+        required: false
+        type: string
+        default: ""
+      api_key:
+        description: "Clé API (optionnel)"
+        required: false
+        type: string
+        default: ""
 
 jobs:
   build-web:
@@ -88,8 +108,8 @@ jobs:
           unzip -o source.zip -d src/
           echo "✅ ZIP extrait"
 
-      # ----- 3. Trouver index.html où qu'il soit (builder permissif) -----
-      - name: Localiser index.html et déterminer le dossier source
+      # ----- 3. Trouver index.html où qu'il soit -----
+      - name: Localiser index.html
         id: analyze
         run: |
           cd src/
@@ -99,7 +119,7 @@ jobs:
           INDEX_PATH=$(find . -iname "index.html" -type f | head -1)
 
           if [ -z "$INDEX_PATH" ]; then
-            echo "⚠️ Aucun index.html trouvé — génération d'une page minimale de secours"
+            echo "⚠️ Aucun index.html trouvé — page de secours"
             echo "has_index=false" >> $GITHUB_OUTPUT
             echo "source_dir=." >> $GITHUB_OUTPUT
           else
@@ -109,7 +129,7 @@ jobs:
             echo "source_dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
           fi
 
-      # ----- 4. Setup Node / Java / Android SDK -----
+      # ----- 4. Setup Node / Java / Android -----
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -134,7 +154,7 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-web-
 
-      # ----- 5. Keystore (release uniquement) -----
+      # ----- 5. Keystore -----
       - name: Générer le keystore
         id: keystore-gen
         if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
@@ -166,11 +186,11 @@ jobs:
           echo "has_keystore=true" >> $GITHUB_OUTPUT
           echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> $GITHUB_OUTPUT
 
-      # ----- 6. Créer le projet Cordova et copier le site -----
+      # ----- 6. Créer le projet Cordova -----
       - name: Installer Cordova
         run: npm install -g cordova
 
-      - name: Créer le projet Cordova et copier le site web
+      - name: Créer le projet Cordova et copier le site
         run: |
           set -e
           SOURCE_DIR="${{ steps.analyze.outputs.source_dir }}"
