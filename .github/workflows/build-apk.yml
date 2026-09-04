@@ -1,334 +1,305 @@
-name: Build Web APK
+name: PhilBuilder — Universal Build
 
+# ============================================================
+# Déclenché par le worker (dispatch) avec les mêmes inputs que
+# ceux envoyés par apk-builder / api-philbuilder.
+# api_key n'est utilisé que pour les builds venant de l'API v1
+# (facultatif, ignoré sinon).
+# ============================================================
 on:
   workflow_dispatch:
     inputs:
       zip_url:
-        description: "URL du ZIP contenant le site web (index.html à la racine ou dans un seul sous-dossier)"
         required: true
         type: string
       app_name:
-        description: "Nom de l'application"
         required: true
         type: string
       package_id:
-        description: "Package ID (ex: com.philtech.monapp)"
         required: false
         type: string
-        default: "com.philtech.webapp"
+        default: com.philbuilder.app
       build_id:
-        description: "ID unique du build"
         required: true
         type: string
       build_type:
-        description: "debug ou release"
         required: false
         type: string
-        default: "debug"
+        default: debug
       output_format:
-        description: "apk, aab ou both"
         required: false
         type: string
-        default: "apk"
+        default: apk
       project_type:
-        description: "Type de projet (web, react, vue, ...)"
-        required: false
+        required: true
         type: string
-        default: "web"
       platform:
-        description: "Plateforme cible (android, windows)"
         required: false
         type: string
-        default: "android"
+        default: android
       icon_url:
-        description: "URL de l'icône (optionnel)"
         required: false
         type: string
         default: ""
       keystore_mode:
-        description: "generate ou upload"
         required: false
         type: string
-        default: "generate"
+        default: generate
       keystore_url:
-        description: "URL du keystore si keystore_mode = upload"
         required: false
         type: string
         default: ""
       keystore_password:
-        description: "Mot de passe du keystore"
         required: false
         type: string
-        default: "philtech2024"
+        default: PhilTech2026
       keystore_alias:
-        description: "Alias du keystore"
         required: false
         type: string
-        default: "myapp"
+        default: release
       callback_url:
-        description: "URL de notification en fin de build"
         required: true
         type: string
       build_base_url:
-        description: "URL de base du build sur le Worker"
-        required: false
+        required: true
         type: string
-        default: ""
       api_key:
-        description: "Clé API (optionnel)"
         required: false
         type: string
         default: ""
+
+# Variables communes à tous les jobs
+env:
+  ZIP_URL: ${{ inputs.zip_url }}
+  APP_NAME: ${{ inputs.app_name }}
+  PACKAGE_ID: ${{ inputs.package_id }}
+  BUILD_ID: ${{ inputs.build_id }}
+  BUILD_TYPE: ${{ inputs.build_type }}
+  OUTPUT_FORMAT: ${{ inputs.output_format }}
+  PROJECT_TYPE: ${{ inputs.project_type }}
+  PLATFORM: ${{ inputs.platform }}
+  ICON_URL: ${{ inputs.icon_url }}
+  KEYSTORE_MODE: ${{ inputs.keystore_mode }}
+  KEYSTORE_URL: ${{ inputs.keystore_url }}
+  KEYSTORE_PASSWORD: ${{ inputs.keystore_password }}
+  KEYSTORE_ALIAS: ${{ inputs.keystore_alias }}
+  CALLBACK_URL: ${{ inputs.callback_url }}
+  BUILD_BASE_URL: ${{ inputs.build_base_url }}
 
 jobs:
-  build-web:
-    runs-on: ubuntu-latest
 
+  # ===========================================================
+  # 1) Web / Cordova — web, react, vue
+  # ===========================================================
+  build-cordova:
+    if: contains(fromJSON('["web","react","vue"]'), inputs.project_type)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
     steps:
-      # ----- 1. Outils de base -----
-      - name: Installer ImageMagick (icônes)
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: actions/setup-java@v4
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - name: Build
+        run: bash scripts/build-cordova.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
+        run: |
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-cordova (voir logs GitHub Actions)"}' || true
+
+  # ===========================================================
+  # 2) Web moderne / Capacitor — svelte, angular, solidjs,
+  #    preact, ionic, capacitor, nativescript
+  # ===========================================================
+  build-capacitor:
+    if: contains(fromJSON('["svelte","angular","solidjs","preact","ionic","capacitor","nativescript"]'), inputs.project_type)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: actions/setup-java@v4
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - name: Build
+        run: bash scripts/build-capacitor.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
+        run: |
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-capacitor (voir logs GitHub Actions)"}' || true
+
+  # ===========================================================
+  # 3) Mobile natif — react-native, kotlin, java,
+  #    kotlin-multiplatform
+  # ===========================================================
+  build-native:
+    if: contains(fromJSON('["react-native","kotlin","java","kotlin-multiplatform"]'), inputs.project_type)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "20" }
+      - uses: actions/setup-java@v4
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - name: Build
+        run: bash scripts/build-native.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
+        run: |
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-native (voir logs GitHub Actions)"}' || true
+
+  # ===========================================================
+  # 4) Flutter — Android (apk/aab) + Windows (exe)
+  # ===========================================================
+  build-flutter:
+    if: inputs.project_type == 'flutter'
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with: { channel: "stable" }
+      - uses: actions/setup-java@v4
+        if: inputs.platform != 'windows'
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+        if: inputs.platform != 'windows'
+      - name: Build (bash)
+        shell: bash
+        run: bash scripts/build-flutter.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
+        shell: bash
+        run: |
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-flutter (voir logs GitHub Actions)"}' || true
+
+  # ===========================================================
+  # 5) .NET MAUI / C# — Android (apk) + Windows (exe)
+  # ===========================================================
+  build-dotnet:
+    if: contains(fromJSON('["dotnet-maui","maui","csharp"]'), inputs.project_type)
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with: { dotnet-version: "8.0.x" }
+      - uses: actions/setup-java@v4
+        if: inputs.platform != 'windows'
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+        if: inputs.platform != 'windows'
+      - name: Build (bash)
+        shell: bash
+        run: bash scripts/build-dotnet.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
+        shell: bash
+        run: |
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-dotnet (voir logs GitHub Actions)"}' || true
+
+  # ===========================================================
+  # 6) Python — Android (Buildozer, fallback Briefcase) +
+  #    Windows (PyInstaller)
+  # ===========================================================
+  build-python:
+    if: inputs.project_type == 'python'
+    runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11" }
+      - uses: actions/setup-java@v4
+        if: inputs.platform != 'windows'
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+        if: inputs.platform != 'windows'
+      - name: Dépendances système Buildozer (Android uniquement)
+        if: inputs.platform != 'windows'
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y --no-install-recommends imagemagick
-
-      # ----- 2. Télécharger et extraire le ZIP -----
-      - name: Télécharger le ZIP source
+          sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config \
+            zlib1g-dev libncurses5-dev cmake libffi-dev libssl-dev
+      - name: Build (bash)
+        shell: bash
+        run: bash scripts/build-python.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
+        shell: bash
         run: |
-          set -e
-          echo "📥 Téléchargement du ZIP..."
-          curl -f -L -o source.zip "${{ github.event.inputs.zip_url }}"
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-python (voir logs GitHub Actions)"}' || true
 
-          SIZE=$(stat -c%s source.zip 2>/dev/null || stat -f%z source.zip 2>/dev/null || echo "0")
-          if [ "$SIZE" -lt 100 ]; then
-            echo "❌ ERREUR: fichier trop petit ($SIZE octets), probablement invalide"
-            exit 1
-          fi
-
-          mkdir -p src
-          unzip -o source.zip -d src/
-          echo "✅ ZIP extrait"
-
-      # ----- 3. Trouver index.html où qu'il soit -----
-      - name: Localiser index.html
-        id: analyze
+  # ===========================================================
+  # 7) Go — Android (gomobile) + Windows (cross-compile)
+  # ===========================================================
+  build-go:
+    if: inputs.project_type == 'go'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.22" }
+      - uses: actions/setup-java@v4
+        if: inputs.platform != 'windows'
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+        if: inputs.platform != 'windows'
+      - name: NDK (nécessaire à gomobile)
+        if: inputs.platform != 'windows'
+        run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle" >> "$GITHUB_ENV"
+      - name: Build
+        run: bash scripts/build-go.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
         run: |
-          cd src/
-          echo "📁 Contenu du ZIP :"
-          find . -type f -not -path "*/node_modules/*" -not -path "*/.git/*" | head -30
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-go (voir logs GitHub Actions)"}' || true
 
-          INDEX_PATH=$(find . -iname "index.html" -type f | head -1)
-
-          if [ -z "$INDEX_PATH" ]; then
-            echo "⚠️ Aucun index.html trouvé — page de secours"
-            echo "has_index=false" >> $GITHUB_OUTPUT
-            echo "source_dir=." >> $GITHUB_OUTPUT
-          else
-            echo "✅ index.html trouvé : $INDEX_PATH"
-            SOURCE_DIR=$(dirname "$INDEX_PATH")
-            echo "has_index=true" >> $GITHUB_OUTPUT
-            echo "source_dir=$SOURCE_DIR" >> $GITHUB_OUTPUT
-          fi
-
-      # ----- 4. Setup Node / Java / Android -----
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          java-version: "17"
-          distribution: "temurin"
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Cache Gradle
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.gradle/caches
-            ~/.gradle/wrapper
-          key: gradle-${{ runner.os }}-web-${{ hashFiles('**/gradle-wrapper.properties') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-web-
-
-      # ----- 5. Keystore -----
-      - name: Générer le keystore
-        id: keystore-gen
-        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'generate' }}
+  # ===========================================================
+  # 8) Autres — godot, lua (Solar2D), ruby (RubyMotion)
+  # ===========================================================
+  build-other:
+    if: contains(fromJSON('["godot","lua","ruby"]'), inputs.project_type)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with: { distribution: "temurin", java-version: "17" }
+      - uses: android-actions/setup-android@v3
+      - name: Build
+        run: bash scripts/build-other.sh
+      - name: Callback en cas d'échec inattendu
+        if: failure()
         run: |
-          set -e
-          KEYSTORE_NAME="keystore-${{ github.event.inputs.build_id }}.keystore"
-          ALIAS="${{ github.event.inputs.keystore_alias }}"
-          PASSWORD="${{ github.event.inputs.keystore_password }}"
+          curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
+            -d '{"state":"error","message":"Échec inattendu du job build-other (voir logs GitHub Actions)"}' || true
 
-          keytool -genkeypair -v \
-            -keystore "$KEYSTORE_NAME" \
-            -alias "$ALIAS" \
-            -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10950 \
-            -storetype PKCS12 \
-            -storepass "$PASSWORD" \
-            -keypass "$PASSWORD" \
-            -dname "CN=${{ github.event.inputs.app_name }}, OU=PhilTech, O=PhilTech, C=CI"
-
-          echo "has_keystore=true" >> $GITHUB_OUTPUT
-          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> $GITHUB_OUTPUT
-
-      - name: Télécharger le keystore utilisateur
-        id: keystore-dl
-        if: ${{ github.event.inputs.build_type == 'release' && github.event.inputs.keystore_mode == 'upload' && github.event.inputs.keystore_url != '' }}
+  # ===========================================================
+  # 9) Garde-fou — se déclenche si project_type ne correspond à
+  #    AUCUN job ci-dessus (évite un build qui reste bloqué en
+  #    "building" indéfiniment côté worker)
+  # ===========================================================
+  guard-unknown-type:
+    needs: []
+    if: |
+      !contains(fromJSON('["web","react","vue","svelte","angular","solidjs","preact","ionic","capacitor","nativescript","react-native","kotlin","java","kotlin-multiplatform","flutter","dotnet-maui","maui","csharp","python","go","godot","lua","ruby"]'), inputs.project_type)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Prévenir le worker d'un type inconnu
         run: |
-          set -e
-          KEYSTORE_NAME="user-keystore-${{ github.event.inputs.build_id }}.keystore"
-          curl -f -L -o "$KEYSTORE_NAME" "${{ github.event.inputs.keystore_url }}"
-          echo "has_keystore=true" >> $GITHUB_OUTPUT
-          echo "keystore_path=$GITHUB_WORKSPACE/$KEYSTORE_NAME" >> $GITHUB_OUTPUT
-
-      # ----- 6. Créer le projet Cordova -----
-      - name: Installer Cordova
-        run: npm install -g cordova
-
-      - name: Créer le projet Cordova et copier le site
-        run: |
-          set -e
-          SOURCE_DIR="${{ steps.analyze.outputs.source_dir }}"
-          APP_NAME="${{ github.event.inputs.app_name }}"
-          PKG_ID="${{ github.event.inputs.package_id }}"
-          CORDOVA_DIR="$GITHUB_WORKSPACE/cordova-app"
-
-          cordova create "$CORDOVA_DIR" "$PKG_ID" "$APP_NAME"
-          rm -rf "$CORDOVA_DIR"/www/*
-
-          cp -r "src/$SOURCE_DIR"/. "$CORDOVA_DIR"/www/
-
-          if [ "${{ steps.analyze.outputs.has_index }}" == "false" ]; then
-            cat > "$CORDOVA_DIR/www/index.html" << HTML_EOF
-          <!DOCTYPE html>
-          <html>
-          <head>
-            <meta charset="UTF-8">
-            <meta name="viewport" content="width=device-width, initial-scale=1.0">
-            <title>$APP_NAME</title>
-          </head>
-          <body>
-            <h1>$APP_NAME</h1>
-            <p>✅ Site compilé en application</p>
-          </body>
-          </html>
-          HTML_EOF
-          fi
-
-          cd "$CORDOVA_DIR"
-          sed -i 's#</widget>#  <preference name="android-minSdkVersion" value="24" />\n  <preference name="android-targetSdkVersion" value="34" />\n  <preference name="SplashScreen" value="none" />\n</widget>#' config.xml
-
-          echo "CORDOVA_DIR=$CORDOVA_DIR" >> $GITHUB_ENV
-
-      # ----- 7. Icône personnalisée -----
-      - name: Ajouter l'icône personnalisée
-        if: ${{ github.event.inputs.icon_url != '' }}
-        run: |
-          set -e
-          curl -f -L -o /tmp/icon.png "${{ github.event.inputs.icon_url }}"
-          cd "$CORDOVA_DIR"
-          cordova platform add android > /dev/null 2>&1 || true
-          find . -type d -path "*res*" -name "mipmap-*" | while read dir; do
-            density=$(basename "$dir")
-            case "$density" in
-              *mdpi) SIZE=48 ;;
-              *hdpi) SIZE=72 ;;
-              *xhdpi) SIZE=96 ;;
-              *xxhdpi) SIZE=144 ;;
-              *xxxhdpi) SIZE=192 ;;
-              *) SIZE=96 ;;
-            esac
-            convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$dir/ic_launcher.png" 2>/dev/null || true
-            convert /tmp/icon.png -resize "${SIZE}x${SIZE}" "$dir/ic_launcher_round.png" 2>/dev/null || true
-          done
-
-      # ----- 8. Ajouter Android -----
-      - name: Ajouter la plateforme Android
-        run: |
-          cd "$CORDOVA_DIR"
-          cordova platform add android || true
-
-      # ----- 9. Build -----
-      - name: Builder l'APK / AAB
-        run: |
-          set -e
-          cd "$CORDOVA_DIR"
-
-          BUILD_TYPE="${{ github.event.inputs.build_type }}"
-          FORMAT="${{ github.event.inputs.output_format }}"
-          KEYSTORE_FILE=$(find "$GITHUB_WORKSPACE" -maxdepth 1 -name "*.keystore" | head -1)
-
-          if [ "$BUILD_TYPE" == "release" ] && [ -n "$KEYSTORE_FILE" ]; then
-            PASSWORD="${{ github.event.inputs.keystore_password }}"
-            ALIAS="${{ github.event.inputs.keystore_alias }}"
-
-            if [ "$FORMAT" == "apk" ] || [ "$FORMAT" == "both" ]; then
-              cordova build android --release -- --packageType=apk \
-                --keystore="$KEYSTORE_FILE" --storePassword="$PASSWORD" \
-                --alias="$ALIAS" --password="$PASSWORD"
-            fi
-            if [ "$FORMAT" == "aab" ] || [ "$FORMAT" == "both" ]; then
-              cordova build android --release -- --packageType=bundle \
-                --keystore="$KEYSTORE_FILE" --storePassword="$PASSWORD" \
-                --alias="$ALIAS" --password="$PASSWORD"
-            fi
-          else
-            cordova build android --debug
-          fi
-
-      # ----- 10. Collecte des artefacts -----
-      - name: Collecter APK / AAB
-        id: collect
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/output"
-          find "$CORDOVA_DIR" -name "*.apk" -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
-          find "$CORDOVA_DIR" -name "*.aab" -exec cp {} "$GITHUB_WORKSPACE/output/" \; 2>/dev/null || true
-          ls -la "$GITHUB_WORKSPACE/output/" || echo "Aucun artefact"
-
-      - name: Upload des artefacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: web-apk-${{ github.event.inputs.build_id }}
-          path: ${{ github.workspace }}/output/
-          retention-days: 7
-
-      - name: Upload du keystore généré
-        if: ${{ steps.keystore-gen.outputs.has_keystore == 'true' }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: keystore-${{ github.event.inputs.build_id }}
-          path: ${{ steps.keystore-gen.outputs.keystore_path }}
-          retention-days: 30
-
-      # ----- 11. Callback de notification -----
-      - name: Notifier le callback
-        if: always()
-        run: |
-          APK_COUNT=$(find "$GITHUB_WORKSPACE/output/" -name "*.apk" 2>/dev/null | wc -l)
-          AAB_COUNT=$(find "$GITHUB_WORKSPACE/output/" -name "*.aab" 2>/dev/null | wc -l)
-
-          if [ "$APK_COUNT" -gt 0 ] || [ "$AAB_COUNT" -gt 0 ]; then
-            STATE="success"
-            MESSAGE="✅ Build terminé avec succès"
-          else
-            STATE="error"
-            MESSAGE="❌ Build échoué - aucun artefact généré"
-          fi
-
-          APK_LIST=$(find "$GITHUB_WORKSPACE/output/" -name "*.apk" -exec basename {} \; 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-          AAB_LIST=$(find "$GITHUB_WORKSPACE/output/" -name "*.aab" -exec basename {} \; 2>/dev/null | tr '\n' ',' | sed 's/,$//')
-
-          JSON_PAYLOAD=$(jq -n \
-            --arg build_id "${{ github.event.inputs.build_id }}" \
-            --arg state "$STATE" \
-            --arg message "$MESSAGE" \
-            --arg apks "$APK_LIST" \
-            --arg aabs "$AAB_LIST" \
-            '{build_id:$build_id, state:$state, message:$message, apk_files:$apks, aab_files:$aabs, detected_type:"web"}')
-
-          curl -sf -X POST -H "Content-Type: application/json" -d "$JSON_PAYLOAD" "${{ github.event.inputs.callback_url }}" || echo "⚠️ Callback échoué"
+          curl -sS -X POST "${{ inputs.callback_url }}" -H "Content-Type: application/json" \
+            -d "{\"state\":\"error\",\"message\":\"Type de projet non supporté par le workflow: ${{ inputs.project_type }}\"}" || true
