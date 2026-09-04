@@ -1,10 +1,11 @@
-name: PhilBuilder — Universal Build
+name: PhilBuilder — Universal Build (tout-en-un)
 
 # ============================================================
-# Déclenché par le worker (dispatch) avec les mêmes inputs que
-# ceux envoyés par apk-builder / api-philbuilder.
-# api_key n'est utilisé que pour les builds venant de l'API v1
-# (facultatif, ignoré sinon).
+# Un seul fichier. Aucun script externe : chaque job embarque
+# ses propres fonctions (callback, upload, extraction, icone,
+# keystore) + sa logique de build, dans un unique bloc "run".
+# Declenche par le worker (workflow_dispatch) avec les inputs
+# deja utilises par apk-builder / api-philbuilder.
 # ============================================================
 on:
   workflow_dispatch:
@@ -68,7 +69,6 @@ on:
         type: string
         default: ""
 
-# Variables communes à tous les jobs
 env:
   ZIP_URL: ${{ inputs.zip_url }}
   APP_NAME: ${{ inputs.app_name }}
@@ -94,67 +94,865 @@ jobs:
   build-cordova:
     if: contains(fromJSON('["web","react","vue"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
       - name: Build
-        run: bash scripts/build-cordova.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+
+          WWW_DIR="$WORKDIR/www"
+          mkdir -p "$WWW_DIR"
+
+          if [ -f "$SRC_DIR/package.json" ] && [ "$PROJECT_TYPE" != "web" ]; then
+            callback "building" "Détection d'un projet $PROJECT_TYPE — npm install..."
+            cd "$SRC_DIR"
+            npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | tail -n 50 \
+              || npm install --no-audit --no-fund --force 2>&1 | tail -n 50 \
+              || fail "npm install a échoué"
+
+            callback "building" "Build $PROJECT_TYPE (npm run build)..."
+            npm run build 2>&1 | tail -n 80 || echo "⚠️  'npm run build' a échoué, on tente un fallback"
+
+            # Fallback permissif : on cherche un dossier de build connu
+            BUILD_OUT=""
+            for cand in dist build out public www .output/public; do
+              if [ -d "$SRC_DIR/$cand" ] && [ "$(find "$SRC_DIR/$cand" -name '*.html' | wc -l)" -gt 0 ]; then
+                BUILD_OUT="$SRC_DIR/$cand"
+                break
+              fi
+            done
+            if [ -z "$BUILD_OUT" ]; then
+              echo "⚠️  Aucun dossier de build standard trouvé — utilisation de la racine du projet telle quelle"
+              BUILD_OUT="$SRC_DIR"
+            fi
+            cp -r "$BUILD_OUT"/* "$WWW_DIR"/ 2>/dev/null || true
+          else
+            # project_type == web (site statique) : on prend tel quel, en
+            # excluant node_modules éventuels
+            callback "building" "Projet statique détecté — copie directe"
+            cd "$SRC_DIR"
+            find . -maxdepth 1 ! -name node_modules ! -name '.' -exec cp -r {} "$WWW_DIR"/ \;
+          fi
+
+          [ -f "$WWW_DIR/index.html" ] || find "$WWW_DIR" -iname "index.htm*" -exec cp {} "$WWW_DIR/index.html" \; 2>/dev/null || true
+          [ -f "$WWW_DIR/index.html" ] || fail "Aucun index.html trouvé après build — impossible de continuer"
+
+          callback "building" "Création du projet Cordova..."
+          cd "$WORKDIR"
+          npm install -g cordova --no-audit --no-fund 2>&1 | tail -n 20
+          cordova create cdvapp "$PACKAGE_ID" "$APP_NAME" || fail "cordova create a échoué"
+          cd cdvapp
+          rm -rf www
+          cp -r "$WWW_DIR" www
+
+          cordova platform add android || fail "Impossible d'ajouter la plateforme Android"
+
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            mkdir -p res/icon/android
+            for size in 36 48 72 96 144 192; do cp "$ICON_LOCAL" "res/icon/android/icon-$size.png"; done
+          fi
+
+          callback "building" "Compilation Gradle ($BUILD_TYPE)..."
+          if [ "$BUILD_TYPE" = "release" ]; then
+            prepare_keystore
+            cordova build android --release -- \
+              --keystore="$KEYSTORE_PATH" --storePassword="$KEYSTORE_PASSWORD" \
+              --alias="$KEYSTORE_ALIAS" --password="$KEYSTORE_PASSWORD" \
+              2>&1 | tail -n 100 || fail "Le build Cordova release a échoué"
+          else
+            cordova build android 2>&1 | tail -n 100 || fail "Le build Cordova debug a échoué"
+          fi
+
+          APK=$(find platforms/android/app/build/outputs/apk -iname "*.apk" | head -n 1)
+          [ -n "$APK" ] || fail "Aucun APK produit par Cordova/Gradle"
+          upload_artifact "$APK" "apk" || fail "Échec de l'upload de l'APK"
+
+          if [ "$OUTPUT_FORMAT" = "aab" ] || [ "$OUTPUT_FORMAT" = "both" ]; then
+            cd platforms/android
+            ./gradlew bundleRelease 2>&1 | tail -n 60 || echo "⚠️  bundleRelease a échoué, AAB non fourni"
+            AAB=$(find app/build/outputs/bundle -iname "*.aab" | head -n 1)
+            [ -n "$AAB" ] && upload_artifact "$AAB" "aab"
+            cd ../..
+          fi
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-cordova (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-cordova (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
-  # 2) Web moderne / Capacitor — svelte, angular, solidjs,
-  #    preact, ionic, capacitor, nativescript
+  # 2) Web moderne / Capacitor — svelte, angular, solidjs, preact, ionic, capacitor, nativescript
   # ===========================================================
   build-capacitor:
     if: contains(fromJSON('["svelte","angular","solidjs","preact","ionic","capacitor","nativescript"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
       - name: Build
-        run: bash scripts/build-capacitor.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          cd "$SRC_DIR"
+
+          # ---- NativeScript a un pipeline distinct (pas de "web build" classique) ----
+          if [ "$PROJECT_TYPE" = "nativescript" ]; then
+            callback "building" "Projet NativeScript détecté — installation..."
+            npm install -g @nativescript/cli --no-audit --no-fund 2>&1 | tail -n 20
+            npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | tail -n 50 \
+              || npm install --no-audit --no-fund --force 2>&1 | tail -n 50
+            [ -f "nativescript.config.ts" ] || [ -f "nsconfig.json" ] \
+              || echo "⚠️  Config NativeScript absente — ns tentera un mode par défaut"
+            callback "building" "Compilation NativeScript Android ($BUILD_TYPE)..."
+            if [ "$BUILD_TYPE" = "release" ]; then
+              prepare_keystore
+              ns build android --release \
+                --key-store-path "$KEYSTORE_PATH" --key-store-password "$KEYSTORE_PASSWORD" \
+                --key-store-alias "$KEYSTORE_ALIAS" --key-store-alias-password "$KEYSTORE_PASSWORD" \
+                2>&1 | tail -n 100 || fail "Build NativeScript release échoué"
+            else
+              ns build android 2>&1 | tail -n 100 || fail "Build NativeScript debug échoué"
+            fi
+            APK=$(find platforms/android -iname "*.apk" 2>/dev/null | head -n 1)
+            [ -n "$APK" ] || fail "Aucun APK produit par NativeScript"
+            upload_artifact "$APK" "apk" || fail "Échec upload APK"
+            callback "success" "Build terminé avec succès"
+            exit 0
+          fi
+
+          # ---- Pipeline Capacitor générique (svelte/angular/solid/preact/ionic/capacitor) ----
+          WEB_DIR="$WORKDIR/webdist"
+          mkdir -p "$WEB_DIR"
+
+          if [ -f "package.json" ]; then
+            callback "building" "npm install ($PROJECT_TYPE)..."
+            npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | tail -n 60 \
+              || npm install --no-audit --no-fund --force 2>&1 | tail -n 60 \
+              || fail "npm install a échoué"
+
+            callback "building" "Build $PROJECT_TYPE..."
+            npm run build 2>&1 | tail -n 100 \
+              || npm run build:prod 2>&1 | tail -n 100 \
+              || echo "⚠️  Aucun script build standard n'a fonctionné — fallback"
+
+            BUILD_OUT=""
+            for cand in dist build www out .output/public dist/*/browser; do
+              for d in $SRC_DIR/$cand; do
+                if [ -d "$d" ] && [ "$(find "$d" -name '*.html' 2>/dev/null | wc -l)" -gt 0 ]; then
+                  BUILD_OUT="$d"; break 2
+                fi
+              done
+            done
+            [ -z "$BUILD_OUT" ] && BUILD_OUT="$SRC_DIR" && echo "⚠️  Fallback : copie de la racine du projet"
+            cp -r "$BUILD_OUT"/* "$WEB_DIR"/ 2>/dev/null || true
+          else
+            echo "⚠️  Pas de package.json — projet statique, copie directe"
+            cp -r "$SRC_DIR"/* "$WEB_DIR"/ 2>/dev/null || true
+          fi
+
+          [ -f "$WEB_DIR/index.html" ] || fail "Aucun index.html trouvé dans le build — vérifie ton projet"
+
+          callback "building" "Initialisation Capacitor..."
+          cd "$WORKDIR"
+          mkdir capapp && cd capapp
+          cp -r "$WEB_DIR" www
+          npm init -y >/dev/null 2>&1
+          npm install @capacitor/core @capacitor/cli @capacitor/android --no-audit --no-fund 2>&1 | tail -n 30 \
+            || fail "Installation Capacitor échouée"
+          npx cap init "$APP_NAME" "$PACKAGE_ID" --web-dir=www 2>&1 | tail -n 20 || true
+          npx cap add android 2>&1 | tail -n 40 || fail "Impossible d'ajouter la plateforme Android (Capacitor)"
+          npx cap copy android 2>&1 | tail -n 20
+          npx cap sync android 2>&1 | tail -n 40
+
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            for d in android/app/src/main/res/mipmap-*; do cp "$ICON_LOCAL" "$d/ic_launcher.png" 2>/dev/null || true; done
+          fi
+
+          callback "building" "Compilation Gradle ($BUILD_TYPE)..."
+          cd android
+          chmod +x gradlew 2>/dev/null || true
+          if [ "$BUILD_TYPE" = "release" ]; then
+            prepare_keystore
+            cp "$KEYSTORE_PATH" app/release.keystore
+            cat >> app/build.gradle <<EOF
+
+          android {
+              signingConfigs {
+                  release {
+                      storeFile file("release.keystore")
+                      storePassword "$KEYSTORE_PASSWORD"
+                      keyAlias "$KEYSTORE_ALIAS"
+                      keyPassword "$KEYSTORE_PASSWORD"
+                  }
+              }
+              buildTypes {
+                  release {
+                      signingConfig signingConfigs.release
+                  }
+              }
+          }
+          EOF
+            ./gradlew assembleRelease 2>&1 | tail -n 100 || fail "assembleRelease a échoué"
+            APK=$(find app/build/outputs/apk/release -iname "*.apk" | head -n 1)
+          else
+            ./gradlew assembleDebug 2>&1 | tail -n 100 || fail "assembleDebug a échoué"
+            APK=$(find app/build/outputs/apk/debug -iname "*.apk" | head -n 1)
+          fi
+          [ -n "$APK" ] || fail "Aucun APK produit"
+          upload_artifact "$APK" "apk" || fail "Échec upload APK"
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-capacitor (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-capacitor (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
-  # 3) Mobile natif — react-native, kotlin, java,
-  #    kotlin-multiplatform
+  # 3) Mobile natif — react-native, kotlin, java, kotlin-multiplatform
   # ===========================================================
   build-native:
     if: contains(fromJSON('["react-native","kotlin","java","kotlin-multiplatform"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
       - name: Build
-        run: bash scripts/build-native.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          cd "$SRC_DIR"
+
+          if [ "$PROJECT_TYPE" = "react-native" ]; then
+            [ -f "package.json" ] || fail "react-native: package.json introuvable à la racine du projet"
+            callback "building" "npm install (React Native)..."
+            npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | tail -n 60 \
+              || npm install --no-audit --no-fund --force 2>&1 | tail -n 60 \
+              || fail "npm install a échoué"
+            ANDROID_DIR="$SRC_DIR/android"
+            [ -d "$ANDROID_DIR" ] || fail "react-native: dossier android/ introuvable (projet non initialisé avec 'npx react-native init')"
+          else
+            # kotlin / java / kotlin-multiplatform : on cherche un projet gradle
+            GRADLE_DIR="$(find_dir_containing 'settings.gradle*')"
+            if [ -z "$GRADLE_DIR" ]; then
+              GRADLE_DIR="$(find_dir_containing 'build.gradle*')"
+            fi
+
+            if [ -z "$GRADLE_DIR" ]; then
+              # ---------- FALLBACK PERMISSIF ----------
+              # Pas de projet Gradle du tout : on scaffold un projet Android minimal
+              # autour des sources .kt / .java trouvées, pour maximiser le taux de succès.
+              echo "⚠️  Aucun projet Gradle détecté — génération d'un projet Android minimal autour des sources fournies"
+              callback "building" "Structure de projet absente — génération d'un squelette Android..."
+              SCAFFOLD="$WORKDIR/scaffold"
+              mkdir -p "$SCAFFOLD/app/src/main/java" "$SCAFFOLD/app/src/main/res/values"
+              # Copie de toutes les sources kt/java trouvées dans le zip
+              find "$SRC_DIR" \( -iname "*.kt" -o -iname "*.java" \) -exec cp {} "$SCAFFOLD/app/src/main/java/" \;
+              cat > "$SCAFFOLD/app/src/main/AndroidManifest.xml" <<EOF
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$PACKAGE_ID">
+            <application android:label="$APP_NAME" android:allowBackup="true">
+              <activity android:name=".MainActivity" android:exported="true">
+                <intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter>
+              </activity>
+            </application>
+          </manifest>
+          EOF
+              cat > "$SCAFFOLD/app/src/main/res/values/strings.xml" <<EOF
+          <resources><string name="app_name">$APP_NAME</string></resources>
+          EOF
+              cat > "$SCAFFOLD/settings.gradle" <<EOF
+          include ':app'
+          EOF
+              cat > "$SCAFFOLD/build.gradle" <<'EOF'
+          buildscript {
+            repositories { google(); mavenCentral() }
+            dependencies { classpath 'com.android.tools.build:gradle:8.2.0'; classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22' }
+          }
+          allprojects { repositories { google(); mavenCentral() } }
+          EOF
+              cat > "$SCAFFOLD/app/build.gradle" <<EOF
+          apply plugin: 'com.android.application'
+          apply plugin: 'kotlin-android'
+          android {
+            namespace "$PACKAGE_ID"
+            compileSdk 34
+            defaultConfig { applicationId "$PACKAGE_ID"; minSdk 21; targetSdk 34; versionCode 1; versionName "1.0" }
+          }
+          dependencies { implementation 'androidx.core:core-ktx:1.12.0'; implementation 'androidx.appcompat:appcompat:1.6.1' }
+          EOF
+              gradle wrapper --gradle-version 8.4 -p "$SCAFFOLD" 2>&1 | tail -n 20
+              GRADLE_DIR="$SCAFFOLD"
+            fi
+            ANDROID_DIR="$GRADLE_DIR"
+          fi
+
+          cd "$ANDROID_DIR"
+          [ -f "gradlew" ] || { echo "⚠️  gradlew manquant — génération du wrapper"; gradle wrapper --gradle-version 8.4 2>&1 | tail -n 20; }
+          chmod +x gradlew 2>/dev/null || true
+
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            for d in app/src/main/res/mipmap-*; do [ -d "$d" ] && cp "$ICON_LOCAL" "$d/ic_launcher.png" 2>/dev/null; done
+          fi
+
+          callback "building" "Compilation Gradle ($BUILD_TYPE)..."
+          if [ "$BUILD_TYPE" = "release" ]; then
+            prepare_keystore
+            cp "$KEYSTORE_PATH" app/release.keystore 2>/dev/null || true
+            ./gradlew assembleRelease -Pandroid.injected.signing.store.file="$ANDROID_DIR/app/release.keystore" \
+              -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
+              -Pandroid.injected.signing.key.alias="$KEYSTORE_ALIAS" \
+              -Pandroid.injected.signing.key.password="$KEYSTORE_PASSWORD" \
+              2>&1 | tail -n 120 || fail "assembleRelease a échoué"
+            APK=$(find . -path "*/outputs/apk/release/*.apk" | head -n 1)
+          else
+            ./gradlew assembleDebug 2>&1 | tail -n 120 || fail "assembleDebug a échoué"
+            APK=$(find . -path "*/outputs/apk/debug/*.apk" | head -n 1)
+          fi
+          [ -n "$APK" ] || APK=$(find . -iname "*.apk" | head -n 1)
+          [ -n "$APK" ] || fail "Aucun APK produit par Gradle"
+          upload_artifact "$APK" "apk" || fail "Échec upload APK"
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-native (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-native (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
   # 4) Flutter — Android (apk/aab) + Windows (exe)
@@ -162,9 +960,8 @@ jobs:
   build-flutter:
     if: inputs.project_type == 'flutter'
     runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with: { channel: "stable" }
       - uses: actions/setup-java@v4
@@ -172,15 +969,258 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: Build (bash)
+      - name: Build
         shell: bash
-        run: bash scripts/build-flutter.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          cd "$SRC_DIR"
+
+          if [ ! -f "pubspec.yaml" ]; then
+            echo "⚠️  pubspec.yaml absent — scaffold Flutter autour du code lib/ fourni"
+            callback "building" "Structure Flutter absente — génération d'un projet Flutter..."
+            LIB_BACKUP="$WORKDIR/lib_backup"
+            mkdir -p "$LIB_BACKUP"
+            [ -d "lib" ] && cp -r lib/* "$LIB_BACKUP"/ 2>/dev/null
+            find . -maxdepth 1 -iname "*.dart" -exec cp {} "$LIB_BACKUP"/ \;
+            flutter create --org "$(echo "$PACKAGE_ID" | sed 's/\.[^.]*$//')" --project-name "$(echo "$APP_NAME" | tr 'A-Z ' 'a-z_')" . \
+              || fail "flutter create (scaffold) a échoué"
+            [ -n "$(ls -A "$LIB_BACKUP" 2>/dev/null)" ] && cp -r "$LIB_BACKUP"/* lib/ 2>/dev/null
+          else
+            callback "building" "Projet Flutter détecté — flutter pub get..."
+          fi
+
+          flutter pub get 2>&1 | tail -n 60 || fail "flutter pub get a échoué"
+
+          if [ -n "${ICON_LOCAL:-}" ] && [ -d "android/app/src/main/res" ]; then
+            for d in android/app/src/main/res/mipmap-*; do [ -d "$d" ] && cp "$ICON_LOCAL" "$d/ic_launcher.png" 2>/dev/null; done
+          fi
+
+          if [ "$PLATFORM" = "windows" ]; then
+            callback "building" "Compilation Flutter Windows (release)..."
+            flutter config --enable-windows-desktop 2>&1 | tail -n 10
+            flutter build windows --release 2>&1 | tail -n 150 || fail "flutter build windows a échoué"
+            EXE=$(find build/windows -iname "*.exe" | head -n 1)
+            [ -n "$EXE" ] || fail "Aucun .exe produit par Flutter"
+            # Empaqueter le dossier release complet (dépendances DLL incluses) en zip,
+            # mais on remonte l'exe seul comme artefact principal
+            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+            callback "success" "Build terminé avec succès"
+            exit 0
+          fi
+
+          callback "building" "Compilation Flutter Android ($BUILD_TYPE)..."
+          if [ "$BUILD_TYPE" = "release" ]; then
+            prepare_keystore
+            mkdir -p android
+            cat > android/key.properties <<EOF
+          storePassword=$KEYSTORE_PASSWORD
+          keyPassword=$KEYSTORE_PASSWORD
+          keyAlias=$KEYSTORE_ALIAS
+          storeFile=$KEYSTORE_PATH
+          EOF
+            if [ "$OUTPUT_FORMAT" = "aab" ]; then
+              flutter build appbundle --release 2>&1 | tail -n 150 || fail "flutter build appbundle a échoué"
+              AAB=$(find build/app/outputs -iname "*.aab" | head -n 1)
+              [ -n "$AAB" ] && upload_artifact "$AAB" "aab" || fail "Aucun AAB produit"
+            else
+              flutter build apk --release 2>&1 | tail -n 150 || fail "flutter build apk a échoué"
+              APK=$(find build/app/outputs -iname "*release*.apk" | head -n 1)
+              [ -n "$APK" ] || APK=$(find build/app/outputs -iname "*.apk" | head -n 1)
+              [ -n "$APK" ] && upload_artifact "$APK" "apk" || fail "Aucun APK produit"
+              if [ "$OUTPUT_FORMAT" = "both" ]; then
+                flutter build appbundle --release 2>&1 | tail -n 150 || echo "⚠️  AAB non fourni"
+                AAB=$(find build/app/outputs -iname "*.aab" | head -n 1)
+                [ -n "$AAB" ] && upload_artifact "$AAB" "aab"
+              fi
+            fi
+          else
+            flutter build apk --debug 2>&1 | tail -n 150 || fail "flutter build apk (debug) a échoué"
+            APK=$(find build/app/outputs -iname "*debug*.apk" | head -n 1)
+            [ -n "$APK" ] || APK=$(find build/app/outputs -iname "*.apk" | head -n 1)
+            [ -n "$APK" ] && upload_artifact "$APK" "apk" || fail "Aucun APK produit"
+          fi
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         shell: bash
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-flutter (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-flutter (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
   # 5) .NET MAUI / C# — Android (apk) + Windows (exe)
@@ -188,9 +1228,8 @@ jobs:
   build-dotnet:
     if: contains(fromJSON('["dotnet-maui","maui","csharp"]'), inputs.project_type)
     runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: "8.0.x" }
       - uses: actions/setup-java@v4
@@ -198,26 +1237,252 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: Build (bash)
+      - name: Build
         shell: bash
-        run: bash scripts/build-dotnet.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          cd "$SRC_DIR"
+
+          CSPROJ=$(find_any "*.csproj")
+          [ -n "$CSPROJ" ] || fail ".NET MAUI: aucun fichier .csproj trouvé dans le projet"
+          PROJ_DIR=$(dirname "$CSPROJ")
+          cd "$PROJ_DIR"
+
+          callback "building" "Installation des workloads .NET MAUI..."
+          dotnet workload install maui --ignore-failed-sources 2>&1 | tail -n 60 \
+            || fail "Installation du workload MAUI échouée"
+
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            mkdir -p Resources/AppIcon
+            cp "$ICON_LOCAL" Resources/AppIcon/appicon.png 2>/dev/null || true
+          fi
+
+          CONFIG="Debug"
+          [ "$BUILD_TYPE" = "release" ] && CONFIG="Release"
+
+          if [ "$PLATFORM" = "windows" ]; then
+            callback "building" "Compilation .NET MAUI Windows ($CONFIG)..."
+            FRAMEWORK=$(grep -o 'net[0-9.]*-windows[0-9.]*' "$(basename "$CSPROJ")" | head -n 1)
+            [ -z "$FRAMEWORK" ] && FRAMEWORK="net8.0-windows10.0.19041.0"
+            dotnet publish -f "$FRAMEWORK" -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64 \
+              2>&1 | tail -n 150 || fail "dotnet publish (Windows) a échoué"
+            EXE=$(find bin -iname "*.exe" | grep -vi 'signtool\|makeappx' | head -n 1)
+            [ -n "$EXE" ] || fail "Aucun .exe produit"
+            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+            callback "success" "Build terminé avec succès"
+            exit 0
+          fi
+
+          callback "building" "Compilation .NET MAUI Android ($CONFIG)..."
+          if [ "$CONFIG" = "Release" ]; then
+            prepare_keystore
+            dotnet publish -f net8.0-android -c Release \
+              -p:AndroidSigningKeyStore="$KEYSTORE_PATH" \
+              -p:AndroidSigningKeyAlias="$KEYSTORE_ALIAS" \
+              -p:AndroidSigningKeyPass="$KEYSTORE_PASSWORD" \
+              -p:AndroidSigningStorePass="$KEYSTORE_PASSWORD" \
+              -p:ApplicationId="$PACKAGE_ID" \
+              2>&1 | tail -n 150 || fail "dotnet publish (Android release) a échoué"
+            APK=$(find bin -iname "*-Signed.apk" | head -n 1)
+            [ -n "$APK" ] || APK=$(find bin -iname "*.apk" | head -n 1)
+          else
+            dotnet build -f net8.0-android -c Debug -p:ApplicationId="$PACKAGE_ID" \
+              2>&1 | tail -n 150 || fail "dotnet build (Android debug) a échoué"
+            APK=$(find bin -iname "*.apk" | head -n 1)
+          fi
+          [ -n "$APK" ] || fail "Aucun APK produit par .NET MAUI"
+          upload_artifact "$APK" "apk" || fail "Échec upload APK"
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         shell: bash
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-dotnet (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-dotnet (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
-  # 6) Python — Android (Buildozer, fallback Briefcase) +
-  #    Windows (PyInstaller)
+  # 6) Python — Android (Buildozer, fallback Briefcase) + Windows (PyInstaller)
   # ===========================================================
   build-python:
     if: inputs.project_type == 'python'
     runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
     timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
       - uses: actions/setup-java@v4
@@ -225,21 +1490,283 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: Dépendances système Buildozer (Android uniquement)
+      - name: Dependances systeme Buildozer (Android uniquement)
         if: inputs.platform != 'windows'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev cmake libffi-dev libssl-dev
-      - name: Build (bash)
+      - name: Build
         shell: bash
-        run: bash scripts/build-python.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          cd "$SRC_DIR"
+
+          # Trouve le point d'entrée principal, où qu'il soit dans le zip
+          MAIN_PY=$(find_any "main.py")
+          if [ -z "$MAIN_PY" ]; then
+            MAIN_PY=$(find "$SRC_DIR" -iname "*.py" | head -n 1)
+          fi
+          [ -n "$MAIN_PY" ] || fail "Aucun fichier .py trouvé dans le projet"
+          MAIN_DIR=$(dirname "$MAIN_PY")
+          cd "$MAIN_DIR"
+          [ -f "$(basename "$MAIN_PY")" ] && [ "$(basename "$MAIN_PY")" != "main.py" ] && cp "$(basename "$MAIN_PY")" main.py
+
+          # Une éventuelle config "complexe" (Briefcase) prend le pas si présente
+          HAS_BRIEFCASE_CFG=false
+          if [ -f "$SRC_DIR/pyproject.toml" ] && grep -q "briefcase" "$SRC_DIR/pyproject.toml" 2>/dev/null; then
+            HAS_BRIEFCASE_CFG=true
+          fi
+
+          if [ -f "requirements.txt" ]; then
+            callback "building" "Installation des dépendances Python..."
+            pip install -r requirements.txt 2>&1 | tail -n 60 || echo "⚠️  Certaines dépendances n'ont pas pu être installées"
+          fi
+
+          if [ "$PLATFORM" = "windows" ]; then
+            callback "building" "Compilation Python → Windows (PyInstaller)..."
+            pip install pyinstaller 2>&1 | tail -n 20
+            ICON_FLAG=""
+            [ -n "${ICON_LOCAL:-}" ] && ICON_FLAG="--icon=$ICON_LOCAL"
+            pyinstaller --onefile --noconfirm --name "$(echo "$APP_NAME" | tr ' ' '_')" $ICON_FLAG main.py \
+              2>&1 | tail -n 150 || fail "PyInstaller a échoué"
+            EXE=$(find dist -iname "*.exe" | head -n 1)
+            [ -n "$EXE" ] || fail "Aucun .exe produit par PyInstaller"
+            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+            callback "success" "Build terminé avec succès"
+            exit 0
+          fi
+
+          # ---- Android ----
+          if [ "$HAS_BRIEFCASE_CFG" = true ]; then
+            callback "building" "Config Briefcase détectée — build via Briefcase..."
+            cd "$SRC_DIR"
+            pip install briefcase 2>&1 | tail -n 20
+            briefcase create android gradle 2>&1 | tail -n 80 && \
+            briefcase build android gradle 2>&1 | tail -n 80 && \
+            briefcase package android gradle --packaging-format apk 2>&1 | tail -n 80
+            APK=$(find . -iname "*.apk" | head -n 1)
+            if [ -n "$APK" ]; then
+              upload_artifact "$APK" "apk" || fail "Échec upload APK"
+              callback "success" "Build terminé avec succès (Briefcase)"
+              exit 0
+            fi
+            echo "⚠️  Briefcase a échoué — bascule sur Buildozer (fallback permissif)"
+          fi
+
+          callback "building" "Compilation Python → Android (Buildozer)..."
+          cd "$MAIN_DIR"
+          pip install buildozer cython 2>&1 | tail -n 30 || fail "Installation de Buildozer échouée"
+
+          if [ ! -f "buildozer.spec" ]; then
+            echo "⚠️  buildozer.spec absent — génération automatique (mode permissif)"
+            buildozer init 2>&1 | tail -n 20
+            PKG_NAME=$(echo "$PACKAGE_ID" | rev | cut -d. -f1 | rev)
+            PKG_DOMAIN=$(echo "$PACKAGE_ID" | sed "s/\.$PKG_NAME$//")
+            sed -i "s/^title = .*/title = $APP_NAME/" buildozer.spec
+            sed -i "s/^package.name = .*/package.name = $PKG_NAME/" buildozer.spec
+            sed -i "s/^package.domain = .*/package.domain = $PKG_DOMAIN/" buildozer.spec
+            sed -i "s/^requirements = .*/requirements = python3,kivy/" buildozer.spec
+            [ -n "${ICON_LOCAL:-}" ] && sed -i "s|^#icon.filename = .*|icon.filename = $ICON_LOCAL|" buildozer.spec
+          fi
+
+          BUILDOZER_TARGET="debug"
+          [ "$BUILD_TYPE" = "release" ] && BUILDOZER_TARGET="release"
+
+          if [ "$BUILDOZER_TARGET" = "release" ]; then
+            prepare_keystore
+            export P4A_RELEASE_KEYSTORE="$KEYSTORE_PATH"
+            export P4A_RELEASE_KEYSTORE_PASSWD="$KEYSTORE_PASSWORD"
+            export P4A_RELEASE_KEYALIAS="$KEYSTORE_ALIAS"
+            export P4A_RELEASE_KEYALIAS_PASSWD="$KEYSTORE_PASSWORD"
+          fi
+
+          yes | buildozer -v android "$BUILDOZER_TARGET" 2>&1 | tail -n 200 || fail "Buildozer a échoué"
+          APK=$(find bin -iname "*.apk" | head -n 1)
+          [ -n "$APK" ] || fail "Aucun APK produit par Buildozer"
+          upload_artifact "$APK" "apk" || fail "Échec upload APK"
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         shell: bash
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-python (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-python (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
   # 7) Go — Android (gomobile) + Windows (cross-compile)
@@ -247,9 +1774,8 @@ jobs:
   build-go:
     if: inputs.project_type == 'go'
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with: { go-version: "1.22" }
       - uses: actions/setup-java@v4
@@ -257,16 +1783,236 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: NDK (nécessaire à gomobile)
+      - name: NDK (necessaire a gomobile)
         if: inputs.platform != 'windows'
         run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle" >> "$GITHUB_ENV"
       - name: Build
-        run: bash scripts/build-go.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            echo "ℹ️  Icône fournie mais gomobile ne permet pas d'injecter une icône de launcher facilement — icône par défaut conservée pour ce build Go"
+          fi
+          cd "$SRC_DIR"
+
+          MAIN_GO=$(find_any "main.go")
+          [ -n "$MAIN_GO" ] || fail "Aucun fichier main.go trouvé dans le projet"
+          MAIN_DIR=$(dirname "$MAIN_GO")
+          cd "$MAIN_DIR"
+
+          [ -f "go.mod" ] || { echo "⚠️  go.mod absent — initialisation automatique"; go mod init "$(echo "$PACKAGE_ID" | tr 'A-Z' 'a-z')" 2>&1 | tail -n 10; }
+          go mod tidy 2>&1 | tail -n 30 || echo "⚠️  go mod tidy incomplet, on continue"
+
+          if [ "$PLATFORM" = "windows" ]; then
+            callback "building" "Compilation Go → Windows (cross-compile)..."
+            GOOS=windows GOARCH=amd64 go build -o "$(echo "$APP_NAME" | tr ' ' '_').exe" . \
+              2>&1 | tail -n 100 || fail "go build (windows) a échoué"
+            EXE=$(find . -maxdepth 1 -iname "*.exe" | head -n 1)
+            [ -n "$EXE" ] || fail "Aucun .exe produit"
+            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+            callback "success" "Build terminé avec succès"
+            exit 0
+          fi
+
+          callback "building" "Compilation Go → Android (gomobile)..."
+          go install golang.org/x/mobile/cmd/gomobile@latest 2>&1 | tail -n 30
+          export PATH="$PATH:$(go env GOPATH)/bin"
+          gomobile init 2>&1 | tail -n 30 || fail "gomobile init a échoué"
+
+          # gomobile attend un package "app" exposant une lib (pas un main classique) ;
+          # en mode permissif, si le projet n'est pas déjà structuré ainsi, on tente
+          # quand même un bind générique sur le module courant.
+          if [ "$BUILD_TYPE" = "release" ]; then
+            gomobile build -target=android -o "app.apk" . 2>&1 | tail -n 150 \
+              || fail "gomobile build a échoué (le projet doit exposer un package mobile compatible)"
+          else
+            gomobile build -target=android -o "app.apk" . 2>&1 | tail -n 150 \
+              || fail "gomobile build a échoué (le projet doit exposer un package mobile compatible)"
+          fi
+
+          APK=$(find . -maxdepth 1 -iname "*.apk" | head -n 1)
+          [ -n "$APK" ] || fail "Aucun APK produit par gomobile"
+          upload_artifact "$APK" "apk" || fail "Échec upload APK"
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-go (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-go (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
   # 8) Autres — godot, lua (Solar2D), ruby (RubyMotion)
@@ -274,32 +2020,301 @@ jobs:
   build-other:
     if: contains(fromJSON('["godot","lua","ruby"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 35
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
       - name: Build
-        run: bash scripts/build-other.sh
-      - name: Callback en cas d'échec inattendu
+        run: |
+          # ============================================================
+          # lib.sh — fonctions partagées par tous les builders PhilBuilder
+          # À sourcer en début de chaque script : `source scripts/lib.sh`
+          # ============================================================
+          set -uo pipefail
+          # NB: pas de `set -e` global ici — chaque builder gère ses propres
+          # erreurs et appelle `fail "message"` explicitement, pour pouvoir
+          # toujours prévenir le callback avant de mourir.
+
+          WORKDIR="${WORKDIR:-$PWD/work}"
+          SRC_DIR="$WORKDIR/src"
+          OUT_DIR="$WORKDIR/out"
+          mkdir -p "$SRC_DIR" "$OUT_DIR"
+
+          # ------------------------------------------------------------
+          # Callback vers le worker (état + message)
+          # ------------------------------------------------------------
+          callback() {
+            local state="$1"
+            local message="$2"
+            echo "➡️  [callback] $state — $message"
+            curl -sS -m 15 -X POST "$CALLBACK_URL" \
+              -H "Content-Type: application/json" \
+              -d "$(python3 - "$state" "$message" <<'PY'
+          import json, sys
+          print(json.dumps({"state": sys.argv[1], "message": sys.argv[2]}))
+          PY
+          )" >/dev/null 2>&1 || echo "⚠️  callback injoignable (on continue quand même)"
+          }
+
+          # En cas d'échec définitif : prévient le worker puis stoppe le job
+          fail() {
+            local message="$1"
+            echo "❌ ERREUR: $message"
+            callback "error" "$message"
+            exit 1
+          }
+
+          # ------------------------------------------------------------
+          # Upload d'un artefact final vers R2 via le worker
+          # type ∈ apk | aab | exe | keystore
+          # ------------------------------------------------------------
+          upload_artifact() {
+            local file="$1"
+            local type="$2"
+            if [ ! -f "$file" ]; then
+              echo "⚠️  upload_artifact: fichier introuvable ($file), ignoré"
+              return 1
+            fi
+            echo "⬆️  Upload $type : $file ($(du -h "$file" | cut -f1))"
+            local status
+            status=$(curl -sS -m 300 -o /dev/null -w "%{http_code}" \
+              -X POST "$BUILD_BASE_URL/upload/$type" \
+              -H "Content-Type: application/octet-stream" \
+              --data-binary "@$file")
+            if [ "$status" != "200" ]; then
+              echo "⚠️  upload $type a répondu HTTP $status"
+              return 1
+            fi
+            return 0
+          }
+
+          # ------------------------------------------------------------
+          # Téléchargement + extraction permissive du zip source
+          # Ne suppose RIEN sur la structure : si tout est niché dans un
+          # seul sous-dossier (cas fréquent des zips "glisser-déposer"),
+          # on remonte automatiquement d'un niveau.
+          # ------------------------------------------------------------
+          download_source() {
+            callback "building" "Téléchargement du projet..."
+            curl -sSL -m 120 -o "$WORKDIR/source.zip" "$ZIP_URL" \
+              || fail "Impossible de télécharger le zip source (zip_url injoignable)"
+
+            [ -s "$WORKDIR/source.zip" ] || fail "Le zip source est vide ou introuvable"
+
+            unzip -q -o "$WORKDIR/source.zip" -d "$SRC_DIR" \
+              || fail "Archive .zip corrompue ou invalide"
+
+            # Aplatir un unique sous-dossier racine (cas "MonProjet/MonProjet/src...")
+            local entries
+            entries=$(find "$SRC_DIR" -mindepth 1 -maxdepth 1 | wc -l)
+            if [ "$entries" -eq 1 ] && [ -d "$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)" ]; then
+              local inner
+              inner="$(find "$SRC_DIR" -mindepth 1 -maxdepth 1)"
+              echo "📂 Sous-dossier unique détecté ($inner) — aplatissement"
+              shopt -s dotglob
+              mv "$inner"/* "$SRC_DIR"/ 2>/dev/null || true
+              shopt -u dotglob
+              rmdir "$inner" 2>/dev/null || true
+            fi
+
+            echo "📁 Contenu du projet après extraction :"
+            find "$SRC_DIR" -maxdepth 2 | sed "s|$SRC_DIR|.|"
+            callback "building" "Projet extrait, analyse de la structure..."
+          }
+
+          # Cherche un fichier par motif n'importe où dans SRC_DIR (permissif,
+          # insensible à l'emplacement exact demandé par le langage)
+          find_any() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | head -n 1
+          }
+
+          find_dir_containing() {
+            local pattern="$1"
+            find "$SRC_DIR" -iname "$pattern" 2>/dev/null | xargs -r -n1 dirname | head -n 1
+          }
+
+          # ------------------------------------------------------------
+          # Icône : téléchargement (utilisée par chaque builder pour
+          # remplacer les icônes par défaut du framework généré)
+          # ------------------------------------------------------------
+          download_icon_if_any() {
+            ICON_LOCAL=""
+            if [ -n "${ICON_URL:-}" ]; then
+              ICON_LOCAL="$WORKDIR/icon.png"
+              if curl -sSL -m 30 -o "$ICON_LOCAL" "$ICON_URL"; then
+                echo "🎨 Icône téléchargée : $ICON_LOCAL"
+              else
+                echo "⚠️  Icône fournie mais injoignable, utilisation de l'icône par défaut"
+                ICON_LOCAL=""
+              fi
+            fi
+            export ICON_LOCAL
+          }
+
+          # ------------------------------------------------------------
+          # Keystore Android : génère une clé si demandé, ou télécharge
+          # celle fournie par l'utilisateur.
+          # Résultat : $KEYSTORE_PATH prêt à l'emploi pour la signature.
+          # ------------------------------------------------------------
+          prepare_keystore() {
+            KEYSTORE_PATH="$WORKDIR/release.keystore"
+            if [ "${KEYSTORE_MODE:-generate}" = "upload" ] && [ -n "${KEYSTORE_URL:-}" ]; then
+              callback "building" "Récupération de votre clé de signature..."
+              curl -sSL -m 30 -o "$KEYSTORE_PATH" "$KEYSTORE_URL" \
+                || fail "Impossible de télécharger la clé de signature fournie"
+            else
+              callback "building" "Génération de la clé de signature..."
+              keytool -genkeypair -v \
+                -keystore "$KEYSTORE_PATH" \
+                -alias "${KEYSTORE_ALIAS:-release}" \
+                -keyalg RSA -keysize 2048 -validity 10000 \
+                -storepass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -keypass "${KEYSTORE_PASSWORD:-PhilTech2026}" \
+                -dname "CN=${APP_NAME:-App}, OU=PhilBuilder, O=PhilTech, C=CI" \
+                || fail "Échec de la génération de la clé de signature"
+              upload_artifact "$KEYSTORE_PATH" "keystore" || true
+            fi
+            export KEYSTORE_PATH
+          }
+
+          # ------------------------------------------------------------
+          # Renomme/copie le premier fichier trouvé matching $2 vers $1,
+          # ne casse rien si absent (mode best-effort)
+          # ------------------------------------------------------------
+          copy_if_exists() {
+            local dst="$1" pattern="$2"
+            local src
+            src=$(find_any "$pattern")
+            if [ -n "$src" ]; then
+              cp "$src" "$dst"
+              return 0
+            fi
+            return 1
+          }
+
+          echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
+
+          # ============================================================
+          # BUILD LOGIC
+          # ============================================================
+
+          download_source
+          download_icon_if_any
+          cd "$SRC_DIR"
+
+          case "$PROJECT_TYPE" in
+            godot)
+              PROJECT_GODOT=$(find_any "project.godot")
+              [ -n "$PROJECT_GODOT" ] || fail "Aucun fichier project.godot trouvé — ce n'est pas un projet Godot valide"
+              cd "$(dirname "$PROJECT_GODOT")"
+              callback "building" "Téléchargement de Godot + templates d'export..."
+              GODOT_VERSION="4.2.1"
+              curl -sSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" \
+                || fail "Téléchargement de Godot échoué"
+              unzip -q godot.zip -d godot_bin
+              GODOT_BIN=$(find godot_bin -type f -iname "Godot_*" | head -n 1)
+              chmod +x "$GODOT_BIN"
+              curl -sSL -o templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" \
+                || fail "Téléchargement des templates d'export échoué"
+              mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+              unzip -q -j templates.tpz -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+
+              # Icône : Godot lit icon.svg/icon.png à la racine du projet pour l'éditeur,
+              # mais l'icône du launcher Android se règle via les options du preset
+              # d'export. On copie le fichier fourni et on force les deux si on génère
+              # le preset nous-mêmes.
+              if [ -n "${ICON_LOCAL:-}" ]; then
+                cp "$ICON_LOCAL" icon.png
+                echo "🎨 icon.png placée à la racine du projet Godot"
+              fi
+
+              callback "building" "Export Android Godot ($BUILD_TYPE)..."
+              if ! grep -q "\[preset.0\]" export_presets.cfg 2>/dev/null; then
+                echo "⚠️  Aucun preset d'export Android configuré — génération d'un preset minimal"
+                ICON_OPTIONS=""
+                if [ -n "${ICON_LOCAL:-}" ]; then
+                  ICON_OPTIONS='launcher_icons/main_192x192="res://icon.png"
+          launcher_icons/adaptive_foreground_432x432="res://icon.png"'
+                fi
+                cat > export_presets.cfg <<EOF
+          [preset.0]
+          name="Android"
+          platform="Android"
+          runnable=true
+          export_path="app.apk"
+
+          [preset.0.options]
+          $ICON_OPTIONS
+          EOF
+              elif [ -n "${ICON_LOCAL:-}" ]; then
+                echo "ℹ️  export_presets.cfg fourni par le projet — icône root copiée mais pas forcée dans le preset existant"
+              fi
+              OUT_APK="$OUT_DIR/app.apk"
+              if [ "$BUILD_TYPE" = "release" ]; then
+                prepare_keystore
+                "$GODOT_BIN" --headless --export-release "Android" "$OUT_APK" 2>&1 | tail -n 100 || fail "Export Godot release a échoué"
+              else
+                "$GODOT_BIN" --headless --export-debug "Android" "$OUT_APK" 2>&1 | tail -n 100 || fail "Export Godot debug a échoué"
+              fi
+              [ -f "$OUT_APK" ] || fail "Aucun APK produit par Godot"
+              upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
+              ;;
+
+            lua)
+              callback "building" "Projet Lua/Solar2D — export Android..."
+              MAIN_LUA=$(find_any "main.lua")
+              [ -n "$MAIN_LUA" ] || fail "Aucun fichier main.lua trouvé"
+              cd "$(dirname "$MAIN_LUA")"
+              if command -v Solar2DConsole >/dev/null 2>&1; then
+                Solar2DConsole -platform android -projectpath "$PWD" -dstdir "$OUT_DIR" 2>&1 | tail -n 100 \
+                  || fail "Export Solar2D a échoué"
+                OUT_APK=$(find "$OUT_DIR" -iname "*.apk" | head -n 1)
+              else
+                fail "Solar2D CLI (Solar2DConsole) n'est pas disponible sur ce runner — build Lua impossible pour l'instant"
+              fi
+              [ -n "$OUT_APK" ] || fail "Aucun APK produit"
+              upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
+              ;;
+
+            ruby)
+              callback "building" "Projet Ruby/RubyMotion — build Android..."
+              RAKEFILE=$(find_any "Rakefile")
+              [ -n "$RAKEFILE" ] || fail "Aucun Rakefile trouvé (projet RubyMotion attendu)"
+              cd "$(dirname "$RAKEFILE")"
+              if command -v motion >/dev/null 2>&1; then
+                motion build --target=android 2>&1 | tail -n 150 || fail "motion build a échoué"
+                OUT_APK=$(find . -iname "*.apk" | head -n 1)
+              else
+                fail "RubyMotion (commande 'motion') n'est pas disponible sur ce runner — build Ruby impossible pour l'instant"
+              fi
+              [ -n "$OUT_APK" ] || fail "Aucun APK produit"
+              upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
+              ;;
+
+            *)
+              fail "Type de projet non reconnu par build-other.sh : $PROJECT_TYPE"
+              ;;
+          esac
+
+          callback "success" "Build terminé avec succès"
+      - name: Callback en cas d'echec inattendu
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Échec inattendu du job build-other (voir logs GitHub Actions)"}' || true
+            -d '{"state":"error","message":"Echec inattendu du job build-other (voir logs GitHub Actions)"}' || true
 
   # ===========================================================
-  # 9) Garde-fou — se déclenche si project_type ne correspond à
-  #    AUCUN job ci-dessus (évite un build qui reste bloqué en
-  #    "building" indéfiniment côté worker)
+  # 9) Garde-fou — evite un build bloque en "building" si le
+  #    project_type ne correspond a aucun job ci-dessus
   # ===========================================================
   guard-unknown-type:
-    needs: []
     if: |
       !contains(fromJSON('["web","react","vue","svelte","angular","solidjs","preact","ionic","capacitor","nativescript","react-native","kotlin","java","kotlin-multiplatform","flutter","dotnet-maui","maui","csharp","python","go","godot","lua","ruby"]'), inputs.project_type)
     runs-on: ubuntu-latest
     steps:
-      - name: Prévenir le worker d'un type inconnu
+      - name: Prevenir le worker d'un type inconnu
         run: |
           curl -sS -X POST "${{ inputs.callback_url }}" -H "Content-Type: application/json" \
-            -d "{\"state\":\"error\",\"message\":\"Type de projet non supporté par le workflow: ${{ inputs.project_type }}\"}" || true
+            -d "{\"state\":\"error\",\"message\":\"Type de projet non supporte par le workflow: ${{ inputs.project_type }}\"}" || true
