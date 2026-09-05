@@ -1,11 +1,14 @@
-name: PhilBuilder — Universal Build (tout-en-un)
+name: PhilBuilder — Universal Build
 
 # ============================================================
-# Un seul fichier. Aucun script externe : chaque job embarque
-# ses propres fonctions (callback, upload, extraction, icone,
-# keystore) + sa logique de build, dans un unique bloc "run".
-# Declenche par le worker (workflow_dispatch) avec les inputs
-# deja utilises par apk-builder / api-philbuilder.
+# Un seul fichier de workflow (aucun script externe dans le repo).
+# Chaque job écrit d'abord les fonctions partagées (callback,
+# upload, extraction, icône, keystore) dans lib.sh une fois, puis
+# chaque étape suivante la source à nouveau (chaque step = un
+# shell neuf) et exécute un morceau clair et nommé du build —
+# jamais tout entassé dans une seule étape.
+# Déclenché par le worker (workflow_dispatch) avec les mêmes
+# inputs que ceux déjà utilisés par apk-builder / api-philbuilder.
 # ============================================================
 on:
   workflow_dispatch:
@@ -87,22 +90,33 @@ env:
   BUILD_BASE_URL: ${{ inputs.build_base_url }}
 
 jobs:
-
   # ===========================================================
   # 1) Web / Cordova — web, react, vue
   # ===========================================================
   build-cordova:
     if: contains(fromJSON('["web","react","vue"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
-      - name: Build
+      - name: Cache npm + Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: cordova-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            cordova-${{ runner.os }}-
+      - name: "Préparer les fonctions communes"
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -271,14 +285,15 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        run: |
+          source lib.sh
           download_source
           download_icon_if_any
-
+      - name: "Construire les assets web (npm ou statique)"
+        run: |
+          source lib.sh
           WWW_DIR="$WORKDIR/www"
           mkdir -p "$WWW_DIR"
 
@@ -292,7 +307,6 @@ jobs:
             callback "building" "Build $PROJECT_TYPE (npm run build)..."
             npm run build 2>&1 | tail -n 80 || echo "⚠️  'npm run build' a échoué, on tente un fallback"
 
-            # Fallback permissif : on cherche un dossier de build connu
             BUILD_OUT=""
             for cand in dist build out public www .output/public; do
               if [ -d "$SRC_DIR/$cand" ] && [ "$(find "$SRC_DIR/$cand" -name '*.html' | wc -l)" -gt 0 ]; then
@@ -306,8 +320,6 @@ jobs:
             fi
             cp -r "$BUILD_OUT"/* "$WWW_DIR"/ 2>/dev/null || true
           else
-            # project_type == web (site statique) : on prend tel quel, en
-            # excluant node_modules éventuels
             callback "building" "Projet statique détecté — copie directe"
             cd "$SRC_DIR"
             find . -maxdepth 1 ! -name node_modules ! -name '.' -exec cp -r {} "$WWW_DIR"/ \;
@@ -315,6 +327,11 @@ jobs:
 
           [ -f "$WWW_DIR/index.html" ] || find "$WWW_DIR" -iname "index.htm*" -exec cp {} "$WWW_DIR/index.html" \; 2>/dev/null || true
           [ -f "$WWW_DIR/index.html" ] || fail "Aucun index.html trouvé après build — impossible de continuer"
+      - name: "Créer le projet Cordova + plateforme Android"
+        run: |
+          source lib.sh
+          WWW_DIR="$WORKDIR/www"
+          download_icon_if_any
 
           callback "building" "Création du projet Cordova..."
           cd "$WORKDIR"
@@ -330,6 +347,10 @@ jobs:
             mkdir -p res/icon/android
             for size in 36 48 72 96 144 192; do cp "$ICON_LOCAL" "res/icon/android/icon-$size.png"; done
           fi
+      - name: "Compiler et récupérer les artefacts (Gradle)"
+        run: |
+          source lib.sh
+          cd "$WORKDIR/cdvapp"
 
           callback "building" "Compilation Gradle ($BUILD_TYPE)..."
           if [ "$BUILD_TYPE" = "release" ]; then
@@ -351,31 +372,44 @@ jobs:
             ./gradlew bundleRelease 2>&1 | tail -n 60 || echo "⚠️  bundleRelease a échoué, AAB non fourni"
             AAB=$(find app/build/outputs/bundle -iname "*.aab" | head -n 1)
             [ -n "$AAB" ] && upload_artifact "$AAB" "aab"
-            cd ../..
           fi
-
+      - name: "Callback de succès"
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-cordova (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-cordova (voir logs GitHub Actions)"}' || true
   # ===========================================================
-  # 2) Web moderne / Capacitor — svelte, angular, solidjs, preact, ionic, capacitor, nativescript
+  # 2) Web moderne / Capacitor — svelte, angular, solidjs,
+  #    preact, ionic, capacitor, nativescript
   # ===========================================================
   build-capacitor:
     if: contains(fromJSON('["svelte","angular","solidjs","preact","ionic","capacitor","nativescript"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
-      - name: Build
+      - name: Cache npm + Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: capacitor-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            capacitor-${{ runner.os }}-
+      - name: "Préparer les fonctions communes"
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -544,41 +578,45 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        run: |
+          source lib.sh
           download_source
+          download_icon_if_any
+      - name: "NativeScript : build dédié"
+        if: inputs.project_type == 'nativescript'
+        run: |
+          source lib.sh
           download_icon_if_any
           cd "$SRC_DIR"
 
-          # ---- NativeScript a un pipeline distinct (pas de "web build" classique) ----
-          if [ "$PROJECT_TYPE" = "nativescript" ]; then
-            callback "building" "Projet NativeScript détecté — installation..."
-            npm install -g @nativescript/cli --no-audit --no-fund 2>&1 | tail -n 20
-            npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | tail -n 50 \
-              || npm install --no-audit --no-fund --force 2>&1 | tail -n 50
-            [ -f "nativescript.config.ts" ] || [ -f "nsconfig.json" ] \
-              || echo "⚠️  Config NativeScript absente — ns tentera un mode par défaut"
-            callback "building" "Compilation NativeScript Android ($BUILD_TYPE)..."
-            if [ "$BUILD_TYPE" = "release" ]; then
-              prepare_keystore
-              ns build android --release \
-                --key-store-path "$KEYSTORE_PATH" --key-store-password "$KEYSTORE_PASSWORD" \
-                --key-store-alias "$KEYSTORE_ALIAS" --key-store-alias-password "$KEYSTORE_PASSWORD" \
-                2>&1 | tail -n 100 || fail "Build NativeScript release échoué"
-            else
-              ns build android 2>&1 | tail -n 100 || fail "Build NativeScript debug échoué"
-            fi
-            APK=$(find platforms/android -iname "*.apk" 2>/dev/null | head -n 1)
-            [ -n "$APK" ] || fail "Aucun APK produit par NativeScript"
-            upload_artifact "$APK" "apk" || fail "Échec upload APK"
-            callback "success" "Build terminé avec succès"
-            exit 0
-          fi
+          callback "building" "Projet NativeScript détecté — installation..."
+          npm install -g @nativescript/cli --no-audit --no-fund 2>&1 | tail -n 20
+          npm install --no-audit --no-fund --legacy-peer-deps 2>&1 | tail -n 50 \
+            || npm install --no-audit --no-fund --force 2>&1 | tail -n 50
+          [ -f "nativescript.config.ts" ] || [ -f "nsconfig.json" ] \
+            || echo "⚠️  Config NativeScript absente — ns tentera un mode par défaut"
 
-          # ---- Pipeline Capacitor générique (svelte/angular/solid/preact/ionic/capacitor) ----
+          callback "building" "Compilation NativeScript Android ($BUILD_TYPE)..."
+          if [ "$BUILD_TYPE" = "release" ]; then
+            prepare_keystore
+            ns build android --release \
+              --key-store-path "$KEYSTORE_PATH" --key-store-password "$KEYSTORE_PASSWORD" \
+              --key-store-alias "$KEYSTORE_ALIAS" --key-store-alias-password "$KEYSTORE_PASSWORD" \
+              2>&1 | tail -n 100 || fail "Build NativeScript release échoué"
+          else
+            ns build android 2>&1 | tail -n 100 || fail "Build NativeScript debug échoué"
+          fi
+          APK=$(find platforms/android -iname "*.apk" 2>/dev/null | head -n 1)
+          [ -n "$APK" ] || fail "Aucun APK produit par NativeScript"
+          upload_artifact "$APK" "apk" || fail "Échec upload APK"
+          callback "success" "Build terminé avec succès"
+      - name: "Construire les assets web (npm)"
+        if: inputs.project_type != 'nativescript'
+        run: |
+          source lib.sh
+          cd "$SRC_DIR"
           WEB_DIR="$WORKDIR/webdist"
           mkdir -p "$WEB_DIR"
 
@@ -609,10 +647,17 @@ jobs:
           fi
 
           [ -f "$WEB_DIR/index.html" ] || fail "Aucun index.html trouvé dans le build — vérifie ton projet"
+      - name: "Initialiser Capacitor + plateforme Android"
+        if: inputs.project_type != 'nativescript'
+        run: |
+          source lib.sh
+          download_icon_if_any
+          WEB_DIR="$WORKDIR/webdist"
 
           callback "building" "Initialisation Capacitor..."
           cd "$WORKDIR"
-          mkdir capapp && cd capapp
+          mkdir -p capapp && cd capapp
+          rm -rf www
           cp -r "$WEB_DIR" www
           npm init -y >/dev/null 2>&1
           npm install @capacitor/core @capacitor/cli @capacitor/android --no-audit --no-fund 2>&1 | tail -n 30 \
@@ -625,10 +670,14 @@ jobs:
           if [ -n "${ICON_LOCAL:-}" ]; then
             for d in android/app/src/main/res/mipmap-*; do cp "$ICON_LOCAL" "$d/ic_launcher.png" 2>/dev/null || true; done
           fi
+      - name: "Compiler et récupérer l'APK (Gradle)"
+        if: inputs.project_type != 'nativescript'
+        run: |
+          source lib.sh
+          cd "$WORKDIR/capapp/android"
+          chmod +x gradlew 2>/dev/null || true
 
           callback "building" "Compilation Gradle ($BUILD_TYPE)..."
-          cd android
-          chmod +x gradlew 2>/dev/null || true
           if [ "$BUILD_TYPE" = "release" ]; then
             prepare_keystore
             cp "$KEYSTORE_PATH" app/release.keystore
@@ -658,29 +707,44 @@ jobs:
           fi
           [ -n "$APK" ] || fail "Aucun APK produit"
           upload_artifact "$APK" "apk" || fail "Échec upload APK"
-
+      - name: "Callback de succès"
+        if: inputs.project_type != 'nativescript'
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-capacitor (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-capacitor (voir logs GitHub Actions)"}' || true
   # ===========================================================
-  # 3) Mobile natif — react-native, kotlin, java, kotlin-multiplatform
+  # 3) Mobile natif — react-native, kotlin, java,
+  #    kotlin-multiplatform
   # ===========================================================
   build-native:
     if: contains(fromJSON('["react-native","kotlin","java","kotlin-multiplatform"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/setup-node@v4
         with: { node-version: "20" }
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
-      - name: Build
+      - name: Cache npm + Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: native-${{ runner.os }}-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            native-${{ runner.os }}-
+      - name: "Préparer les fonctions communes"
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -849,12 +913,15 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        run: |
+          source lib.sh
           download_source
+          download_icon_if_any
+      - name: "Préparer le projet Android (React Native / Gradle / scaffold)"
+        run: |
+          source lib.sh
           download_icon_if_any
           cd "$SRC_DIR"
 
@@ -867,21 +934,16 @@ jobs:
             ANDROID_DIR="$SRC_DIR/android"
             [ -d "$ANDROID_DIR" ] || fail "react-native: dossier android/ introuvable (projet non initialisé avec 'npx react-native init')"
           else
-            # kotlin / java / kotlin-multiplatform : on cherche un projet gradle
             GRADLE_DIR="$(find_dir_containing 'settings.gradle*')"
             if [ -z "$GRADLE_DIR" ]; then
               GRADLE_DIR="$(find_dir_containing 'build.gradle*')"
             fi
 
             if [ -z "$GRADLE_DIR" ]; then
-              # ---------- FALLBACK PERMISSIF ----------
-              # Pas de projet Gradle du tout : on scaffold un projet Android minimal
-              # autour des sources .kt / .java trouvées, pour maximiser le taux de succès.
               echo "⚠️  Aucun projet Gradle détecté — génération d'un projet Android minimal autour des sources fournies"
               callback "building" "Structure de projet absente — génération d'un squelette Android..."
               SCAFFOLD="$WORKDIR/scaffold"
               mkdir -p "$SCAFFOLD/app/src/main/java" "$SCAFFOLD/app/src/main/res/values"
-              # Copie de toutes les sources kt/java trouvées dans le zip
               find "$SRC_DIR" \( -iname "*.kt" -o -iname "*.java" \) -exec cp {} "$SCAFFOLD/app/src/main/java/" \;
               cat > "$SCAFFOLD/app/src/main/AndroidManifest.xml" <<EOF
           <manifest xmlns:android="http://schemas.android.com/apk/res/android" package="$PACKAGE_ID">
@@ -898,13 +960,13 @@ jobs:
               cat > "$SCAFFOLD/settings.gradle" <<EOF
           include ':app'
           EOF
-              cat > "$SCAFFOLD/build.gradle" <<'EOF'
+              cat > "$SCAFFOLD/build.gradle" <<'GEOF'
           buildscript {
             repositories { google(); mavenCentral() }
             dependencies { classpath 'com.android.tools.build:gradle:8.2.0'; classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22' }
           }
           allprojects { repositories { google(); mavenCentral() } }
-          EOF
+          GEOF
               cat > "$SCAFFOLD/app/build.gradle" <<EOF
           apply plugin: 'com.android.application'
           apply plugin: 'kotlin-android'
@@ -921,6 +983,11 @@ jobs:
             ANDROID_DIR="$GRADLE_DIR"
           fi
 
+          echo "ANDROID_DIR=$ANDROID_DIR" >> "$GITHUB_ENV"
+      - name: "Compiler et récupérer l'APK (Gradle)"
+        run: |
+          source lib.sh
+          download_icon_if_any
           cd "$ANDROID_DIR"
           [ -f "gradlew" ] || { echo "⚠️  gradlew manquant — génération du wrapper"; gradle wrapper --gradle-version 8.4 2>&1 | tail -n 20; }
           chmod +x gradlew 2>/dev/null || true
@@ -946,32 +1013,45 @@ jobs:
           [ -n "$APK" ] || APK=$(find . -iname "*.apk" | head -n 1)
           [ -n "$APK" ] || fail "Aucun APK produit par Gradle"
           upload_artifact "$APK" "apk" || fail "Échec upload APK"
-
+      - name: "Callback de succès"
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-native (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-native (voir logs GitHub Actions)"}' || true
   # ===========================================================
   # 4) Flutter — Android (apk/aab) + Windows (exe)
   # ===========================================================
   build-flutter:
     if: inputs.project_type == 'flutter'
     runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: subosito/flutter-action@v2
-        with: { channel: "stable" }
+        with: { channel: "stable", cache: true }
       - uses: actions/setup-java@v4
         if: inputs.platform != 'windows'
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: Build
+      - name: Cache pub + Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.pub-cache
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: flutter-${{ runner.os }}-${{ inputs.platform }}-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: |
+            flutter-${{ runner.os }}-${{ inputs.platform }}-
+      - name: "Préparer les fonctions communes"
         shell: bash
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -1140,12 +1220,17 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        shell: bash
+        run: |
+          source lib.sh
           download_source
+          download_icon_if_any
+      - name: "Préparer le projet Flutter (scaffold si besoin) + pub get"
+        shell: bash
+        run: |
+          source lib.sh
           download_icon_if_any
           cd "$SRC_DIR"
 
@@ -1168,20 +1253,25 @@ jobs:
           if [ -n "${ICON_LOCAL:-}" ] && [ -d "android/app/src/main/res" ]; then
             for d in android/app/src/main/res/mipmap-*; do [ -d "$d" ] && cp "$ICON_LOCAL" "$d/ic_launcher.png" 2>/dev/null; done
           fi
-
-          if [ "$PLATFORM" = "windows" ]; then
-            callback "building" "Compilation Flutter Windows (release)..."
-            flutter config --enable-windows-desktop 2>&1 | tail -n 10
-            flutter build windows --release 2>&1 | tail -n 150 || fail "flutter build windows a échoué"
-            EXE=$(find build/windows -iname "*.exe" | head -n 1)
-            [ -n "$EXE" ] || fail "Aucun .exe produit par Flutter"
-            # Empaqueter le dossier release complet (dépendances DLL incluses) en zip,
-            # mais on remonte l'exe seul comme artefact principal
-            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
-            callback "success" "Build terminé avec succès"
-            exit 0
-          fi
-
+      - name: "Compiler pour Windows"
+        if: inputs.platform == 'windows'
+        shell: bash
+        run: |
+          source lib.sh
+          cd "$SRC_DIR"
+          callback "building" "Compilation Flutter Windows (release)..."
+          flutter config --enable-windows-desktop 2>&1 | tail -n 10
+          flutter build windows --release 2>&1 | tail -n 150 || fail "flutter build windows a échoué"
+          EXE=$(find build/windows -iname "*.exe" | head -n 1)
+          [ -n "$EXE" ] || fail "Aucun .exe produit par Flutter"
+          upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+          callback "success" "Build terminé avec succès"
+      - name: "Compiler pour Android"
+        if: inputs.platform != 'windows'
+        shell: bash
+        run: |
+          source lib.sh
+          cd "$SRC_DIR"
           callback "building" "Compilation Flutter Android ($BUILD_TYPE)..."
           if [ "$BUILD_TYPE" = "release" ]; then
             prepare_keystore
@@ -1213,22 +1303,25 @@ jobs:
             [ -n "$APK" ] || APK=$(find build/app/outputs -iname "*.apk" | head -n 1)
             [ -n "$APK" ] && upload_artifact "$APK" "apk" || fail "Aucun APK produit"
           fi
-
+      - name: "Callback de succès"
+        if: inputs.platform != 'windows'
+        shell: bash
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         shell: bash
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-flutter (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-flutter (voir logs GitHub Actions)"}' || true
   # ===========================================================
   # 5) .NET MAUI / C# — Android (apk) + Windows (exe)
   # ===========================================================
   build-dotnet:
     if: contains(fromJSON('["dotnet-maui","maui","csharp"]'), inputs.project_type)
     runs-on: ${{ inputs.platform == 'windows' && 'windows-latest' || 'ubuntu-latest' }}
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: actions/setup-dotnet@v4
         with: { dotnet-version: "8.0.x" }
@@ -1237,9 +1330,21 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: Build
+      - name: Cache NuGet + Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.nuget/packages
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: dotnet-${{ runner.os }}-${{ inputs.platform }}-${{ hashFiles('**/*.csproj') }}
+          restore-keys: |
+            dotnet-${{ runner.os }}-${{ inputs.platform }}-
+      - name: "Préparer les fonctions communes"
         shell: bash
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -1408,45 +1513,59 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        shell: bash
+        run: |
+          source lib.sh
           download_source
+          download_icon_if_any
+      - name: "Localiser le projet + installer les workloads MAUI"
+        shell: bash
+        run: |
+          source lib.sh
           download_icon_if_any
           cd "$SRC_DIR"
 
           CSPROJ=$(find_any "*.csproj")
           [ -n "$CSPROJ" ] || fail ".NET MAUI: aucun fichier .csproj trouvé dans le projet"
           PROJ_DIR=$(dirname "$CSPROJ")
-          cd "$PROJ_DIR"
 
           callback "building" "Installation des workloads .NET MAUI..."
           dotnet workload install maui --ignore-failed-sources 2>&1 | tail -n 60 \
             || fail "Installation du workload MAUI échouée"
 
+          cd "$PROJ_DIR"
           if [ -n "${ICON_LOCAL:-}" ]; then
             mkdir -p Resources/AppIcon
             cp "$ICON_LOCAL" Resources/AppIcon/appicon.png 2>/dev/null || true
           fi
 
-          CONFIG="Debug"
-          [ "$BUILD_TYPE" = "release" ] && CONFIG="Release"
-
-          if [ "$PLATFORM" = "windows" ]; then
-            callback "building" "Compilation .NET MAUI Windows ($CONFIG)..."
-            FRAMEWORK=$(grep -o 'net[0-9.]*-windows[0-9.]*' "$(basename "$CSPROJ")" | head -n 1)
-            [ -z "$FRAMEWORK" ] && FRAMEWORK="net8.0-windows10.0.19041.0"
-            dotnet publish -f "$FRAMEWORK" -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64 \
-              2>&1 | tail -n 150 || fail "dotnet publish (Windows) a échoué"
-            EXE=$(find bin -iname "*.exe" | grep -vi 'signtool\|makeappx' | head -n 1)
-            [ -n "$EXE" ] || fail "Aucun .exe produit"
-            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
-            callback "success" "Build terminé avec succès"
-            exit 0
-          fi
-
+          echo "PROJ_DIR=$PROJ_DIR" >> "$GITHUB_ENV"
+          echo "CSPROJ=$CSPROJ" >> "$GITHUB_ENV"
+      - name: "Compiler pour Windows"
+        if: inputs.platform == 'windows'
+        shell: bash
+        run: |
+          source lib.sh
+          cd "$PROJ_DIR"
+          CONFIG="Debug"; [ "$BUILD_TYPE" = "release" ] && CONFIG="Release"
+          callback "building" "Compilation .NET MAUI Windows ($CONFIG)..."
+          FRAMEWORK=$(grep -o 'net[0-9.]*-windows[0-9.]*' "$(basename "$CSPROJ")" | head -n 1)
+          [ -z "$FRAMEWORK" ] && FRAMEWORK="net8.0-windows10.0.19041.0"
+          dotnet publish -f "$FRAMEWORK" -c "$CONFIG" -p:WindowsPackageType=None -p:SelfContained=true -r win-x64 \
+            2>&1 | tail -n 150 || fail "dotnet publish (Windows) a échoué"
+          EXE=$(find bin -iname "*.exe" | grep -vi 'signtool\|makeappx' | head -n 1)
+          [ -n "$EXE" ] || fail "Aucun .exe produit"
+          upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+          callback "success" "Build terminé avec succès"
+      - name: "Compiler pour Android"
+        if: inputs.platform != 'windows'
+        shell: bash
+        run: |
+          source lib.sh
+          cd "$PROJ_DIR"
+          CONFIG="Debug"; [ "$BUILD_TYPE" = "release" ] && CONFIG="Release"
           callback "building" "Compilation .NET MAUI Android ($CONFIG)..."
           if [ "$CONFIG" = "Release" ]; then
             prepare_keystore
@@ -1466,17 +1585,21 @@ jobs:
           fi
           [ -n "$APK" ] || fail "Aucun APK produit par .NET MAUI"
           upload_artifact "$APK" "apk" || fail "Échec upload APK"
-
+      - name: "Callback de succès"
+        if: inputs.platform != 'windows'
+        shell: bash
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         shell: bash
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-dotnet (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-dotnet (voir logs GitHub Actions)"}' || true
   # ===========================================================
-  # 6) Python — Android (Buildozer, fallback Briefcase) + Windows (PyInstaller)
+  # 6) Python — Android (Buildozer, fallback Briefcase) +
+  #    Windows (PyInstaller)
   # ===========================================================
   build-python:
     if: inputs.project_type == 'python'
@@ -1490,15 +1613,33 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: Dependances systeme Buildozer (Android uniquement)
+      - name: Dépendances système Buildozer (Android uniquement)
         if: inputs.platform != 'windows'
         run: |
           sudo apt-get update -y
           sudo apt-get install -y git zip unzip openjdk-17-jdk python3-pip autoconf libtool pkg-config \
             zlib1g-dev libncurses5-dev cmake libffi-dev libssl-dev
-      - name: Build
+      - name: Cache Buildozer (SDK/NDK/toolchain) + pip
+        if: inputs.platform != 'windows'
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            ~/.cache/pip
+          key: buildozer-${{ runner.os }}-v1
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+      - name: Cache pip (Windows)
+        if: inputs.platform == 'windows'
+        uses: actions/cache@v4
+        with:
+          path: ~/AppData/Local/pip/Cache
+          key: pip-windows-v1
+      - name: "Préparer les fonctions communes"
         shell: bash
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -1667,16 +1808,20 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        shell: bash
+        run: |
+          source lib.sh
           download_source
+          download_icon_if_any
+      - name: "Localiser le script principal + dépendances"
+        shell: bash
+        run: |
+          source lib.sh
           download_icon_if_any
           cd "$SRC_DIR"
 
-          # Trouve le point d'entrée principal, où qu'il soit dans le zip
           MAIN_PY=$(find_any "main.py")
           if [ -z "$MAIN_PY" ]; then
             MAIN_PY=$(find "$SRC_DIR" -iname "*.py" | head -n 1)
@@ -1686,35 +1831,42 @@ jobs:
           cd "$MAIN_DIR"
           [ -f "$(basename "$MAIN_PY")" ] && [ "$(basename "$MAIN_PY")" != "main.py" ] && cp "$(basename "$MAIN_PY")" main.py
 
-          # Une éventuelle config "complexe" (Briefcase) prend le pas si présente
-          HAS_BRIEFCASE_CFG=false
-          if [ -f "$SRC_DIR/pyproject.toml" ] && grep -q "briefcase" "$SRC_DIR/pyproject.toml" 2>/dev/null; then
-            HAS_BRIEFCASE_CFG=true
-          fi
-
           if [ -f "requirements.txt" ]; then
             callback "building" "Installation des dépendances Python..."
             pip install -r requirements.txt 2>&1 | tail -n 60 || echo "⚠️  Certaines dépendances n'ont pas pu être installées"
           fi
 
-          if [ "$PLATFORM" = "windows" ]; then
-            callback "building" "Compilation Python → Windows (PyInstaller)..."
-            pip install pyinstaller 2>&1 | tail -n 20
-            ICON_FLAG=""
-            [ -n "${ICON_LOCAL:-}" ] && ICON_FLAG="--icon=$ICON_LOCAL"
-            pyinstaller --onefile --noconfirm --name "$(echo "$APP_NAME" | tr ' ' '_')" $ICON_FLAG main.py \
-              2>&1 | tail -n 150 || fail "PyInstaller a échoué"
-            EXE=$(find dist -iname "*.exe" | head -n 1)
-            [ -n "$EXE" ] || fail "Aucun .exe produit par PyInstaller"
-            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
-            callback "success" "Build terminé avec succès"
-            exit 0
+          echo "MAIN_DIR=$MAIN_DIR" >> "$GITHUB_ENV"
+      - name: "Compiler pour Windows (PyInstaller)"
+        if: inputs.platform == 'windows'
+        shell: bash
+        run: |
+          source lib.sh
+          download_icon_if_any
+          cd "$MAIN_DIR"
+          callback "building" "Compilation Python → Windows (PyInstaller)..."
+          pip install pyinstaller 2>&1 | tail -n 20
+          ICON_FLAG=""
+          [ -n "${ICON_LOCAL:-}" ] && ICON_FLAG="--icon=$ICON_LOCAL"
+          pyinstaller --onefile --noconfirm --name "$(echo "$APP_NAME" | tr ' ' '_')" $ICON_FLAG main.py \
+            2>&1 | tail -n 150 || fail "PyInstaller a échoué"
+          EXE=$(find dist -iname "*.exe" | head -n 1)
+          [ -n "$EXE" ] || fail "Aucun .exe produit par PyInstaller"
+          upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+          callback "success" "Build terminé avec succès"
+      - name: "Tenter Briefcase (si config détectée)"
+        if: inputs.platform != 'windows'
+        shell: bash
+        run: |
+          source lib.sh
+          cd "$SRC_DIR"
+          HAS_BRIEFCASE_CFG=false
+          if [ -f "pyproject.toml" ] && grep -q "briefcase" "pyproject.toml" 2>/dev/null; then
+            HAS_BRIEFCASE_CFG=true
           fi
 
-          # ---- Android ----
           if [ "$HAS_BRIEFCASE_CFG" = true ]; then
             callback "building" "Config Briefcase détectée — build via Briefcase..."
-            cd "$SRC_DIR"
             pip install briefcase 2>&1 | tail -n 20
             briefcase create android gradle 2>&1 | tail -n 80 && \
             briefcase build android gradle 2>&1 | tail -n 80 && \
@@ -1723,13 +1875,19 @@ jobs:
             if [ -n "$APK" ]; then
               upload_artifact "$APK" "apk" || fail "Échec upload APK"
               callback "success" "Build terminé avec succès (Briefcase)"
-              exit 0
+              echo "BRIEFCASE_DONE=true" >> "$GITHUB_ENV"
+            else
+              echo "⚠️  Briefcase a échoué — bascule sur Buildozer (fallback permissif)"
             fi
-            echo "⚠️  Briefcase a échoué — bascule sur Buildozer (fallback permissif)"
           fi
-
-          callback "building" "Compilation Python → Android (Buildozer)..."
+      - name: "Compiler pour Android (Buildozer)"
+        if: inputs.platform != 'windows' && env.BRIEFCASE_DONE != 'true'
+        shell: bash
+        run: |
+          source lib.sh
+          download_icon_if_any
           cd "$MAIN_DIR"
+          callback "building" "Compilation Python → Android (Buildozer)..."
           pip install buildozer cython 2>&1 | tail -n 30 || fail "Installation de Buildozer échouée"
 
           if [ ! -f "buildozer.spec" ]; then
@@ -1759,22 +1917,25 @@ jobs:
           APK=$(find bin -iname "*.apk" | head -n 1)
           [ -n "$APK" ] || fail "Aucun APK produit par Buildozer"
           upload_artifact "$APK" "apk" || fail "Échec upload APK"
-
+      - name: "Callback de succès"
+        if: inputs.platform != 'windows' && env.BRIEFCASE_DONE != 'true'
+        shell: bash
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         shell: bash
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-python (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-python (voir logs GitHub Actions)"}' || true
   # ===========================================================
   # 7) Go — Android (gomobile) + Windows (cross-compile)
   # ===========================================================
   build-go:
     if: inputs.project_type == 'go'
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
       - uses: actions/setup-go@v5
         with: { go-version: "1.22" }
@@ -1783,11 +1944,22 @@ jobs:
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
         if: inputs.platform != 'windows'
-      - name: NDK (necessaire a gomobile)
+      - name: NDK (nécessaire à gomobile)
         if: inputs.platform != 'windows'
         run: echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk-bundle" >> "$GITHUB_ENV"
-      - name: Build
+      - name: Cache Go modules + build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/go/pkg/mod
+            ~/.cache/go-build
+          key: go-${{ runner.os }}-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            go-${{ runner.os }}-
+      - name: "Préparer les fonctions communes"
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -1956,18 +2128,19 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet"
+        run: |
+          source lib.sh
           download_source
           download_icon_if_any
           if [ -n "${ICON_LOCAL:-}" ]; then
             echo "ℹ️  Icône fournie mais gomobile ne permet pas d'injecter une icône de launcher facilement — icône par défaut conservée pour ce build Go"
           fi
+      - name: "Localiser main.go + préparer le module"
+        run: |
+          source lib.sh
           cd "$SRC_DIR"
-
           MAIN_GO=$(find_any "main.go")
           [ -n "$MAIN_GO" ] || fail "Aucun fichier main.go trouvé dans le projet"
           MAIN_DIR=$(dirname "$MAIN_GO")
@@ -1976,57 +2149,67 @@ jobs:
           [ -f "go.mod" ] || { echo "⚠️  go.mod absent — initialisation automatique"; go mod init "$(echo "$PACKAGE_ID" | tr 'A-Z' 'a-z')" 2>&1 | tail -n 10; }
           go mod tidy 2>&1 | tail -n 30 || echo "⚠️  go mod tidy incomplet, on continue"
 
-          if [ "$PLATFORM" = "windows" ]; then
-            callback "building" "Compilation Go → Windows (cross-compile)..."
-            GOOS=windows GOARCH=amd64 go build -o "$(echo "$APP_NAME" | tr ' ' '_').exe" . \
-              2>&1 | tail -n 100 || fail "go build (windows) a échoué"
-            EXE=$(find . -maxdepth 1 -iname "*.exe" | head -n 1)
-            [ -n "$EXE" ] || fail "Aucun .exe produit"
-            upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
-            callback "success" "Build terminé avec succès"
-            exit 0
-          fi
-
+          echo "MAIN_DIR=$MAIN_DIR" >> "$GITHUB_ENV"
+      - name: "Compiler pour Windows (cross-compile)"
+        if: inputs.platform == 'windows'
+        run: |
+          source lib.sh
+          cd "$MAIN_DIR"
+          callback "building" "Compilation Go → Windows (cross-compile)..."
+          GOOS=windows GOARCH=amd64 go build -o "$(echo "$APP_NAME" | tr ' ' '_').exe" . \
+            2>&1 | tail -n 100 || fail "go build (windows) a échoué"
+          EXE=$(find . -maxdepth 1 -iname "*.exe" | head -n 1)
+          [ -n "$EXE" ] || fail "Aucun .exe produit"
+          upload_artifact "$EXE" "exe" || fail "Échec upload EXE"
+          callback "success" "Build terminé avec succès"
+      - name: "Compiler pour Android (gomobile)"
+        if: inputs.platform != 'windows'
+        run: |
+          source lib.sh
+          cd "$MAIN_DIR"
           callback "building" "Compilation Go → Android (gomobile)..."
           go install golang.org/x/mobile/cmd/gomobile@latest 2>&1 | tail -n 30
           export PATH="$PATH:$(go env GOPATH)/bin"
           gomobile init 2>&1 | tail -n 30 || fail "gomobile init a échoué"
 
-          # gomobile attend un package "app" exposant une lib (pas un main classique) ;
-          # en mode permissif, si le projet n'est pas déjà structuré ainsi, on tente
-          # quand même un bind générique sur le module courant.
-          if [ "$BUILD_TYPE" = "release" ]; then
-            gomobile build -target=android -o "app.apk" . 2>&1 | tail -n 150 \
-              || fail "gomobile build a échoué (le projet doit exposer un package mobile compatible)"
-          else
-            gomobile build -target=android -o "app.apk" . 2>&1 | tail -n 150 \
-              || fail "gomobile build a échoué (le projet doit exposer un package mobile compatible)"
-          fi
+          gomobile build -target=android -o "app.apk" . 2>&1 | tail -n 150 \
+            || fail "gomobile build a échoué (le projet doit exposer un package mobile compatible)"
 
           APK=$(find . -maxdepth 1 -iname "*.apk" | head -n 1)
           [ -n "$APK" ] || fail "Aucun APK produit par gomobile"
           upload_artifact "$APK" "apk" || fail "Échec upload APK"
-
+      - name: "Callback de succès"
+        if: inputs.platform != 'windows'
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-go (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-go (voir logs GitHub Actions)"}' || true
   # ===========================================================
   # 8) Autres — godot, lua (Solar2D), ruby (RubyMotion)
   # ===========================================================
   build-other:
     if: contains(fromJSON('["godot","lua","ruby"]'), inputs.project_type)
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 30
     steps:
       - uses: actions/setup-java@v4
         with: { distribution: "temurin", java-version: "17" }
       - uses: android-actions/setup-android@v3
-      - name: Build
+      - name: Cache Godot engine + export templates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/godot-engine
+            ~/.local/share/godot/export_templates
+          key: godot-${{ runner.os }}-v4.2.1
+      - name: "Préparer les fonctions communes"
         run: |
+          cat > lib.sh << 'LIBEOF'
+          #!/usr/bin/env bash
           # ============================================================
           # lib.sh — fonctions partagées par tous les builders PhilBuilder
           # À sourcer en début de chaque script : `source scripts/lib.sh`
@@ -2195,50 +2378,60 @@ jobs:
           }
 
           echo "✅ lib.sh chargée — WORKDIR=$WORKDIR"
-
-          # ============================================================
-          # BUILD LOGIC
-          # ============================================================
-
+          LIBEOF
+      - name: "Télécharger le projet et l'icône"
+        run: |
+          source lib.sh
           download_source
+          download_icon_if_any
+      - name: "Build Godot"
+        if: inputs.project_type == 'godot'
+        run: |
+          source lib.sh
           download_icon_if_any
           cd "$SRC_DIR"
 
-          case "$PROJECT_TYPE" in
-            godot)
-              PROJECT_GODOT=$(find_any "project.godot")
-              [ -n "$PROJECT_GODOT" ] || fail "Aucun fichier project.godot trouvé — ce n'est pas un projet Godot valide"
-              cd "$(dirname "$PROJECT_GODOT")"
-              callback "building" "Téléchargement de Godot + templates d'export..."
-              GODOT_VERSION="4.2.1"
-              curl -sSL -o godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" \
-                || fail "Téléchargement de Godot échoué"
-              unzip -q godot.zip -d godot_bin
-              GODOT_BIN=$(find godot_bin -type f -iname "Godot_*" | head -n 1)
-              chmod +x "$GODOT_BIN"
-              curl -sSL -o templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" \
-                || fail "Téléchargement des templates d'export échoué"
-              mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-              unzip -q -j templates.tpz -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          PROJECT_GODOT=$(find_any "project.godot")
+          [ -n "$PROJECT_GODOT" ] || fail "Aucun fichier project.godot trouvé — ce n'est pas un projet Godot valide"
+          cd "$(dirname "$PROJECT_GODOT")"
+          callback "building" "Téléchargement de Godot + templates d'export..."
+          GODOT_VERSION="4.2.1"
+          GODOT_CACHE_DIR="$HOME/.cache/godot-engine"
+          GODOT_BIN="$GODOT_CACHE_DIR/Godot_v${GODOT_VERSION}-stable_linux.x86_64"
+          if [ ! -f "$GODOT_BIN" ]; then
+            echo "⬇️  Godot non trouvé en cache, téléchargement..."
+            mkdir -p "$GODOT_CACHE_DIR"
+            curl -sSL -o /tmp/godot.zip "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_linux.x86_64.zip" \
+              || fail "Téléchargement de Godot échoué"
+            unzip -q -o /tmp/godot.zip -d "$GODOT_CACHE_DIR"
+            chmod +x "$GODOT_BIN"
+          else
+            echo "✅ Godot trouvé en cache — téléchargement évité"
+          fi
+          if [ ! -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable ]; then
+            echo "⬇️  Templates d'export non trouvés en cache, téléchargement..."
+            curl -sSL -o /tmp/templates.tpz "https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable/Godot_v${GODOT_VERSION}-stable_export_templates.tpz" \
+              || fail "Téléchargement des templates d'export échoué"
+            mkdir -p ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+            unzip -q -j /tmp/templates.tpz -d ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          else
+            echo "✅ Templates d'export trouvés en cache — téléchargement évité"
+          fi
 
-              # Icône : Godot lit icon.svg/icon.png à la racine du projet pour l'éditeur,
-              # mais l'icône du launcher Android se règle via les options du preset
-              # d'export. On copie le fichier fourni et on force les deux si on génère
-              # le preset nous-mêmes.
-              if [ -n "${ICON_LOCAL:-}" ]; then
-                cp "$ICON_LOCAL" icon.png
-                echo "🎨 icon.png placée à la racine du projet Godot"
-              fi
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            cp "$ICON_LOCAL" icon.png
+            echo "🎨 icon.png placée à la racine du projet Godot"
+          fi
 
-              callback "building" "Export Android Godot ($BUILD_TYPE)..."
-              if ! grep -q "\[preset.0\]" export_presets.cfg 2>/dev/null; then
-                echo "⚠️  Aucun preset d'export Android configuré — génération d'un preset minimal"
-                ICON_OPTIONS=""
-                if [ -n "${ICON_LOCAL:-}" ]; then
-                  ICON_OPTIONS='launcher_icons/main_192x192="res://icon.png"
+          callback "building" "Export Android Godot ($BUILD_TYPE)..."
+          if ! grep -q "\[preset.0\]" export_presets.cfg 2>/dev/null; then
+            echo "⚠️  Aucun preset d'export Android configuré — génération d'un preset minimal"
+            ICON_OPTIONS=""
+            if [ -n "${ICON_LOCAL:-}" ]; then
+              ICON_OPTIONS='launcher_icons/main_192x192="res://icon.png"
           launcher_icons/adaptive_foreground_432x432="res://icon.png"'
-                fi
-                cat > export_presets.cfg <<EOF
+            fi
+            cat > export_presets.cfg <<EOF
           [preset.0]
           name="Android"
           platform="Android"
@@ -2248,73 +2441,73 @@ jobs:
           [preset.0.options]
           $ICON_OPTIONS
           EOF
-              elif [ -n "${ICON_LOCAL:-}" ]; then
-                echo "ℹ️  export_presets.cfg fourni par le projet — icône root copiée mais pas forcée dans le preset existant"
-              fi
-              OUT_APK="$OUT_DIR/app.apk"
-              if [ "$BUILD_TYPE" = "release" ]; then
-                prepare_keystore
-                "$GODOT_BIN" --headless --export-release "Android" "$OUT_APK" 2>&1 | tail -n 100 || fail "Export Godot release a échoué"
-              else
-                "$GODOT_BIN" --headless --export-debug "Android" "$OUT_APK" 2>&1 | tail -n 100 || fail "Export Godot debug a échoué"
-              fi
-              [ -f "$OUT_APK" ] || fail "Aucun APK produit par Godot"
-              upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
-              ;;
-
-            lua)
-              callback "building" "Projet Lua/Solar2D — export Android..."
-              MAIN_LUA=$(find_any "main.lua")
-              [ -n "$MAIN_LUA" ] || fail "Aucun fichier main.lua trouvé"
-              cd "$(dirname "$MAIN_LUA")"
-              if command -v Solar2DConsole >/dev/null 2>&1; then
-                Solar2DConsole -platform android -projectpath "$PWD" -dstdir "$OUT_DIR" 2>&1 | tail -n 100 \
-                  || fail "Export Solar2D a échoué"
-                OUT_APK=$(find "$OUT_DIR" -iname "*.apk" | head -n 1)
-              else
-                fail "Solar2D CLI (Solar2DConsole) n'est pas disponible sur ce runner — build Lua impossible pour l'instant"
-              fi
-              [ -n "$OUT_APK" ] || fail "Aucun APK produit"
-              upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
-              ;;
-
-            ruby)
-              callback "building" "Projet Ruby/RubyMotion — build Android..."
-              RAKEFILE=$(find_any "Rakefile")
-              [ -n "$RAKEFILE" ] || fail "Aucun Rakefile trouvé (projet RubyMotion attendu)"
-              cd "$(dirname "$RAKEFILE")"
-              if command -v motion >/dev/null 2>&1; then
-                motion build --target=android 2>&1 | tail -n 150 || fail "motion build a échoué"
-                OUT_APK=$(find . -iname "*.apk" | head -n 1)
-              else
-                fail "RubyMotion (commande 'motion') n'est pas disponible sur ce runner — build Ruby impossible pour l'instant"
-              fi
-              [ -n "$OUT_APK" ] || fail "Aucun APK produit"
-              upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
-              ;;
-
-            *)
-              fail "Type de projet non reconnu par build-other.sh : $PROJECT_TYPE"
-              ;;
-          esac
-
+          elif [ -n "${ICON_LOCAL:-}" ]; then
+            echo "ℹ️  export_presets.cfg fourni par le projet — icône root copiée mais pas forcée dans le preset existant"
+          fi
+          OUT_APK="$OUT_DIR/app.apk"
+          if [ "$BUILD_TYPE" = "release" ]; then
+            prepare_keystore
+            "$GODOT_BIN" --headless --export-release "Android" "$OUT_APK" 2>&1 | tail -n 100 || fail "Export Godot release a échoué"
+          else
+            "$GODOT_BIN" --headless --export-debug "Android" "$OUT_APK" 2>&1 | tail -n 100 || fail "Export Godot debug a échoué"
+          fi
+          [ -f "$OUT_APK" ] || fail "Aucun APK produit par Godot"
+          upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
+      - name: "Build Lua (Solar2D)"
+        if: inputs.project_type == 'lua'
+        run: |
+          source lib.sh
+          cd "$SRC_DIR"
+          callback "building" "Projet Lua/Solar2D — export Android..."
+          MAIN_LUA=$(find_any "main.lua")
+          [ -n "$MAIN_LUA" ] || fail "Aucun fichier main.lua trouvé"
+          cd "$(dirname "$MAIN_LUA")"
+          if command -v Solar2DConsole >/dev/null 2>&1; then
+            Solar2DConsole -platform android -projectpath "$PWD" -dstdir "$OUT_DIR" 2>&1 | tail -n 100 \
+              || fail "Export Solar2D a échoué"
+            OUT_APK=$(find "$OUT_DIR" -iname "*.apk" | head -n 1)
+          else
+            fail "Solar2D CLI (Solar2DConsole) n'est pas disponible sur ce runner — build Lua impossible pour l'instant"
+          fi
+          [ -n "$OUT_APK" ] || fail "Aucun APK produit"
+          upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
+      - name: "Build Ruby (RubyMotion)"
+        if: inputs.project_type == 'ruby'
+        run: |
+          source lib.sh
+          cd "$SRC_DIR"
+          callback "building" "Projet Ruby/RubyMotion — build Android..."
+          RAKEFILE=$(find_any "Rakefile")
+          [ -n "$RAKEFILE" ] || fail "Aucun Rakefile trouvé (projet RubyMotion attendu)"
+          cd "$(dirname "$RAKEFILE")"
+          if command -v motion >/dev/null 2>&1; then
+            motion build --target=android 2>&1 | tail -n 150 || fail "motion build a échoué"
+            OUT_APK=$(find . -iname "*.apk" | head -n 1)
+          else
+            fail "RubyMotion (commande 'motion') n'est pas disponible sur ce runner — build Ruby impossible pour l'instant"
+          fi
+          [ -n "$OUT_APK" ] || fail "Aucun APK produit"
+          upload_artifact "$OUT_APK" "apk" || fail "Échec upload APK"
+      - name: "Callback de succès"
+        run: |
+          source lib.sh
           callback "success" "Build terminé avec succès"
-      - name: Callback en cas d'echec inattendu
+      - name: "Callback en cas d'échec inattendu"
         if: failure()
         run: |
           curl -sS -X POST "$CALLBACK_URL" -H "Content-Type: application/json" \
-            -d '{"state":"error","message":"Echec inattendu du job build-other (voir logs GitHub Actions)"}' || true
-
+            -d '{"state":"error","message":"Échec inattendu du job build-other (voir logs GitHub Actions)"}' || true
   # ===========================================================
-  # 9) Garde-fou — evite un build bloque en "building" si le
-  #    project_type ne correspond a aucun job ci-dessus
+  # 9) Garde-fou — se déclenche si project_type ne correspond à
+  #    AUCUN job ci-dessus (évite un build qui reste bloqué en
+  #    "building" indéfiniment côté worker)
   # ===========================================================
   guard-unknown-type:
     if: |
       !contains(fromJSON('["web","react","vue","svelte","angular","solidjs","preact","ionic","capacitor","nativescript","react-native","kotlin","java","kotlin-multiplatform","flutter","dotnet-maui","maui","csharp","python","go","godot","lua","ruby"]'), inputs.project_type)
     runs-on: ubuntu-latest
     steps:
-      - name: Prevenir le worker d'un type inconnu
+      - name: "Prévenir le worker d'un type inconnu"
         run: |
           curl -sS -X POST "${{ inputs.callback_url }}" -H "Content-Type: application/json" \
-            -d "{\"state\":\"error\",\"message\":\"Type de projet non supporte par le workflow: ${{ inputs.project_type }}\"}" || true
+            -d "{\"state\":\"error\",\"message\":\"Type de projet non supporté par le workflow: ${{ inputs.project_type }}\"}" || true
