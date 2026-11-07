@@ -262,29 +262,54 @@ env:
     download_icon_if_any() {
       ICON_LOCAL=""
       if [ -n "${ICON_URL:-}" ]; then
-        if [ -s "$WORKDIR/icon.png" ]; then
-          ICON_LOCAL="$WORKDIR/icon.png"
-        elif curl -sSL --fail -m 30 --retry 2 -o "$WORKDIR/icon.png" "$ICON_URL" && [ -s "$WORKDIR/icon.png" ]; then
-          ICON_LOCAL="$WORKDIR/icon.png"; echo "[ICON] Icone telechargee"
-        else
-          echo "[WARN]  Icone injoignable, icone par defaut"
+        if [ ! -s "$WORKDIR/icon.png" ]; then
+          if curl -sSL --fail -m 30 --retry 2 -o "$WORKDIR/icon.png" "$ICON_URL" && [ -s "$WORKDIR/icon.png" ]; then
+            echo "[ICON] telechargee ($(du -h "$WORKDIR/icon.png" | cut -f1))"
+          else
+            echo "[WARN] Icone injoignable ($ICON_URL), icone par defaut"; rm -f "$WORKDIR/icon.png"
+          fi
         fi
+        if [ -s "$WORKDIR/icon.png" ] && [ "$(head -c 4 "$WORKDIR/icon.png" | od -An -tx1 | tr -d ' \n')" != "89504e47" ]; then
+          # jpg/webp renomme en .png : on convertit en vrai PNG
+          if command -v convert >/dev/null 2>&1 && convert "$WORKDIR/icon.png" -resize 512x512 "png:$WORKDIR/icon_norm.png" 2>/dev/null; then
+            mv "$WORKDIR/icon_norm.png" "$WORKDIR/icon.png"; echo "[ICON] convertie en PNG"
+          else
+            echo "[WARN] L'icone n'est pas un PNG valide, ignoree"; rm -f "$WORKDIR/icon.png"
+          fi
+        fi
+        if [ -s "$WORKDIR/icon.png" ]; then ICON_LOCAL="$WORKDIR/icon.png"; fi
       fi
       export ICON_LOCAL
     }
 
-    # Remplace l'icone launcher d'un dossier res/ Android (supprime les
-    # anciennes variantes .xml/.webp pour eviter les "Duplicate resources")
+    # Remplace l'icone launcher d'un dossier res/ Android (supprime les anciennes
+    # variantes .xml/.webp/adaptive pour eviter les "Duplicate resources")
     apply_android_icon() {
-      local res="$1" d
-      if [ -z "${ICON_LOCAL:-}" ] || [ ! -d "$res" ]; then return 0; fi
+      local res="$1" pair d size
+      download_icon_if_any
+      if [ -z "${ICON_LOCAL:-}" ]; then echo "[WARN] Pas d'icone a appliquer"; return 0; fi
+      mkdir -p "$res"
       find "$res" -path '*/mipmap-*' -name 'ic_launcher*' -delete 2>/dev/null
-      for d in mdpi hdpi xhdpi xxhdpi xxxhdpi; do
+      for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+        d="${pair%%:*}"; size="${pair##*:}"
         mkdir -p "$res/mipmap-$d"
-        cp "$ICON_LOCAL" "$res/mipmap-$d/ic_launcher.png"
-        cp "$ICON_LOCAL" "$res/mipmap-$d/ic_launcher_round.png"
+        if command -v convert >/dev/null 2>&1; then
+          convert "$ICON_LOCAL" -resize "${size}x${size}" "$res/mipmap-$d/ic_launcher.png"
+        else
+          cp "$ICON_LOCAL" "$res/mipmap-$d/ic_launcher.png"
+        fi
+        cp "$res/mipmap-$d/ic_launcher.png" "$res/mipmap-$d/ic_launcher_round.png"
       done
-      echo "[ICON] Icone appliquee dans $res"
+      echo "[OK] Icone appliquee dans $res"
+    }
+
+    # Applique l'icone dans tous les src/main/res qui ont des mipmap-*
+    apply_android_icon_auto() {
+      local root="$1" res n=0
+      while IFS= read -r res; do
+        if ls -d "$res"/mipmap-* >/dev/null 2>&1; then apply_android_icon "$res"; n=$((n+1)); fi
+      done < <(find "$root" -type d -path '*/src/main/res' -not -path '*/build/*' -not -path '*/node_modules/*' 2>/dev/null)
+      if [ "$n" -eq 0 ] && [ -d "$root/app/src/main" ]; then apply_android_icon "$root/app/src/main/res"; fi
     }
 
     # ---- Keystore ------------------------------------------------
@@ -412,6 +437,7 @@ jobs:
             fi
           fi
           run_logged "cordova platform add android" retry 2 cordova platform add android
+          apply_android_icon_auto platforms/android
       - name: Compiler et recuperer les artefacts
         run: |
           source lib.sh
@@ -506,6 +532,7 @@ jobs:
           cd "$SRC_DIR"
           run_logged "install nativescript cli" retry 2 npm install -g @nativescript/cli --no-audit --no-fund
           npm_install "Projet NativeScript - npm install..."
+          if [ -d App_Resources/Android ]; then apply_android_icon_auto App_Resources/Android; fi
           callback "building" "Compilation NativeScript Android ($BUILD_TYPE)..."
           if [ "$BUILD_TYPE" = "release" ]; then
             prepare_keystore
@@ -714,7 +741,11 @@ jobs:
             fi
             ANDROID_DIR="$GRADLE_DIR"
           fi
-          apply_android_icon "$ANDROID_DIR/app/src/main/res"
+          apply_android_icon_auto "$ANDROID_DIR"
+          M="$ANDROID_DIR/app/src/main/AndroidManifest.xml"
+          if [ -f "$M" ] && [ -f "$ANDROID_DIR/app/src/main/res/mipmap-mdpi/ic_launcher.png" ] && ! grep -q 'android:icon' "$M"; then
+            sed -i 's|<application |<application android:icon="@mipmap/ic_launcher" |' "$M"
+          fi
           echo "ANDROID_DIR=$ANDROID_DIR" >> "$GITHUB_ENV"
       - name: Compiler et recuperer l'APK/AAB (Gradle)
         run: |
@@ -970,7 +1001,9 @@ jobs:
           run_logged "dotnet workload install" retry 2 dotnet workload install "$WL" --ignore-failed-sources
           if [ -n "${ICON_LOCAL:-}" ]; then
             mkdir -p "$PROJ_DIR/Resources/AppIcon"
-            cp "$ICON_LOCAL" "$PROJ_DIR/Resources/AppIcon/appicon.png"
+            cp "$ICON_LOCAL" "$PROJ_DIR/Resources/AppIcon/phil_icon.png"
+            perl -0pi -e 's|<MauiIcon\b[^>]*/>||g; s|</Project>|<ItemGroup><MauiIcon Include="Resources/AppIcon/phil_icon.png" Color="#FFFFFF" /></ItemGroup></Project>|' "$CSPROJ"
+            echo "[OK] MauiIcon remplace dans le csproj"
           fi
           echo "PROJ_DIR=$PROJ_DIR" >> "$GITHUB_ENV"
           echo "CSPROJ=$CSPROJ" >> "$GITHUB_ENV"
@@ -1160,12 +1193,20 @@ jobs:
             sed -i "s/^package.domain = .*/package.domain = $PKG_DOMAIN/" buildozer.spec
             sed -i "s/^requirements = .*/requirements = python3,kivy/" buildozer.spec
             sed -i "s/^#\?android.archs = .*/android.archs = arm64-v8a/" buildozer.spec
-            [ -n "${ICON_LOCAL:-}" ] && sed -i "s|^#icon.filename = .*|icon.filename = $ICON_LOCAL|" buildozer.spec
           fi
           # Acceptation automatique des licences SDK (remplace le piege `yes | buildozer` qui echoue avec pipefail)
           grep -q '^android.accept_sdk_license' buildozer.spec \
             && sed -i 's/^android.accept_sdk_license.*/android.accept_sdk_license = True/' buildozer.spec \
             || echo 'android.accept_sdk_license = True' >> buildozer.spec
+
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            cp "$ICON_LOCAL" icon.png
+            if grep -qE '^#?icon.filename' buildozer.spec; then
+              sed -i -E 's|^#?icon.filename.*|icon.filename = %(source.dir)s/icon.png|' buildozer.spec
+            else
+              sed -i '/^\[app\]/a icon.filename = %(source.dir)s/icon.png' buildozer.spec
+            fi
+          fi
 
           TARGET="debug"
           if [ "$BUILD_TYPE" = "release" ]; then
@@ -1377,7 +1418,14 @@ jobs:
           export/android/debug_keystore_pass = "android"
           EOF
 
-          [ -n "${ICON_LOCAL:-}" ] && cp "$ICON_LOCAL" icon.png
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            cp "$ICON_LOCAL" icon.png
+            if grep -q '^config/icon=' project.godot; then
+              sed -i 's|^config/icon=.*|config/icon="res://icon.png"|' project.godot
+            else
+              sed -i '/^\[application\]/a config/icon="res://icon.png"' project.godot
+            fi
+          fi
 
           OUT_APK="$OUT_DIR/app.apk"
           PRESET=""
