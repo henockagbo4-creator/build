@@ -278,6 +278,8 @@ env:
           fi
         fi
         if [ -s "$WORKDIR/icon.png" ]; then ICON_LOCAL="$WORKDIR/icon.png"; fi
+      else
+        echo "[WARN] Aucune icon_url recue du worker : icone par defaut"
       fi
       export ICON_LOCAL
     }
@@ -438,6 +440,35 @@ jobs:
           fi
           run_logged "cordova platform add android" retry 2 cordova platform add android
           apply_android_icon_auto platforms/android
+          if [ -n "${ICON_LOCAL:-}" ]; then
+            # Hook after_prepare : cordova regenere les icones a chaque build, on repasse apres
+            mkdir -p hooks
+            cat > hooks/phil_icon.sh <<'HOOK'
+          #!/usr/bin/env bash
+          ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+          RES="$ROOT/platforms/android/app/src/main/res"
+          ICON="__ICON__"
+          [ -d "$RES" ] || exit 0
+          find "$RES" -path '*/mipmap-*' -name 'ic_launcher*' -delete
+          for pair in mdpi:48 hdpi:72 xhdpi:96 xxhdpi:144 xxxhdpi:192; do
+            d="${pair%%:*}"; sz="${pair##*:}"
+            mkdir -p "$RES/mipmap-$d"
+            if command -v convert >/dev/null 2>&1; then
+              convert "$ICON" -resize "${sz}x${sz}" "$RES/mipmap-$d/ic_launcher.png"
+            else
+              cp "$ICON" "$RES/mipmap-$d/ic_launcher.png"
+            fi
+            cp "$RES/mipmap-$d/ic_launcher.png" "$RES/mipmap-$d/ic_launcher_round.png"
+          done
+          echo "[OK] Hook icone: icones remplacees dans $RES"
+          HOOK
+            sed -i "s|__ICON__|$ICON_LOCAL|" hooks/phil_icon.sh
+            chmod +x hooks/phil_icon.sh
+            sed -i 's#</widget>#<hook type="after_prepare" src="hooks/phil_icon.sh" /></widget>#' config.xml
+            echo "[OK] Hook icone declare dans config.xml"
+          else
+            echo "[WARN] Pas d'icone (icon_url vide ou injoignable) : icone Cordova par defaut"
+          fi
       - name: Compiler et recuperer les artefacts
         run: |
           source lib.sh
